@@ -76,7 +76,7 @@ object Podcasts {
         class Pause(val seconds: Double) : Block()
     }
 
-    class Script(val title: String, val style: String?, val blocks: List<Block>, val speakers: List<String>)
+    class Script(val title: String, val style: String?, val blocks: List<Block>, val speakers: List<String>, val make: Boolean = false)
 
     private val NOT_SPEAKERS = setOf("NOTE", "TIP", "WARNING", "TODO", "IMPORTANT", "SUMMARY", "TITLE", "STYLE",
         "MUSIC", "SOUND", "PAUSE", "EXAMPLE", "Q", "A", "NB", "PS", "TL;DR", "CAUTION", "NOTICE", "INDEX", "TOPICS")
@@ -102,6 +102,7 @@ object Podcasts {
         var text = raw.replace("\r\n", "\n").replace('\r', '\n').removePrefix("﻿")
         var title: String? = null
         var style: String? = null
+        var make = false
         val declared = HashSet<String>()
         if (text.startsWith("---\n")) {
             val end = text.indexOf("\n---", 4)
@@ -114,6 +115,7 @@ object Podcasts {
                         if (kv.size == 2) when (kv[0].trim().lowercase()) {
                             "title" -> title = kv[1].trim().trim('"', '\'').ifEmpty { null }
                             "style" -> style = kv[1].trim().lowercase().ifEmpty { null }
+                            "make" -> make = kv[1].trim().lowercase() in setOf("true", "yes", "1", "now")
                         }
                     } else if (inVoices) l.split(":", limit = 2).firstOrNull()?.trim()?.uppercase()?.takeIf { it.isNotEmpty() }
                         ?.let { declared += it }
@@ -191,7 +193,7 @@ object Podcasts {
             para += if (line.startsWith(">")) line.replaceFirst(Regex("^>+\\s?"), "") else line
         }
         flush()
-        return Script(title ?: fallbackTitle, style, blocks, speakers.toList())
+        return Script(title ?: fallbackTitle, style, blocks, speakers.toList(), make)
     }
 
     // ------------------------------------------------------------- sentences
@@ -274,6 +276,37 @@ object Podcasts {
     fun scripts(c: Context): List<File> = (dir(c).listFiles() ?: emptyArray())
         .filter { it.isFile && (it.name.endsWith(".txt") || it.name.endsWith(".md")) }.sortedByDescending { it.lastModified() }
 
+    // Where texts are dropped (by adb, or by Claude on the phone): each one found becomes a text in the list.
+    fun inbox(c: Context) = File(dir(c), "inbox").also { it.mkdirs() }
+
+    const val MAX_CHARS = 2_000_000
+
+    // A new text file for [text], named from [name] (or its title), never over another; returns it.
+    fun add(c: Context, text: String, name: String?): File {
+        val title = name?.takeIf { it.isNotBlank() } ?: parse(text, "Untitled").title
+        val base = slug(title)
+        var n = 1
+        var f: File
+        do { f = File(dir(c), if (n == 1) "$base.txt" else "$base-$n.txt"); n++ } while (f.exists())
+        f.writeText(text)
+        return f
+    }
+
+    // The texts waiting in the inbox, moved into the list (a file still being written, under a second old, waits).
+    fun takeInbox(c: Context): List<File> {
+        val out = ArrayList<File>()
+        val now = System.currentTimeMillis()
+        for (f in (inbox(c).listFiles() ?: emptyArray()).sortedBy { it.lastModified() }) {
+            if (!f.isFile || !(f.name.endsWith(".txt") || f.name.endsWith(".md")) || now - f.lastModified() < 1000) continue
+            if (f.length() > MAX_CHARS * 4L) { f.renameTo(File(f.path + ".too-big")); continue }
+            val t = runCatching { f.readText() }.getOrNull()
+            if (t == null || t.isBlank() || t.contains('\u0000')) { f.renameTo(File(f.path + ".unreadable")); continue }
+            out += add(c, t.take(MAX_CHARS), f.nameWithoutExtension)
+            f.delete()
+        }
+        return out
+    }
+
     fun audioOf(script: File) = File(script.parentFile, script.nameWithoutExtension + ".m4a")
 
     // ---------------------------------------------------------------- making
@@ -350,6 +383,7 @@ object Podcasts {
                 wav.delete()
                 j.result = out
                 j.stage = "Done"
+                notifyDone(app, script.title)
                 Log.i(ScouterService.TAG, "podcast: made '${script.title}' in ${(SystemClock.uptimeMillis() - started) / 1000} s")
             } catch (e: Throwable) {
                 Log.w(ScouterService.TAG, "podcast: ${e.message}")
@@ -454,6 +488,16 @@ object Podcasts {
             runCatching { mux.stop() }
             mux.release()
         }
+    }
+
+    // "Ready" in the notifications (the screen may be off, or another app open).
+    private fun notifyDone(c: Context, title: String) = runCatching {
+        val nm = c.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        nm.createNotificationChannel(android.app.NotificationChannel("podcasts", "Podcasts", android.app.NotificationManager.IMPORTANCE_DEFAULT))
+        val open = android.app.PendingIntent.getActivity(c, 31, android.content.Intent(c, PodcastActivity::class.java)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK), android.app.PendingIntent.FLAG_IMMUTABLE)
+        nm.notify(7303, android.app.Notification.Builder(c, "podcasts").setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle("Episode ready").setContentText(title).setContentIntent(open).setAutoCancel(true).build())
     }
 
     // A voice heard: a short line in it, on its own thread (nothing while an episode is being made).

@@ -558,6 +558,11 @@ with the app in the back.
   reads which tag; each speaker's voice is one of Kokoro's 28 English voices (the car's model, shared; tap to hear).
   Made sentence by sentence into a WAV, then an AAC .m4a in `Android/data/<app>/files/podcasts` beside its text,
   with a bar and the time left; played in the page (seek, 15 s back, 30 s forward), saved to Music/Vox on a tap.
+  Text gets in by **Share** (the share sheet's "Vox Podcasts", from Claude's app or any other; it opens as a new
+  text, never over another), by a file dropped in `Android/data/<app>/files/podcasts/inbox/` (what Claude on the
+  phone does, with `/root/vox-tools/podcast.sh FILE [--make]`; read each time the page opens), or by an intent with
+  `--ez make true`; `make: true` in a text's header also starts the episode (when the voice is downloaded). Nothing is
+  read aloud unless asked, and a notification says when an episode is ready.
   "Copy the request" makes a prompt that has Claude write a script in this format. Not yet in the phone port:
   PDFs, VibeVoice and voice cloning, music and sound cues, chapters in the file.
 - **Alt+N** (or **E** on the hub) opens the text editor on the glasses (`Editor.kt`, `Panels.EDITOR`): the .txt and

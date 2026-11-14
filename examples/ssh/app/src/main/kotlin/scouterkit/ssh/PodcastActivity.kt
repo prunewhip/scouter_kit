@@ -29,7 +29,6 @@ import java.util.Locale
 class PodcastActivity : Activity() {
     private companion object {
         const val PICK = 41
-        const val MAX_CHARS = 2_000_000
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -74,11 +73,69 @@ class PodcastActivity : Activity() {
         prefs = getSharedPreferences("podcasts", Context.MODE_PRIVATE)
         body = page()
         showList()
+        if (savedInstanceState == null) handle(intent)
     }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(Intent(this, PodcastActivity::class.java)) // handled once
+        handle(intent)
+    }
+
+    // ------------------------------------------------------ texts handed in
+
+    // Text arrives three ways, all started by the person or by Claude for them, none of them reading it aloud
+    // unless `make` says so: Share (any app's share sheet: Vox Podcasts), a file dropped in the inbox folder
+    // (adb, or Claude on the phone; also looked at each time this page opens), and an intent with a `make` extra.
+    // Each becomes a new text in the list; one already there is never overwritten.
+    private fun handle(i: Intent?) {
+        val forceMake = i?.getBooleanExtra("make", false) == true
+        var shared: String? = null
+        if (i?.action == Intent.ACTION_SEND) {
+            shared = i.getStringExtra(Intent.EXTRA_TEXT)
+            if (shared.isNullOrBlank()) {
+                @Suppress("DEPRECATION")
+                shared = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { readUri(it) }
+            }
+        }
+        val dropped = Podcasts.takeInbox(this)
+        if (shared.isNullOrBlank() && dropped.isEmpty()) return
+        saveDraft()
+        val made = ArrayList<File>()
+        val name = i?.getStringExtra(Intent.EXTRA_SUBJECT) ?: i?.getStringExtra(Intent.EXTRA_TITLE)
+        if (!shared.isNullOrBlank() && shared.none { it == '\u0000' }) made += Podcasts.add(this, shared.take(Podcasts.MAX_CHARS), name)
+        made += dropped
+        val last = made.lastOrNull() ?: return
+        draft = runCatching { last.readText() }.getOrDefault("")
+        draftName = nameOf(last)
+        showEdit(last)
+        Toast.makeText(this, if (made.size == 1) "Received: ${nameOf(last)}" else "${made.size} texts received", Toast.LENGTH_SHORT).show()
+        // Made at once when asked to (the intent, or `make: true` in the text's header) and the voice is ready.
+        val go = made.lastOrNull { forceMake || Podcasts.parse(runCatching { it.readText() }.getOrDefault(""), "").make }
+        if (go != null) {
+            if (go != last) { draft = runCatching { go.readText() }.getOrDefault(""); draftName = nameOf(go); showEdit(go) }
+            if (KokoroModel.ready(this)) make()
+            else Toast.makeText(this, "Saved. Download the voice, then Make the episode.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun readUri(u: Uri): String? = runCatching {
+        contentResolver.openInputStream(u)!!.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(1 shl 16)
+            while (out.size() < 8_000_000) {
+                val n = input.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+            out.toString(Charsets.UTF_8.name())
+        }
+    }.getOrNull()
 
     override fun onResume() {
         super.onResume()
         main.post(tick)
+        handle(null) // anything dropped in the inbox while away
     }
 
     override fun onPause() {
@@ -368,10 +425,7 @@ class PodcastActivity : Activity() {
         if (draft.isBlank() && file == null) return
         var f = file
         if (f == null) {
-            val title = draftName.ifBlank { Podcasts.parse(draft, "Untitled").title }
-            val base = Podcasts.slug(title)
-            var n = 1
-            do { f = File(Podcasts.dir(this), if (n == 1) "$base.txt" else "$base-$n.txt"); n++ } while (f!!.exists())
+            f = Podcasts.add(this, draft, draftName.ifBlank { null })
             file = f
             saveSettings() // what was chosen before the file existed goes with it
         }
@@ -400,7 +454,7 @@ class PodcastActivity : Activity() {
         }
         val raw = runCatching { contentResolver.openInputStream(uri)!!.use { it.readBytes().toString(Charsets.UTF_8) } }
             .getOrElse { Toast.makeText(this, "Could not read it: ${it.message}", Toast.LENGTH_LONG).show(); return }
-        draft = if (raw.length > MAX_CHARS) raw.substring(0, MAX_CHARS) else raw
+        draft = if (raw.length > Podcasts.MAX_CHARS) raw.substring(0, Podcasts.MAX_CHARS) else raw
         if (file == null && draftName.isBlank()) draftName = name.substringBeforeLast('.').replace('_', ' ').replace('-', ' ')
         open = true
         showEdit(file)

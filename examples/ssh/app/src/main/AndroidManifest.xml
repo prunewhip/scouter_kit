@@ -88,7 +88,15 @@
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".TvActivity" android:exported="false" />
         <activity android:name=".ListenActivity" android:exported="false" />
-        <activity android:name=".PodcastActivity" android:exported="false" />
+        <!-- Podcasts: also a place to Share text to (any app, Claude included), and a launch target for a text dropped in its inbox. -->
+        <activity android:name=".PodcastActivity" android:exported="true" android:label="Vox Podcasts" android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+            </intent-filter>
+        </activity>
         <!-- The charging case's own log over its USB-C port (a USB-to-serial chip): offered when one is plugged in. -->
         <activity android:name=".CaseLogActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>

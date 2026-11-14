@@ -47,7 +47,7 @@ detailed manual; this is the map.
 | Calls and texts | Alt+J: starred contacts, call, text typed or said | `People.kt`, `ScouterService.people*` |
 | Hub | Alt+G: timer, stopwatch, alarm (the phone's clock), reminders, notes, the next events, on the glasses | `Hub.kt`, `Panels.hubLines`, `ScouterService.hub*` |
 | Listen mode | All-day transcript from the phone mic: shared mic, disk queue, Live/Eco, soft-voice hearing, check, day files, glasses panel | `Listen.kt`, `ListenService.kt`, `MicHub.kt`, `ListenDb.kt`, `Hearing.kt`, `ListenActivity.kt` |
-| Podcasts | A text or HOST:/GUEST: script read aloud in several Kokoro voices as an .m4a episode (port of Narrator Studio's core): parser, styles, cast, render job, AAC encode, Music save | `Podcasts.kt`, `PodcastActivity.kt` |
+| Podcasts | A text or HOST:/GUEST: script read aloud in several Kokoro voices as an .m4a episode (port of Narrator Studio's core): parser, styles, cast, render job, AAC encode, Music save; takes text by Share, the `podcasts/inbox` folder or `make` intent (`/root/vox-tools/podcast.sh`) | `Podcasts.kt`, `PodcastActivity.kt` |
 | Automations, live view | Rules on each new line (words/who/mood → glasses, notify, buzz, note, reminder, ask LFM, Vox command, webhook); VOX//LIVE | `Automations.kt`, `ScouterService.listen*` |
 | Meetings, tone, words | Meeting mode (calendar start, bookmarks, action items, catch-up), LLM notes file; SenseVoice tone; talk stats | `Meetings.kt`, `Words.kt` |
 | Ask chat, reading in parts | Chat UI, scopes, map/combine/answer/check with progress and ETA, Listen paused while a model works | `Think.kt`, `Llm.hold`, `ListenActivity` (Ask) |
