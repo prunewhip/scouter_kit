@@ -109,6 +109,9 @@ class BluetoothSwitch : BroadcastReceiver() {
         }
         if (!on) Session.near = null
         CompanionApp.observe(context, on)
+        // After the phone starts or an update: what Android switched off is switched on again (Ready.kt).
+        Ready.keys(context)
+        if (on) Ready.healSoon(context, intent.action ?: "switch")
         // Start by itself (Settings.autoStart): after an update, the phone's start, or Bluetooth coming on.
         if (on && Settings(context).startsByItself().also {
                 if (it) android.util.Log.i(ScouterService.TAG, "start by itself: ${intent.action}") })

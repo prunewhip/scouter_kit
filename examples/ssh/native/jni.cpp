@@ -1281,6 +1281,25 @@ JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_brightness(JNIEnv *, jclass, j
   scouter_kit::g1::right.SetBrightness(level);
 }
 
+// Each arm's BRIGHTNESS as it is now (left, right; -1: not connected or no answer).
+JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_brightnessRead(JNIEnv *env, jclass) {
+  jint v[2] = {-1, -1};
+  {
+    std::lock_guard<std::mutex> lock(g_glasses_mutex);
+    if (g_glasses) {
+      int arm = 0;
+      for (scouter_kit::g1::Arm *a : {&scouter_kit::g1::left, &scouter_kit::g1::right}) {
+        uint32_t level = 0;
+        if (a->GetState().connected && a->Prop(scouter_kit::g1::PROP_BRIGHTNESS, &level) && level <= 42) v[arm] = jint(level);
+        arm++;
+      }
+    }
+  }
+  jintArray out = env->NewIntArray(2);
+  env->SetIntArrayRegion(out, 0, 2, v);
+  return out;
+}
+
 // Why the mirror keeps the panels off ("in the case", "folded"), or empty.
 JNIEXPORT jstring JNICALL Java_scouterkit_ssh_Native_screenWhy(JNIEnv *env, jclass) {
   std::shared_ptr<ssh::ScreenMirror> screen;

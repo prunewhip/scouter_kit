@@ -551,6 +551,17 @@ with the app in the back.
   mood) that show it on the glasses, notify, buzz, keep a hub note, set a reminder ("remind me to … in 20
   minutes / at 7:30"), ask the phone's LFM what follows the phrase ("hey vox, …"), run a Vox command or POST a
   webhook; "Hey Vox" and "Remind me" come on, others ready to switch on; edited and tried on the Listen page.
+- **Startup, the same every time** (`Ready.kt`; the home page's Startup list): everything a session needs in one
+  list (permissions, Bluetooth, the glasses paired and connected, the keyboard service, this phone's SSH server, the
+  terminal, the battery rule, notification access), each on, starting or needing a tap (Allow, Turn on, Pair); one
+  line, "Everything is on", when it is. `Ready.heal` runs when the app opens, when the service starts, after the
+  phone starts or an update, when Bluetooth comes on and every minute: it switches Vox's keyboard service and
+  notification access back on after Android switched them off (needs `WRITE_SECURE_SETTINGS`, granted once over adb:
+  `pm grant <package> android.permission.WRITE_SECURE_SETTINGS`; without it the list offers the tap), starts this
+  phone's SSH server when it is down (waits up to 25 s for it, then has the terminal tried at once) and starts the
+  session. Both eyes keep the chosen brightness: an arm that restarted is back at the firmware's level and a level
+  sent during the look-up fade is lost on that arm, so both arms' levels are read every 30 s and 2 s after an arm's
+  link comes up, and an arm that differs (twice, past the fade) gets the level again.
 - **Podcasts** (Voice tab, Podcasts: `PodcastActivity` + `Podcasts.kt`): a text read aloud in several voices as an
   episode on the phone, a port of the core of the Narrator Studio app. Paste or open a .txt / .md (an article, a
   chapter, notes) or a script with `HOST:` / `GUEST:` lines (front matter `title:` / `style:`, `## ` headings,

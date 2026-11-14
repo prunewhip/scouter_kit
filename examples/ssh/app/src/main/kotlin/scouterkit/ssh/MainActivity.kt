@@ -17,6 +17,7 @@ import java.io.File
 
 private const val SCREEN_REQUEST = 7 // the screen-sharing consent
 private const val MIC_REQUEST = 8 // Car mode's phone microphone
+private const val READY_REQUEST = 10 // a startup item's permission (Ready.kt)
 
 // Vox's main screen, in tabs with icons: Glasses (what they show, live; the sources as a grid that Alt+arrows
 // walk; the display, always visible, voice and the pointer; brightness), Screen (the picture the glasses get and
@@ -36,6 +37,21 @@ class MainActivity : Activity() {
     private lateinit var statusLine: TextView
     private lateinit var bannerBox: LinearLayout
     private var bannerKey = ""
+    // The startup list (Ready.kt): every item a session needs, with its state.
+    private lateinit var readyBox: LinearLayout
+    private var readyKey = ""
+    private var readyOpen = false
+    // While the app shows: the phone's server probed every 3 s (off this thread), what Vox can fix fixed.
+    private val readyTick = object : Runnable {
+        override fun run() {
+            val app = applicationContext
+            Thread({
+                val was = Ready.serverUp
+                if (Ready.probe(app) != was) runOnUiThread { if (resumed) show() }
+            }, "vox-probe").start()
+            if (resumed) content.postDelayed(this, 3000)
+        }
+    }
     private lateinit var gridHolder: FrameLayout
     private var gridKey = ""
     private val gridTiles = mutableListOf<Triple<String?, GridTile, String>>()
@@ -267,6 +283,8 @@ class MainActivity : Activity() {
         page.addView(statusLine)
         bannerBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         page.addView(bannerBox)
+        readyBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        page.addView(readyBox)
 
         // The sources as a grid: the machines across, terminal above screen (as Alt+arrows walk it).
         val head = LinearLayout(this).apply {
@@ -1328,6 +1346,10 @@ class MainActivity : Activity() {
         val auto = Settings(this).startsByItself()
         if (auto || keyboard || ScouterService.running || Session.near == null || BuildConfig.FLAVOR == "emulated") ScouterService.send(this)
         associate()
+        // What Vox can put right by itself, now (the keyboard service, the phone's server), and the list kept fresh.
+        Ready.healSoon(this, "app open")
+        content.removeCallbacks(readyTick)
+        content.post(readyTick)
         show()
     }
 
@@ -1418,17 +1440,18 @@ class MainActivity : Activity() {
         statusLine.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
 
         // What needs the user, with the button that fixes it.
+        // (Ready.kt's list: each item that needs a tap is a banner with its button; the whole list is under them.)
         val banners = mutableListOf<Triple<String, String, Pair<String, () -> Unit>?>>()
-        val permitted = ScouterService.missing(this).isEmpty()
-        val openSettings = "Settings" to { startActivity(Intent(this, SettingsActivity::class.java)) }
-        if (!permitted) banners += Triple("lock", "Vox needs Bluetooth and notifications.", openSettings)
-        else if (!ScouterService.bluetoothOn(this)) banners += Triple("info", "Bluetooth is off: Vox waits for it.", null)
-        if (settings.left.isEmpty() || settings.right.isEmpty())
-            banners += Triple("glasses", "Pair your glasses (in the open case).", "Pair" to { startActivity(Intent(this, PairingActivity::class.java)) })
-        if (running && Session.glasses == "ready" && !both) banners += Triple("glasses", "One arm is not connected.", null)
+        val checks = Ready.checks(this)
+        for (ck in checks) if (ck.state == Ready.NEEDS_YOU) banners += Triple(when (ck.id) {
+            "perm", "battery" -> "lock"
+            "pair", "start" -> "glasses"
+            "keys" -> "keyboard"
+            "server" -> "server"
+            else -> "info"
+        }, "${ck.title}: ${ck.detail.replaceFirstChar { it.lowercase() }}", ck.button?.let { b -> b to { fix(ck.id) } })
         if (settings.servers().isEmpty()) banners += Triple("server", "Add a server for the terminal.", "Add" to { editServer(null) })
-        if (!Hotkeys.everywhere(this)) banners += Triple("keyboard", "Turn on Vox in Accessibility so your keyboard and " +
-            "trackpad reach the glasses from any app.", "Turn on" to { openAccessibility() })
+        showReady(checks)
         note?.let { n -> banners += Triple("info", n, "OK" to { note = null; show() }) }
         val key = banners.joinToString("|") { it.first + it.second + (it.third?.first ?: "") }
         if (key != bannerKey) {
@@ -1555,6 +1578,77 @@ class MainActivity : Activity() {
         page.post { page.scrollTo(0, y) }
         sharingShown = null
         previewView.refresh()
+    }
+
+    // The startup list: one line while everything is on (a tap opens it), every item with its dot otherwise.
+    private fun showReady(checks: List<Ready.Check>) {
+        val key = checks.joinToString("|") { "${it.id}${it.state}${it.detail}" } + readyOpen
+        if (key == readyKey) return
+        readyKey = key
+        android.transition.TransitionManager.beginDelayedTransition(readyBox)
+        readyBox.removeAllViews()
+        val waiting = checks.count { it.state != Ready.OK }
+        val needs = checks.count { it.state == Ready.NEEDS_YOU }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Ui.SURFACE, dp(16).toFloat(), dp(1), Ui.STROKE)
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = lp().apply { topMargin = dp(8) }
+        }
+        fun dot(state: Int) = when (state) { Ready.OK -> Ui.GOOD; Ready.STARTING -> Ui.WARN; else -> Ui.BAD }
+        val open = readyOpen || waiting > 0
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(text("●", 12f, if (waiting == 0) Ui.GOOD else if (needs > 0) Ui.BAD else Ui.WARN), lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) })
+        head.addView(text(when {
+            waiting == 0 -> "Everything is on"
+            needs > 0 -> "$needs ${if (needs == 1) "thing needs" else "things need"} you"
+            else -> "Starting: ${checks.size - waiting} of ${checks.size} on"
+        }, 14f, Ui.TEXT, Ui.BOLD), lp(0, weight = 1f))
+        head.addView(text(if (open) "STARTUP" else "STARTUP  ›", 11f, Ui.FAINT, Ui.BOLD).apply { letterSpacing = 0.12f })
+        if (waiting == 0) head.setOnClickListener { readyOpen = !readyOpen; show() }
+        box.addView(head)
+        if (open) for (ck in checks) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(8), 0, 0)
+            }
+            row.addView(text("●", 10f, dot(ck.state)), lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(12); leftMargin = dp(1) })
+            val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(text(ck.title, 13.5f, Ui.TEXT, Ui.BOLD))
+            texts.addView(text(ck.detail, 12.5f, Ui.MUTED))
+            row.addView(texts, lp(0, weight = 1f))
+            if (ck.state == Ready.NEEDS_YOU && ck.button != null)
+                row.addView(chip(ck.button, false) { fix(ck.id) }, lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
+            box.addView(row)
+        }
+        readyBox.addView(box)
+    }
+
+    // The button of a startup item that needs the user.
+    private fun fix(id: String) {
+        when (id) {
+            "perm" -> requestPermissions(ScouterService.missing(this).toTypedArray(), READY_REQUEST)
+            "bt" -> runCatching { startActivity(Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
+                .onFailure { runCatching { startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) } }
+            "pair" -> startActivity(Intent(this, PairingActivity::class.java))
+            "start" -> {
+                Settings(this).autoStart = true
+                ScouterService.send(this)
+                show()
+            }
+            "keys" -> openAccessibility()
+            "server" -> if (!Termux.permitted(this)) requestPermissions(arrayOf(Termux.PERMISSION), READY_REQUEST)
+                else Ready.healSoon(this, "tap")
+            "battery" -> {
+                @android.annotation.SuppressLint("BatteryLife")
+                val ask = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))
+                runCatching { startActivity(ask) }.onFailure {
+                    runCatching { startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                }
+            }
+            "notes" -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+        }
     }
 
     // Vox's switch in Android's accessibility settings (its own page where Android has one).
@@ -1718,12 +1812,18 @@ class MainActivity : Activity() {
             lookUpChanged()
             show()
         }
+        if (request == READY_REQUEST) {
+            ScouterService.send(this)
+            Ready.healSoon(this, "allowed")
+            show()
+        }
         if (request == MIC_REQUEST && results.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
             ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "mic_fg")
     }
 
     override fun onPause() {
         resumed = false
+        content.removeCallbacks(readyTick)
         Session.listeners -= listener
         Session.foreground = false
         Preview.wanted = false

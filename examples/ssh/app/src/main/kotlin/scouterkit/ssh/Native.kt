@@ -137,6 +137,9 @@ object Native {
     @JvmStatic external fun setBattery(on: Boolean)
     // Both arms' brightness (0 ... 42), at once.
     @JvmStatic external fun brightness(level: Int)
+
+    // Each arm's brightness as it is now (left, right; -1: not known).
+    @JvmStatic external fun brightnessRead(): IntArray
     // The display off (nothing shows; the TouchBar still reports) or on again.
     @JvmStatic external fun blank(on: Boolean)
     // Left %, right %, left charging, right charging (-1 unknown); blocks while the arms answer.

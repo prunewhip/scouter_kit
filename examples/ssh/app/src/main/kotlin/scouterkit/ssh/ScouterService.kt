@@ -166,6 +166,7 @@ class ScouterService : Service() {
                 Session.battery = Native.battery()
                 header()
                 Session.changed()
+                keepBrightness(false)
             }
             work.postDelayed(this, 30000)
         }
@@ -199,24 +200,37 @@ class ScouterService : Service() {
             poll()
             retryMosh()
             refresh()
-            keepServer()
+            // What Vox puts right by itself (Ready.kt): the keyboard service Android switched off, the phone's own
+            // SSH server stopped (the terminal's, Car mode's Claude).
+            Ready.healSoon(this@ScouterService, "watch")
             work.postDelayed(this, 60000)
         }
     }
 
-    // The phone's own SSH server (the terminal's, Car mode's Claude): started again when it stopped (its proot
-    // session ended), at most every three minutes. A port check on the phone, nothing on the glasses.
-    private var serverStartAt = 0L
-    private fun keepServer() {
-        if (settings.servers().none { it.local } || !Termux.permitted(this)) return
-        Thread {
-            if (Termux.listening()) return@Thread
-            val now = SystemClock.elapsedRealtime()
-            if (now - serverStartAt < 180_000) return@Thread
-            serverStartAt = now
-            Log.i(TAG, "server: the phone's SSH server is down: starting it again")
-            Termux.run(this, Termux.START)?.let { Log.w(TAG, "server: $it") }
-        }.start()
+    // Both eyes at the chosen brightness. An arm that restarted (the case, a reconnection) is back at the firmware's
+    // level, and a level sent during the look-up fade is overwritten on that arm by the fade's last step: so both
+    // arms' levels are read (every 30 s with the batteries, and 2 s after an arm's link comes up) and an arm that
+    // differs gets the level again. Checked twice, past the fade (its steps are levels in between); not during
+    // Tunes or the preview, whose scenes move the brightness themselves.
+    private var brightBusy = false
+    private val brightSoon = Runnable { keepBrightness(false) }
+    private fun keepBrightness(second: Boolean) {
+        if (Session.glasses != "ready" || Session.tunes || Session.demo || brightBusy || ended) return
+        val want = settings.brightness
+        brightBusy = true
+        Thread({
+            val v = runCatching { Native.brightnessRead() }.getOrDefault(intArrayOf(-1, -1))
+            work.post {
+                brightBusy = false
+                if ((0..1).none { v[it] >= 0 && v[it] != want } || settings.brightness != want) return@post
+                if (!second) {
+                    work.postDelayed({ keepBrightness(true) }, settings.fadeMs + 700L)
+                    return@post
+                }
+                Log.i(TAG, "brightness: left ${v[0]}, right ${v[1]}, chosen $want: sent again")
+                Thread { Native.brightness(want) }.start()
+            }
+        }, "vox-bright").start()
     }
     // A network came (back): a session that could not start is tried again; a running one roams by itself.
     private val network = object : android.net.ConnectivityManager.NetworkCallback() {
@@ -310,6 +324,7 @@ class ScouterService : Service() {
         work.postDelayed(tabPoll, 5000)
         work.postDelayed(watchdog, 60000)
         work.postDelayed(batteryTicker, 5000)
+        Ready.healSoon(this, "service start")
         registerReceiver(lock, IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) })
         getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
         registerReceiver(bonds, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
@@ -4589,7 +4604,12 @@ class ScouterService : Service() {
     }
 
     // GlassesLink: an arm's link went up or down.
-    fun armChanged() = work.post { update() }
+    fun armChanged() = work.post {
+        update()
+        // An arm's link came up (or went): its brightness is looked at once it has settled.
+        work.removeCallbacks(brightSoon)
+        work.postDelayed(brightSoon, 2000)
+    }
 
     // The app's one notification: the state, no actions (Settings is the only control).
     private fun notification(ongoing: Boolean = true): Notification {

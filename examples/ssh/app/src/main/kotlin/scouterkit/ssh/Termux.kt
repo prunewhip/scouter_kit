@@ -95,11 +95,12 @@ object Termux {
         return run(c, script, "setup")
     }
 
-    // Before a session: sshd up (started if not), waits for its port up to 8 s. Off the main thread.
+    // Before a session: sshd up (started if not), waits for its port up to 25 s (the Ubuntu proot takes a while
+    // after the phone starts). Off the main thread.
     fun ensureSshd(c: Context): String? {
         if (listening()) return null
         run(c, START)?.let { return it }
-        val end = SystemClock.elapsedRealtime() + 8000
+        val end = SystemClock.elapsedRealtime() + 25000
         while (SystemClock.elapsedRealtime() < end) {
             Thread.sleep(300)
             if (listening()) return null
