@@ -854,6 +854,14 @@ class MainActivity : Activity() {
         }, lp().apply { topMargin = dp(8) })
         page.addView(lm)
 
+        // Podcasts: a text or a script read aloud in several voices, made on the phone (PodcastActivity).
+        val pc = card("Podcasts", "Turn an article, a chapter or a HOST: / GUEST: script into an episode, read in " +
+            "different voices on the phone (Kokoro). Plays here, saves to Music.")
+        pc.addView(button("Open Podcasts", 0) {
+            startActivity(android.content.Intent(this, PodcastActivity::class.java))
+        }, lp().apply { topMargin = dp(8) })
+        page.addView(pc)
+
         // Voice mode: everything said is typed into the terminal on the glasses (Claude's prompt) until it is off.
         val talk = card("Voice mode", "Talk to the terminal: what you say is typed into it (Claude's prompt), a " +
             "strip at the bottom of the glasses shows it is on. Say \"send\" for Enter, \"scratch that\" to take " +

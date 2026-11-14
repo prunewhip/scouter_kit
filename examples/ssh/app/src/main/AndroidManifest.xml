@@ -88,6 +88,7 @@
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".TvActivity" android:exported="false" />
         <activity android:name=".ListenActivity" android:exported="false" />
+        <activity android:name=".PodcastActivity" android:exported="false" />
         <!-- The charging case's own log over its USB-C port (a USB-to-serial chip): offered when one is plugged in. -->
         <activity android:name=".CaseLogActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>

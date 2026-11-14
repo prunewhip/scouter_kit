@@ -551,6 +551,15 @@ with the app in the back.
   mood) that show it on the glasses, notify, buzz, keep a hub note, set a reminder ("remind me to … in 20
   minutes / at 7:30"), ask the phone's LFM what follows the phrase ("hey vox, …"), run a Vox command or POST a
   webhook; "Hey Vox" and "Remind me" come on, others ready to switch on; edited and tried on the Listen page.
+- **Podcasts** (Voice tab, Podcasts: `PodcastActivity` + `Podcasts.kt`): a text read aloud in several voices as an
+  episode on the phone, a port of the core of the Narrator Studio app. Paste or open a .txt / .md (an article, a
+  chapter, notes) or a script with `HOST:` / `GUEST:` lines (front matter `title:` / `style:`, `## ` headings,
+  `[pause 2]`); six styles (audiobook, podcast, lecture, interview, story, briefing) set the pace, the gaps and who
+  reads which tag; each speaker's voice is one of Kokoro's 28 English voices (the car's model, shared; tap to hear).
+  Made sentence by sentence into a WAV, then an AAC .m4a in `Android/data/<app>/files/podcasts` beside its text,
+  with a bar and the time left; played in the page (seek, 15 s back, 30 s forward), saved to Music/Vox on a tap.
+  "Copy the request" makes a prompt that has Claude write a script in this format. Not yet in the phone port:
+  PDFs, VibeVoice and voice cloning, music and sound cues, chapters in the file.
 - **Alt+N** (or **E** on the hub) opens the text editor on the glasses (`Editor.kt`, `Panels.EDITOR`): the .txt and
   .md files in Vox's folder `Android/data/<app id>/files/docs` (copy files there from a computer or with `adb push`),
   newest first; the arrows pick, Enter opens, N makes a new one. A file's lines wrap at the panel's width, a ▌ is the
