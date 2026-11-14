@@ -146,6 +146,7 @@ class MainActivity : Activity() {
     private lateinit var listenApp: RoundAction
     private lateinit var carApp: RoundAction
     private lateinit var talkApp: RoundAction
+    private lateinit var copilotApp: RoundAction
     private val previewListener: () -> Unit = {
         runOnUiThread {
             previewView.refresh()
@@ -372,13 +373,14 @@ class MainActivity : Activity() {
         fun listen(tab: String) = startActivity(Intent(this, ListenActivity::class.java).putExtra(ListenActivity.EXTRA_TAB, tab))
         listenApp = RoundAction(this, "wave", "Listen") { listen("live") }
         carApp = RoundAction(this, "car", "Car") { goTo(3) { carState } }
+        copilotApp = RoundAction(this, "spark", "Copilot") { startActivity(Intent(this, CopilotActivity::class.java)) }
         talkApp = RoundAction(this, "terminal", "Talk") { ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "voicemode") }
         val apps = listOf(listenApp, RoundAction(this, "chat", "Ask") { listen("ask") },
             RoundAction(this, "headphones", "Podcasts") { startActivity(Intent(this, PodcastActivity::class.java)) }, carApp,
             RoundAction(this, "captions", "Captions") {
                 if (!ScouterService.running) android.widget.Toast.makeText(this, "Start Vox first", android.widget.Toast.LENGTH_SHORT).show()
                 else ScouterService.send(this, ScouterService.ACTION_PANEL, "do" to "captions")
-            }, talkApp, RoundAction(this, "tv", "TV") { selectTab(TV_TAB) }, RoundAction(this, "search", "Find") { find() })
+            }, talkApp, RoundAction(this, "tv", "TV") { selectTab(TV_TAB) }, copilotApp)
         for (line in apps.chunked(4)) {
             val r = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -1556,6 +1558,7 @@ class MainActivity : Activity() {
         listenApp.set(settings.listenOn, if (settings.listenOn) "Listening" else "Listen")
         carApp.set(Session.car.isNotEmpty())
         talkApp.set(Session.voiceMode)
+        copilotApp.set(Copilot.on)
         previewButton.text = if (Session.demo) "■  Stop the preview" else "▶  Preview on the glasses"
 
         // The look per app.

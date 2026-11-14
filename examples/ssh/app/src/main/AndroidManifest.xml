@@ -92,6 +92,7 @@
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".TvActivity" android:exported="false" />
         <activity android:name=".ListenActivity" android:exported="false" />
+        <activity android:name=".CopilotActivity" android:exported="false" />
         <!-- Podcasts: also a place to Share text to (any app, Claude included), and a launch target for a text dropped in its inbox. -->
         <activity android:name=".PodcastActivity" android:exported="true" android:label="Vox Podcasts" android:launchMode="singleTop">
             <intent-filter>

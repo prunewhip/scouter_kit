@@ -1559,6 +1559,15 @@ class ScouterService : Service() {
                 val t = rest.substringAfter(':')
                 if (Session.overlay == Panels.LISTEN) { listenSaid = t.take(120); listenDraw() } else note(t, ms)
             }
+            what.startsWith("copilot:") -> { // the copilot's cue: "copilot:<question>\u0001<cue>" (Copilot.kt)
+                val q = what.removePrefix("copilot:").substringBefore('\u0001')
+                val a = what.substringAfter('\u0001', "")
+                if (Session.overlay == Panels.LISTEN) {
+                    listenQuestion = q
+                    listenAnswer = a
+                    listenDraw()
+                } else note(a.replace("\n", "  ·  "), 15000)
+            }
             what.startsWith("edkey:") -> editorKey(what.removePrefix("edkey:"))
             what == "captions" && (Listen.on || settings.listenOn) -> listenOpen()
             what == "captions" || what == "translate" -> captions(what)
@@ -2708,6 +2717,10 @@ class ScouterService : Service() {
                 Session.listenTyping = false
             }
             "c" -> listenAsk("catch up", false)
+            "q" -> { // the copilot: a cue for what was just said (switches it on)
+                Copilot.askNow(this)
+                listenSaid = "copilot: thinking"
+            }
             "a", "d" -> {
                 listenFor = if (k == "d") "deep" else "ask"
                 listenName = StringBuilder()
@@ -2752,7 +2765,7 @@ class ScouterService : Service() {
             else -> Listen.state
         }
         val foot = if (Meetings.current != null) "S end · B bookmark · I action · T note · C catch up · A ask"
-            else "O on/off · P pause · N name · M me · A ask · D deep · S meeting · C catch up"
+            else "O on/off · P pause · N name · M me · A ask · D deep · S meeting · C catch up · Q cue"
         framePanel(Panels.LISTEN, "VOX//LIVE", "Esc closes", foot) { width, max ->
             val rows = mutableListOf<Pair<String, Int>>()
             val recent = Listen.recent(40)

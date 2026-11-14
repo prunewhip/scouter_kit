@@ -533,11 +533,15 @@ object CarClaude {
 
     private fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
-    fun chatCommand(text: String, session: String?): String {
+    // system: what Claude is told it is doing; tools: what it may use ("" none); model: for this one process
+    // (ANTHROPIC_MODEL: `claude --model` can become the user's saved default), "" the user's own.
+    fun chatCommand(text: String, session: String?, system: String = PROMPT, tools: String = "WebSearch,WebFetch",
+                    model: String = ""): String {
         val resume = if (session.isNullOrEmpty()) "" else "--resume ${q(session)} "
+        val env = if (Regex("[a-z0-9.-]+").matches(model)) "ANTHROPIC_MODEL=$model " else ""
         return PATH + "cd ~ 2>/dev/null; command -v claude >/dev/null || { echo 'VOX: claude is not installed there'; exit 0; }; " +
-            "printf %s ${q(text)} | claude -p --output-format json $resume--append-system-prompt ${q(PROMPT)} " +
-            "--allowedTools 'WebSearch,WebFetch' 2>&1"
+            "printf %s ${q(text)} | ${env}claude -p --output-format json $resume--append-system-prompt ${q(system)} " +
+            (if (tools.isEmpty()) "" else "--allowedTools ${q(tools)} ") + "2>&1"
     }
 
     // Typed into tmux session `session`'s Claude pane; waits up to `limit` s for the turn's end. Prints one line of
@@ -684,11 +688,12 @@ out(error="Claude is still working on it; the answer will be on the glasses.")
     fun askTerminal(vault: Vault, server: Settings.Server, text: String, session: String): Answer =
         run(vault, server, terminalCommand(text, session, 240))
 
-    fun askChat(vault: Vault, server: Settings.Server, text: String, session: String?): Answer {
-        val first = run(vault, server, chatCommand(text, session))
+    fun askChat(vault: Vault, server: Settings.Server, text: String, session: String?, system: String = PROMPT,
+                tools: String = "WebSearch,WebFetch", model: String = ""): Answer {
+        val first = run(vault, server, chatCommand(text, session, system, tools, model))
         // A conversation the server no longer has: a new one.
         if (first.error != null && !session.isNullOrEmpty() && first.error.contains("session", true))
-            return run(vault, server, chatCommand(text, null))
+            return run(vault, server, chatCommand(text, null, system, tools, model))
         return first
     }
 

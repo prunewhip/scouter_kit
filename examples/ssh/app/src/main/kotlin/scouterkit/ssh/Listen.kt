@@ -693,6 +693,8 @@ object Listen {
                                 h.fired = Automations.run(c, text, h.who, personId, emotion, line.start).joinToString(", ")
                             }
                                 .onFailure { Log.w(ScouterService.TAG, "listen: automations: ${it.message}") }
+                            // The copilot (when on): the line kept for Claude, a question answered.
+                            runCatching { Copilot.heard(c, text, h.who, personId) }
                             synchronized(recentLines) {
                                 recentLines.addLast(h)
                                 while (recentLines.size > 60) recentLines.removeFirst()

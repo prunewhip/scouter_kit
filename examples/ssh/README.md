@@ -551,6 +551,16 @@ with the app in the back.
   mood) that show it on the glasses, notify, buzz, keep a hub note, set a reminder ("remind me to … in 20
   minutes / at 7:30"), ask the phone's LFM what follows the phrase ("hey vox, …"), run a Vox command or POST a
   webhook; "Hey Vox" and "Remind me" come on, others ready to switch on; edited and tried on the Listen page.
+- **Copilot** (Home's Copilot tile: `CopilotActivity` + `Copilot.kt`): while it is on, what Listen mode hears is kept
+  for Claude, and when an answer is needed (someone else's question, found by its "?" or the way it starts, settled
+  1.5 s so a question in two breaths is one; or the user asks: Answer now, **Q** in the glasses' VOX//LIVE panel)
+  Claude gets everything said since the last time and answers with at most three short cue lines, on the glasses
+  (the panel, or a 15 s note) and the phone; `PASS` shows nothing. Claude is `claude -p` on this phone's server (Car
+  mode's chat with its own system prompt, no tools, `ANTHROPIC_MODEL=haiku` for that process, one conversation
+  resumed by its id), told the kind of talk (interview, meeting, sales, any) and the background the user pasted
+  (résumé, job post, notes); the phone's LFM answers from the last lines when Claude cannot be reached. The user's
+  own lines never start an answer. Next phases (a kept-open session, tools for Claude, recall, follow-ups) are
+  not built.
 - **Finding things** (`Finder.kt`, `Ui.kt`): the home page has the apps as round tiles (Listen, Ask, Podcasts, Car,
   Captions, Talk, TV, Find), lit while theirs is on, and a search (the magnifier, or Find): a word such as "fade" or
   "weather" lists every label, switch and section naming it in any tab, a tap goes there (the tab chosen, a folded
