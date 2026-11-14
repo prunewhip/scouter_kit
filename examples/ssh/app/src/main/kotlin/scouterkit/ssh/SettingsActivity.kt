@@ -22,6 +22,18 @@ class SettingsActivity : Activity() {
         settings = Settings(this)
         val page = page()
         page.addView(header("Settings", "Make the glasses yours", "Done") { finish() })
+        // Find a setting by a word of it (Finder.kt); the main screen's search lands here too.
+        fun find(q: String) = Finder.open(this, listOf("Settings" to page), q) { _, f -> Finder.reveal(f.view) }
+        page.addView(android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            background = ripple(rounded(Ui.RAISED, dp(16).toFloat(), dp(1), Ui.STROKE), dp(16).toFloat())
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            addView(IconView(context, "search", 18, Ui.MUTED), lp(android.view.ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) })
+            addView(text("Find a setting…", 15f, Ui.FAINT))
+            setOnClickListener { find("") }
+        }, lp().apply { bottomMargin = dp(14) })
+        intent?.getStringExtra("find")?.let { q -> page.post { find(q) } }
 
         val glasses = page.section("Glasses", "set_glasses", "glasses", open = true)
         glassesState = text("", 13.5f, Ui.MUTED)
@@ -332,6 +344,7 @@ class SettingsActivity : Activity() {
             setPadding(dp(4), dp(4), dp(4), 0)
         })
         showKey()
+        page.foldLongText() // the long explanations: their first lines, "more" for the rest
     }
 
     private fun pin(key: String, name: String) {

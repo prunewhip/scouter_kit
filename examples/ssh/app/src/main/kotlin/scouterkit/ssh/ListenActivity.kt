@@ -28,6 +28,7 @@ import java.util.Locale
 class ListenActivity : Activity(), HearingCheck.Ui {
     companion object {
         const val EXTRA_RESUME = "resume"
+        const val EXTRA_TAB = "tab" // the place to open at: live, people, ask, more
         // The Rainbow Passage (Fairbanks, 1960), read to give a voice: about 30 s.
         const val PASSAGE = "When the sunlight strikes raindrops in the air, they act as a prism and form a rainbow. The " +
             "rainbow is a division of white light into many beautiful colors. These take the shape of a long round arch, " +
@@ -149,6 +150,7 @@ class ListenActivity : Activity(), HearingCheck.Ui {
         tabViews["more"] = scrolled { moreBody = it }
         for (v in tabViews.values) content.addView(v, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         tab = getSharedPreferences("ui", Context.MODE_PRIVATE).getString("listen_tab2", "live") ?: "live"
+        intent?.getStringExtra(EXTRA_TAB)?.let { tab = it }
         if (TABS.none { it.first == tab }) tab = "live"
         if (intent?.getBooleanExtra(EXTRA_RESUME, false) == true) settings.listenOn = true
         showTab(tab)

@@ -101,11 +101,71 @@ fun Context.header(title: String, subtitle: String, action: String? = null, onAc
     return row
 }
 
+// A touch that is felt: the view sinks a little while pressed and comes back (buttons, chips, tiles).
+fun View.pressable(scale: Float = 0.96f) {
+    fun to(v: Float) = android.animation.AnimatorSet().apply {
+        playTogether(android.animation.ObjectAnimator.ofFloat(this@pressable, View.SCALE_X, v),
+            android.animation.ObjectAnimator.ofFloat(this@pressable, View.SCALE_Y, v))
+        duration = 90
+    }
+    stateListAnimator = android.animation.StateListAnimator().apply {
+        addState(intArrayOf(android.R.attr.state_pressed), to(scale))
+        addState(intArrayOf(), to(1f))
+    }
+}
+
+// A long explanation folded to its first lines, ending in "more"; a tap shows all of it, another folds it again.
+// The pages stay short enough to look through, and nothing is lost. foldedText keeps the whole text (the search
+// reads it).
+val foldedText = java.util.WeakHashMap<TextView, String>()
+
+fun TextView.foldable(limit: Int = 120) {
+    val whole = text?.toString() ?: return
+    if (whole.length < limit + 60 || hasOnClickListeners()) return
+    foldedText[this] = whole
+    var cut = whole.lastIndexOf(' ', limit)
+    val stop = whole.indexOf(". ", 60)
+    if (stop in 60..limit + 40) cut = stop + 1 // at a sentence's end where one is near
+    if (cut < 40) cut = limit
+    val short = android.text.SpannableString(whole.substring(0, cut).trimEnd().trimEnd('.', ',', ':', ';') + "…  more").apply {
+        setSpan(android.text.style.ForegroundColorSpan(Ui.ACCENT), length - 4, length, 0)
+    }
+    var open = false
+    text = short
+    setOnClickListener {
+        val now = text?.toString()
+        if (now != short.toString() && now != whole) return@setOnClickListener // set anew since: not this text any more
+        open = !open
+        (parent as? ViewGroup)?.let { android.transition.TransitionManager.beginDelayedTransition(it, android.transition.AutoTransition().apply { duration = 160 }) }
+        text = if (open) whole else short
+    }
+}
+
+// Every long explanation under this view folded (the small grey paragraphs: hints, how-tos), once a page is built.
+fun View.foldLongText() {
+    if (this is ViewGroup) {
+        for (i in 0 until childCount) getChildAt(i).foldLongText()
+        return
+    }
+    if (this !is TextView || this is EditText || this is Switch || foldedText.containsKey(this)) return
+    val c = currentTextColor
+    // Explanations only: a state (several lines, or monospace: a key, a log) stays whole.
+    if ((c == Ui.MUTED || c == Ui.FAINT) && textSize <= 14.5f * resources.displayMetrics.scaledDensity &&
+        typeface != Ui.MONO && text?.contains('\n') != true) foldable()
+}
+
+// A card's surface: lit a little from above (a soft gradient), so the cards sit on the page instead of lying flat.
+fun Context.surface(radius: Float): GradientDrawable =
+    GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(0xFF141A23.toInt(), 0xFF0E1218.toInt())).apply {
+        cornerRadius = radius
+        setStroke(dp(1), Ui.STROKE)
+    }
+
 // A rounded surface holding a column; `title` above its content in small capitals.
 fun Context.card(title: String? = null, hint: String? = null): LinearLayout {
     val card = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = rounded(Ui.SURFACE, dp(24).toFloat(), dp(1), Ui.STROKE)
+        background = surface(dp(24).toFloat())
         setPadding(dp(18), dp(16), dp(18), dp(16))
         layoutParams = lp().apply { bottomMargin = dp(14) }
     }
@@ -113,7 +173,7 @@ fun Context.card(title: String? = null, hint: String? = null): LinearLayout {
         letterSpacing = 0.14f
         setPadding(0, 0, 0, dp(if (hint == null) 8 else 2))
     })
-    if (hint != null) card.addView(text(hint, 13f, Ui.FAINT).apply { setPadding(0, 0, 0, dp(8)) })
+    if (hint != null) card.addView(text(hint, 13f, Ui.FAINT).apply { setPadding(0, 0, 0, dp(8)); foldable() })
     return card
 }
 
@@ -124,7 +184,10 @@ fun Context.chip(label: String, on: Boolean, onClick: (() -> Unit)? = null): Tex
     background = if (onClick != null) ripple(base, r) else base
     setPadding(dp(14), dp(8), dp(14), dp(8))
     gravity = Gravity.CENTER
-    if (onClick != null) setOnClickListener { onClick() }
+    if (onClick != null) {
+        setOnClickListener { onClick() }
+        pressable()
+    }
 }
 
 // A status pill: a coloured dot and a label.
@@ -149,6 +212,7 @@ fun Context.button(label: String, kind: Int = 1, onClick: () -> Unit): TextView 
     setPadding(dp(16), dp(14), dp(16), dp(14))
     layoutParams = lp().apply { topMargin = dp(8) }
     setOnClickListener { onClick() }
+    pressable(0.98f)
 }
 
 const val PRIMARY = 0
@@ -559,6 +623,40 @@ object Icons {
                 poly(false, 7f, 8f, 7f, 4f, 21f, 4f, 21f, 16f, 17f, 16f)
             }
             "chevron" -> poly(false, 6f, 9.5f, 12f, 15.5f, 18f, 9.5f)
+            "search" -> {
+                arc(4f, 4f, 16f, 16f, 0f, 360f)
+                line(14.6f, 14.6f, 20f, 20f)
+            }
+            "wave" -> { // sound, as bars
+                line(4f, 10f, 4f, 14f)
+                line(8f, 6.5f, 8f, 17.5f)
+                line(12f, 3.5f, 12f, 20.5f)
+                line(16f, 7.5f, 16f, 16.5f)
+                line(20f, 10.5f, 20f, 13.5f)
+            }
+            "chat" -> {
+                rect(3f, 4.5f, 21f, 16.5f, 3.5f)
+                poly(false, 8f, 16.5f, 8f, 20.5f, 12.5f, 16.5f)
+                line(8f, 9f, 16f, 9f)
+                line(8f, 12.3f, 13.5f, 12.3f)
+            }
+            "headphones" -> {
+                arc(4f, 4f, 20f, 20f, 180f, 180f)
+                rect(3.2f, 12f, 7.4f, 19.5f, 1.8f)
+                rect(16.6f, 12f, 20.8f, 19.5f, 1.8f)
+            }
+            "car" -> {
+                rect(2.5f, 10.5f, 21.5f, 16.5f, 2.2f)
+                poly(false, 5.5f, 10.5f, 7.5f, 6f, 16.5f, 6f, 18.5f, 10.5f)
+                arc(5.3f, 15f, 8.9f, 18.6f, 0f, 360f)
+                arc(15.1f, 15f, 18.7f, 18.6f, 0f, 360f)
+            }
+            "captions" -> {
+                rect(3f, 5f, 21f, 19f, 2.5f)
+                line(7f, 11.5f, 11f, 11.5f)
+                line(13.5f, 11.5f, 17f, 11.5f)
+                line(7f, 15f, 14.5f, 15f)
+            }
             "next" -> poly(false, 9.5f, 6f, 15.5f, 12f, 9.5f, 18f)
             "check" -> poly(false, 5f, 12.5f, 10f, 17.5f, 19f, 7f)
             "close" -> {
@@ -698,8 +796,10 @@ fun LinearLayout.section(title: String, key: String, icon: String? = null, open:
         orientation = LinearLayout.VERTICAL
         setPadding(0, c.dp(8), 0, 0)
     }
-    if (hint != null) body.addView(c.text(hint, 12.5f, Ui.FAINT).apply { setPadding(0, 0, 0, c.dp(4)) })
+    if (hint != null) body.addView(c.text(hint, 12.5f, Ui.FAINT).apply { setPadding(0, 0, 0, c.dp(4)); foldable() })
     card.addView(body)
+    sectionHeads[body] = head
+    sectionTitles[card] = title
     var shown = prefs.getBoolean("open_$key", open)
     val column = this
     fun apply(animate: Boolean) {
@@ -718,6 +818,10 @@ fun LinearLayout.section(title: String, key: String, icon: String? = null, open:
     addView(card)
     return body
 }
+
+// A folded section's body and the title row that opens it; a section's card and its title (the search: Finder).
+val sectionHeads = java.util.WeakHashMap<View, View>()
+val sectionTitles = java.util.WeakHashMap<View, String>()
 
 // A small heading inside a card.
 fun Context.subhead(label: String): TextView = text(label.uppercase(), 11f, Ui.FAINT, Ui.BOLD).apply {
@@ -738,7 +842,11 @@ class RoundAction(context: Context, icon: String, label: String, onClick: () -> 
         addView(disc, LayoutParams(context.dp(58), context.dp(58)))
         word.gravity = Gravity.CENTER
         addView(word, lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = context.dp(7) })
-        disc.setOnClickListener { onClick() }
+        disc.setOnClickListener {
+            disc.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+            onClick()
+        }
+        disc.pressable(0.93f)
         set(false)
     }
 
@@ -780,6 +888,7 @@ class GridTile(context: Context, icon: String, title: String, onClick: () -> Uni
         addView(head, lp().apply { topMargin = context.dp(10) })
         addView(line)
         setOnClickListener { onClick() }
+        pressable(0.97f)
         set(STATE_IDLE, "", 0)
     }
 

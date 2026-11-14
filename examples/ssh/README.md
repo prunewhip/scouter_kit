@@ -551,6 +551,14 @@ with the app in the back.
   mood) that show it on the glasses, notify, buzz, keep a hub note, set a reminder ("remind me to … in 20
   minutes / at 7:30"), ask the phone's LFM what follows the phrase ("hey vox, …"), run a Vox command or POST a
   webhook; "Hey Vox" and "Remind me" come on, others ready to switch on; edited and tried on the Listen page.
+- **Finding things** (`Finder.kt`, `Ui.kt`): the home page has the apps as round tiles (Listen, Ask, Podcasts, Car,
+  Captions, Talk, TV, Find), lit while theirs is on, and a search (the magnifier, or Find): a word such as "fade" or
+  "weather" lists every label, switch and section naming it in any tab, a tap goes there (the tab chosen, a folded
+  section opened, the page scrolled, the label flashed); "Look in Settings" carries the word there, and Settings has
+  the same search. Long explanations show their first lines and "more" (`foldable`, `foldLongText`; the search
+  reads the whole text). Buttons, chips and tiles sink a little while pressed (`pressable`), tabs slide in from
+  their side and tick, cards are lit from above (`surface`), and the main screen redraws at most ten times a second
+  however fast the state changes.
 - **Startup, the same every time** (`Ready.kt`; the home page's Startup list): everything a session needs in one
   list (permissions, Bluetooth, the glasses paired and connected, the keyboard service, this phone's SSH server, the
   terminal, the battery rule, notification access), each on, starting or needing a tap (Allow, Turn on, Pair); one

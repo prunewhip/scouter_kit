@@ -125,7 +125,27 @@ class MainActivity : Activity() {
     private var tab = 0
     private var resumed = false
     private var checked: String? = null // the last "Check the glasses"
-    private val listener: () -> Unit = { show() }
+    // The state changed: the screen is drawn again, at most ten times a second (the changes come in bursts, and
+    // each drawing reads the terminal and every tab's state: taps and scrolling stay smooth).
+    private var showAt = 0L
+    private var showQueued = false
+    private val showLater = Runnable {
+        showQueued = false
+        if (resumed) {
+            showAt = android.os.SystemClock.uptimeMillis()
+            show()
+        }
+    }
+    private val listener: () -> Unit = {
+        if (!showQueued) {
+            showQueued = true
+            content.postDelayed(showLater, (showAt + 100 - android.os.SystemClock.uptimeMillis()).coerceIn(0, 100))
+        }
+    }
+    // Home's apps (lit while theirs is on).
+    private lateinit var listenApp: RoundAction
+    private lateinit var carApp: RoundAction
+    private lateinit var talkApp: RoundAction
     private val previewListener: () -> Unit = {
         runOnUiThread {
             previewView.refresh()
@@ -161,6 +181,7 @@ class MainActivity : Activity() {
         pages += voicePage(settings)
         pages += tvPage()
         for (p in pages) content.addView(p, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        for (p in pages) p.foldLongText() // the long explanations: their first lines, "more" for the rest
         selectTab(getPreferences(MODE_PRIVATE).getInt("tab", 0), animate = false)
         handle(intent)
     }
@@ -193,7 +214,10 @@ class MainActivity : Activity() {
             val cell = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER_HORIZONTAL
-                setOnClickListener { if (i == items.size - 1) startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) else selectTab(i) }
+                setOnClickListener {
+                    it.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                    if (i == items.size - 1) startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) else selectTab(i)
+                }
             }
             val pill = FrameLayout(this)
             val glyph = IconView(this, icon, 22, Ui.MUTED)
@@ -215,14 +239,21 @@ class MainActivity : Activity() {
         val was = tab
         tab = i.coerceIn(0, pages.size - 1)
         for ((k, p) in pages.withIndex()) p.visibility = if (k == tab) View.VISIBLE else View.GONE
+        // The page comes in from the side its tab is on.
         if (animate && was != tab) pages[tab].apply {
             alpha = 0f
-            translationY = dp(10).toFloat()
-            animate().alpha(1f).translationY(0f).setDuration(180).start()
+            translationY = 0f
+            translationX = dp(26).toFloat() * (if (tab > was) 1 else -1)
+            animate().alpha(1f).translationX(0f).setDuration(200).setInterpolator(android.view.animation.DecelerateInterpolator(1.6f)).start()
         }
         for ((k, item) in tabItems.withIndex()) {
             val (pill, glyph, label) = item
             val on = k == tab
+            if (on && animate && was != tab) pill.apply { // the chosen tab's pill pops in
+                scaleX = 0.7f
+                scaleY = 0.7f
+                animate().scaleX(1f).scaleY(1f).setDuration(220).setInterpolator(android.view.animation.OvershootInterpolator(2.2f)).start()
+            }
             pill.background = if (on) accentGradient(dp(16).toFloat()) else null
             glyph.color = if (on) Ui.ON_ACCENT else Ui.MUTED
             label.setTextColor(if (on) Ui.TEXT else Ui.MUTED)
@@ -259,9 +290,23 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(4), 0, 0, 0)
         }
-        top.addView(text("Vox", 30f, Ui.TEXT, Ui.BLACK).apply { letterSpacing = -0.02f }, lp(0, weight = 1f))
+        top.addView(text("Vox", 30f, Ui.TEXT, Ui.BLACK).apply {
+            letterSpacing = -0.02f
+            // The name in the accent's two colours.
+            paint.shader = android.graphics.LinearGradient(0f, 0f, paint.measureText("Vox"), 0f, Ui.ACCENT, Ui.ACCENT2,
+                android.graphics.Shader.TileMode.CLAMP)
+        }, lp(0, weight = 1f))
         linkPill = statusPill("Glasses", Ui.FAINT)
         top.addView(linkPill, lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(10) })
+        // Find anything (Finder.kt).
+        val findDisc = FrameLayout(this).apply {
+            val r = dp(22).toFloat()
+            background = ripple(rounded(Ui.RAISED, r, dp(1), Ui.STROKE), r)
+            setOnClickListener { find() }
+            pressable(0.93f)
+        }
+        findDisc.addView(IconView(this, "search", 20, Ui.TEXT), FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        top.addView(findDisc, LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(10) })
         powerDisc = FrameLayout(this).apply { setOnClickListener { power() } }
         powerIcon = IconView(this, "power", 22, Ui.TEXT)
         powerDisc.addView(powerIcon, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
@@ -317,6 +362,31 @@ class MainActivity : Activity() {
         tunesAction = RoundAction(this, "spark", "Tunes") { ScouterService.send(this, ScouterService.ACTION_TUNES) }
         for (a in listOf(displayAction, alwaysAction, voiceAction, pointerAction, tunesAction)) actions.addView(a, lp(0, weight = 1f))
         page.addView(actions)
+
+        // The apps: what Vox does beyond the screen and the terminal, each one tap away (they were cards deep in
+        // the Voice tab).
+        page.addView(text("APPS", 11.5f, Ui.MUTED, Ui.BOLD).apply {
+            letterSpacing = 0.14f
+            setPadding(dp(4), dp(22), dp(4), dp(12))
+        })
+        fun listen(tab: String) = startActivity(Intent(this, ListenActivity::class.java).putExtra(ListenActivity.EXTRA_TAB, tab))
+        listenApp = RoundAction(this, "wave", "Listen") { listen("live") }
+        carApp = RoundAction(this, "car", "Car") { goTo(3) { carState } }
+        talkApp = RoundAction(this, "terminal", "Talk") { ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "voicemode") }
+        val apps = listOf(listenApp, RoundAction(this, "chat", "Ask") { listen("ask") },
+            RoundAction(this, "headphones", "Podcasts") { startActivity(Intent(this, PodcastActivity::class.java)) }, carApp,
+            RoundAction(this, "captions", "Captions") {
+                if (!ScouterService.running) android.widget.Toast.makeText(this, "Start Vox first", android.widget.Toast.LENGTH_SHORT).show()
+                else ScouterService.send(this, ScouterService.ACTION_PANEL, "do" to "captions")
+            }, talkApp, RoundAction(this, "tv", "TV") { selectTab(TV_TAB) }, RoundAction(this, "search", "Find") { find() })
+        for (line in apps.chunked(4)) {
+            val r = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 0, 0, dp(14))
+            }
+            for (a in line) r.addView(a, lp(0, weight = 1f))
+            page.addView(r)
+        }
         previewButton = button("▶  Preview on the glasses", 0) {
             ScouterService.send(this, ScouterService.ACTION_PANEL, "do" to "demo")
         }
@@ -1483,6 +1553,9 @@ class MainActivity : Activity() {
         voiceAction.set(Session.listening, if (Session.listening) "Listening" else "Voice")
         pointerAction.set(Session.pointer)
         tunesAction.set(Session.tunes)
+        listenApp.set(settings.listenOn, if (settings.listenOn) "Listening" else "Listen")
+        carApp.set(Session.car.isNotEmpty())
+        talkApp.set(Session.voiceMode)
         previewButton.text = if (Session.demo) "■  Stop the preview" else "▶  Preview on the glasses"
 
         // The look per app.
@@ -1570,6 +1643,7 @@ class MainActivity : Activity() {
         val old = pages[1]
         val y = old.scrollY
         val page = screenPage(Settings(this))
+        page.foldLongText()
         pages[1] = page
         val i = content.indexOfChild(old)
         content.removeView(old)
@@ -1578,6 +1652,22 @@ class MainActivity : Activity() {
         page.post { page.scrollTo(0, y) }
         sharingShown = null
         previewView.refresh()
+    }
+
+    // Find anything: every tab's labels (and Settings', from the row under the results).
+    private fun find(start: String = "") {
+        val names = listOf("Glasses", "Screen", "Terminal", "Voice", "TV")
+        Finder.open(this, pages.mapIndexed { i, p -> names[i] to p }, start,
+            "Look in Settings" to { q -> startActivity(Intent(this, SettingsActivity::class.java).putExtra("find", q)) }) { i, f ->
+            selectTab(i)
+            Finder.reveal(f.view)
+        }
+    }
+
+    // A tab, at one of its parts.
+    private fun goTo(tab: Int, view: () -> View) {
+        selectTab(tab)
+        Finder.reveal(view())
     }
 
     // The startup list: one line while everything is on (a tap opens it), every item with its dot otherwise.
@@ -1824,6 +1914,8 @@ class MainActivity : Activity() {
     override fun onPause() {
         resumed = false
         content.removeCallbacks(readyTick)
+        content.removeCallbacks(showLater)
+        showQueued = false
         Session.listeners -= listener
         Session.foreground = false
         Preview.wanted = false
