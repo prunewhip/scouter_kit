@@ -580,6 +580,14 @@ with the app in the back.
   session. Both eyes keep the chosen brightness: an arm that restarted is back at the firmware's level and a level
   sent during the look-up fade is lost on that arm, so both arms' levels are read every 30 s and 2 s after an arm's
   link comes up, and an arm that differs (twice, past the fade) gets the level again.
+  The keyboard service's switch: Android locks it for an app installed from a download ("Restricted setting");
+  `Ready.restricted` reads that lock (the `access_restricted_settings` app op) and `Ready.keysHelp` walks through
+  the unlock (accessibility, App info ⋮ Allow restricted settings, accessibility again); `/root/vox-tools/grant.sh`
+  does it all over adb. Connecting: an arm whose connection fails is connected again directly (fast scan) after
+  0.3, 1, 2 and 4 s before Android's slow autoConnect (`GlassesLink.again`); both arms get 60 s (an arm that
+  connected is no longer dropped because the other took over 30 s); the log says how long each arm and the whole
+  start took. Pairing scans as the page opens, stops 1.2 s after a whole pair is seen and pairs the only pair
+  found without a tap.
 - **Podcasts** (Voice tab, Podcasts: `PodcastActivity` + `Podcasts.kt`): a text read aloud in several voices as an
   episode on the phone, a port of the core of the Narrator Studio app. Paste or open a .txt / .md (an article, a
   chapter, notes) or a script with `HOST:` / `GUEST:` lines (front matter `title:` / `style:`, `## ` headings,

@@ -97,9 +97,7 @@ class SettingsActivity : Activity() {
         })
         hotState = text("", 13f, Ui.MUTED)
         hot.addView(hotState)
-        hot.addView(button("Turn them on in every app (Accessibility)") {
-            runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        })
+        hot.addView(button("Turn them on in every app (Accessibility)") { Ready.keysHelp(this) })
         hot.addView(text("Accessibility, Installed apps, Vox keyboard shortcuts: on. It filters keys and the trackpad and " +
             "notes which app is in front (its name, for the look per app); it reads nothing on the screen. If Android " +
             "says the setting is restricted: Apps, Vox, ⋮, Allow restricted settings.", 12f, Ui.FAINT).apply { setPadding(0, dp(6), 0, 0) })

@@ -670,10 +670,11 @@ class ScouterService : Service() {
 
     private fun serverKey(s: Settings.Server) = listOf(s.host, s.port, s.user, s.command, s.moshPorts).joinToString(" ")
 
-    // A start in progress (Native.glassesStart waits up to 30 s for both arms: on its own thread, so taps, voice
+    // A start in progress (Native.glassesStart waits up to 60 s for both arms: on its own thread, so taps, voice
     // and shortcuts never wait for it), and the starts that failed in a row (each retry waits longer).
     private var glassesStarting = false
     private var glassesTries = 0
+    private var glassesSince = 0L // when the start began (the log says how long it took)
 
     private fun startGlasses() {
         if (glassesWith != null || stopped != null || glassesStarting) return
@@ -701,6 +702,7 @@ class ScouterService : Service() {
         val (brightness, angle) = settings.brightness to settings.angle
         val (ignoreWorn, battery) = (BuildConfig.DEBUG && settings.ignoreWorn) to settings.battery
         glassesStarting = true
+        glassesSince = SystemClock.elapsedRealtime()
         Thread({
             val error = runCatching {
                 Native.glassesStart(l, left, right, dx.toInt(), dy.toInt(), brightness, angle, font, ignoreWorn, battery)
@@ -729,6 +731,8 @@ class ScouterService : Service() {
             work.postDelayed(retryGlasses, wait)
             return
         }
+        Log.i(TAG, "glasses: ready in ${SystemClock.elapsedRealtime() - glassesSince} ms" +
+            (if (glassesTries > 0) " (after ${glassesTries} failed starts)" else ""))
         glassesTries = 0
         val emulated = BuildConfig.FLAVOR == "emulated"
         link = l

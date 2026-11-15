@@ -1730,7 +1730,7 @@ class MainActivity : Activity() {
                 ScouterService.send(this)
                 show()
             }
-            "keys" -> openAccessibility()
+            "keys" -> Ready.keysHelp(this)
             "server" -> if (!Termux.permitted(this)) requestPermissions(arrayOf(Termux.PERMISSION), READY_REQUEST)
                 else Ready.healSoon(this, "tap")
             "battery" -> {
@@ -1742,14 +1742,6 @@ class MainActivity : Activity() {
             }
             "notes" -> runCatching { startActivity(Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
         }
-    }
-
-    // Vox's switch in Android's accessibility settings (its own page where Android has one).
-    private fun openAccessibility() {
-        val me = android.content.ComponentName(this, VoxKeys::class.java).flattenToString()
-        runCatching {
-            startActivity(Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS").putExtra(Intent.EXTRA_COMPONENT_NAME, me))
-        }.onFailure { runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
     }
 
     private fun title(t: String) {

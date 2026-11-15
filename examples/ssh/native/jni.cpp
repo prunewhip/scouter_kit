@@ -563,7 +563,7 @@ JNIEXPORT jstring JNICALL Java_scouterkit_ssh_Native_version(JNIEnv *env, jclass
 
 // ------------------------------------------------ glasses
 
-// Init through the link (null: the emulated arms), then the terminal. Blocks up to 30 s; an error or null.
+// Init through the link (null: the emulated arms), then the terminal. Blocks up to 60 s; an error or null.
 JNIEXPORT jstring JNICALL Java_scouterkit_ssh_Native_glassesStart(JNIEnv *env, jclass, jobject link, jstring left,
                                                                    jstring right, jint dx, jint dy, jint brightness,
                                                                    jint angle, jbyteArray font, jboolean ignore_worn,

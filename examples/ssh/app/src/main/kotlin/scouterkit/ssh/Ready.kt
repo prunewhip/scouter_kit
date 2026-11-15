@@ -55,6 +55,60 @@ object Ready {
         android.provider.Settings.Secure.putString(cr, key, (parts + me.flattenToString()).joinToString(":"))
     }.getOrElse { Log.w(ScouterService.TAG, "ready: $key: ${it.message}"); false }
 
+    // Android's lock on accessibility for an app installed from a download (not a store): its switch is greyed out
+    // ("Restricted setting") until App info, ⋮, Allow restricted settings. The app op says so where Android keeps it
+    // there; false when it cannot tell (the help then offers both steps anyway).
+    fun restricted(c: Context): Boolean = runCatching {
+        val ops = c.getSystemService(android.app.AppOpsManager::class.java)
+        val m = ops.unsafeCheckOpNoThrow("android:access_restricted_settings", android.os.Process.myUid(), c.packageName)
+        m == android.app.AppOpsManager.MODE_ERRORED || m == android.app.AppOpsManager.MODE_IGNORED
+    }.getOrDefault(false)
+
+    // Vox's own switch in Android's accessibility settings (its page where Android has one).
+    fun openAccessibility(a: android.app.Activity) {
+        prefs(a).edit().putInt("keys_tried", prefs(a).getInt("keys_tried", 0) + 1).apply()
+        val me = ComponentName(a, VoxKeys::class.java).flattenToString()
+        runCatching {
+            a.startActivity(android.content.Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
+                .putExtra(android.content.Intent.EXTRA_COMPONENT_NAME, me))
+        }.onFailure { runCatching { a.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) } }
+    }
+
+    fun openAppInfo(a: android.app.Activity) {
+        runCatching {
+            a.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:${a.packageName}")))
+        }
+    }
+
+    // The keyboard service switched on, step by step: where Android has locked it (or the user already tried and it
+    // is still off), the unlock comes first.
+    fun keysHelp(a: android.app.Activity) {
+        if (Hotkeys.everywhere(a)) {
+            android.widget.Toast.makeText(a, "The keyboard service is on", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val locked = restricted(a) || prefs(a).getInt("keys_tried", 0) > 0
+        val d = a.dialog()
+        if (locked) d.setTitle("Unlock the keyboard service")
+            .setMessage("Android locks this switch for apps installed from a download (Vox comes from GitHub, not the Play " +
+                "Store). Once:\n\n" +
+                "1. Open accessibility and tap Vox keyboard shortcuts. If Android says \"Restricted setting\", tap OK.\n" +
+                "2. Open App info, tap ⋮ (top right), then Allow restricted settings, and confirm.\n" +
+                "3. Open accessibility again: turn Vox keyboard shortcuts on and tap Allow.\n\n" +
+                "Android keeps it on after that. (Or Claude runs one adb command and Vox turns it back on by itself.)")
+            .setPositiveButton("Open accessibility") { _, _ -> openAccessibility(a) }
+            .setNeutralButton("Open App info") { _, _ -> openAppInfo(a) }
+            .setNegativeButton("Cancel", null)
+        else d.setTitle("Turn on the keyboard service")
+            .setMessage("Next: tap Vox keyboard shortcuts, turn it on, then tap Allow. It passes your keyboard's keys and " +
+                "trackpad to the glasses from any app; it reads nothing on the screen.\n\nIf Android says \"Restricted " +
+                "setting\": come back and tap Turn on again, Vox shows how to unlock it.")
+            .setPositiveButton("Open accessibility") { _, _ -> openAccessibility(a) }
+            .setNegativeButton("Cancel", null)
+        d.show()
+    }
+
     // The keyboard service on again (quick: a settings write). True when it is on.
     fun keys(c: Context): Boolean {
         if (Hotkeys.everywhere(c)) return true
@@ -155,7 +209,9 @@ object Ready {
             Hotkeys.everywhere(c) -> Check("keys", "Keyboard and trackpad", OK,
                 if (secure(c)) "On in every app; Vox switches it back on by itself" else "On in every app")
             secure(c) && prefs(c).getBoolean("keep_keys", true) -> Check("keys", "Keyboard and trackpad", STARTING, "Switching it on")
-            else -> Check("keys", "Keyboard and trackpad", NEEDS_YOU, "Off: Android switched Vox's keyboard service off.", "Turn on")
+            restricted(c) -> Check("keys", "Keyboard and trackpad", NEEDS_YOU,
+                "Android locked Vox's keyboard service (installed from a download): tap Unlock for the steps.", "Unlock")
+            else -> Check("keys", "Keyboard and trackpad", NEEDS_YOU, "Off: Vox's keyboard service needs turning on.", "Turn on")
         }
 
         if (local(c)) {
