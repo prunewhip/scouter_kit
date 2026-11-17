@@ -163,6 +163,14 @@ class ScouterService : Service() {
         }
     }
     private var blankByLock = false // the display went off because the phone locked
+    // Both eyes' brightness checked every 8 s while the glasses are up: an eye left dark (a look-up fade cut short by
+    // a switch: its program stopped before it put the level back) is put right within seconds, not half a minute.
+    private val brightTicker = object : Runnable {
+        override fun run() {
+            if (Session.glasses == "ready") keepBrightness(false)
+            work.postDelayed(this, 8000)
+        }
+    }
     // Each arm's battery, every 30 s while the glasses are up.
     private val batteryTicker = object : Runnable {
         override fun run() {
@@ -328,6 +336,7 @@ class ScouterService : Service() {
         work.postDelayed(tabPoll, 5000)
         work.postDelayed(watchdog, 60000)
         work.postDelayed(batteryTicker, 5000)
+        work.postDelayed(brightTicker, 8000)
         Ready.healSoon(this, "service start")
         registerReceiver(lock, IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) })
         getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
@@ -525,6 +534,7 @@ class ScouterService : Service() {
         if (Session.tunes || tunesBar) Tunes.stop()
         Session.tunes = false
         work.removeCallbacks(batteryTicker)
+        work.removeCallbacks(brightTicker)
         runCatching { unregisterReceiver(lock) }
         runCatching { unregisterReceiver(bonds) }
         runCatching { unregisterReceiver(adapterState) }
@@ -4627,6 +4637,9 @@ class ScouterService : Service() {
         if (show == Settings.SCREEN && Session.screenSource.isEmpty()) Session.screenSource = remote?.key ?: Settings.PHONE
         settings.show = show
         Session.source = settings.sourceName(chosen())
+        // Each switch can cut a look-up fade short on one eye: both eyes' brightness checked a moment later.
+        work.removeCallbacks(brightSoon)
+        work.postDelayed(brightSoon, settings.fadeMs + 900L)
         // A screen coming on: the tab bar over it once its picture's size is known (stripKey: drawn anew).
         stripKey = ""
         stripHover = -1
