@@ -1793,7 +1793,9 @@ class ScouterService : Service() {
         settings.phoneForce = !settings.phoneForce
         Log.i(TAG, "look-up only: ${!settings.phoneForce}")
         refresh()
-        note(if (settings.phoneForce) "Always on" else "Heads-up: look up to see it")
+        // Said plainly and long enough to read (Alt+0 must never leave a doubt), after the Alt-held help is gone.
+        val msg = if (settings.phoneForce) "ALT+0 · HEADS-UP OFF · always showing" else "ALT+0 · HEADS-UP ON · look up to see it"
+        work.postDelayed({ note(msg, 2600) }, 120)
     }
 
     // ------------------------------------------------ preview mode

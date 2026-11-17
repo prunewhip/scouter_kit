@@ -108,7 +108,9 @@ object Hotkeys {
         if (!settings.hotkeys) return false
         altHold(context, e)
         // A quick reply being written on the dashboard: every key is its (Alt+Space / Alt+V still listen).
-        if (Session.replyKey != null && !(e.isAltPressed && (e.keyCode == KeyEvent.KEYCODE_SPACE || e.keyCode == KeyEvent.KEYCODE_V))) {
+        // (Alt+0, heads-up mode, works everywhere: never typed into anything.)
+        if (Session.replyKey != null && !(e.isAltPressed && (e.keyCode == KeyEvent.KEYCODE_SPACE || e.keyCode == KeyEvent.KEYCODE_V ||
+                e.keyCode == KeyEvent.KEYCODE_0))) {
             if (e.action != KeyEvent.ACTION_DOWN) return true
             val what = when (e.keyCode) {
                 KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "send"
