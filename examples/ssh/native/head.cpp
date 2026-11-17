@@ -1,6 +1,6 @@
 #include "head.hpp"
 
-#include <scouter_kit_g1.hpp>
+#include "g1/scouter_kit_g1.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -22,8 +22,7 @@ namespace g1 = scouter_kit::g1;
 namespace ssh {
 namespace {
 
-constexpr double kSnapDeg = 25;     // a turn this far from the middle shows the screen beside
-constexpr double kBackDeg = 18;     // back inside this, the middle one again
+constexpr double kEdgeDeg = 40;     // a turn this far either way reaches that edge of the panorama
 constexpr double kStillDps = 3;     // slower than this (after the bias) the head counts as still
 constexpr uint32_t kRateHz = 26;    // GYRO_RATE while on
 constexpr int kPollMs = 40;         // the gyroscope read this often (a request over Bluetooth each)
@@ -33,7 +32,7 @@ std::mutex g_mutex;
 std::atomic<bool> g_running{false};
 std::atomic<int64_t> g_touched{0};
 std::atomic<int> g_screens{0};
-std::atomic<int> g_slice{-1};
+std::atomic<int> g_pan{-1};
 std::atomic<bool> g_center{false};
 
 g1::Arm *Pick() {
@@ -55,11 +54,11 @@ void HeadView::Touch(int screens) {
   std::lock_guard<std::mutex> lock(g_mutex);
   if (g_running) return;
   g_running = true;
-  g_slice = screens / 2;
+  g_pan = 500;
   std::thread([this] { Run(); }).detach();
 }
 
-int HeadView::Slice() { return g_running ? g_slice.load() : -1; }
+int HeadView::Pan() { return g_running ? g_pan.load() : -1; }
 int HeadView::Screens() { return g_screens; }
 void HeadView::Center() { g_center = true; }
 
@@ -95,24 +94,15 @@ void HeadView::Run() {
         still_n = 0;
         yaw += r * dt;
       }
-      int n = g_screens, mid = n / 2;
-      double reach = kSnapDeg * (mid + 1);
-      yaw = std::clamp(yaw, -reach, reach);
-      // Left is +: screen mid - k for k snaps left.
-      int k = int(std::floor((std::fabs(yaw) - kSnapDeg) / kSnapDeg)) + 1;
-      if (std::fabs(yaw) < kSnapDeg) k = 0;
-      int cur = g_slice, want = std::clamp(mid + (yaw > 0 ? -k : k), 0, n - 1);
-      if (cur != mid && want == mid && std::fabs(yaw) > kBackDeg) want = cur; // hysteresis home
-      if (want != cur) {
-        g_slice = want;
-        LOG("head: screen %d of %d (turn %.0f degrees)", want + 1, n, yaw);
-      }
+      yaw = std::clamp(yaw, -kEdgeDeg, kEdgeDeg);
+      // Left is +: turning left slides toward the leftmost edge.
+      g_pan = std::clamp(int(std::lround(500 - yaw * 500 / kEdgeDeg)), 0, 1000);
     }
     last = t;
   }
   if (arm) arm->SysWrite(g1::PROP_GYRO_RATE, 0);
   g_running = false;
-  g_slice = -1;
+  g_pan = -1;
   LOG("head: off");
 }
 

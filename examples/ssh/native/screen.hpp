@@ -53,6 +53,9 @@ struct ScreenOptions {
   bool look_up = false;
   int angle = 20;
   bool hold = false;
+  // A panorama from a server (screens side by side): the part shown follows the head's turn (HeadView), else the
+  // middle screen.
+  bool head = true;
 };
 
 // What the mirror may take back when the arms' arena runs short (the terminal's kept fonts): called, with no lock

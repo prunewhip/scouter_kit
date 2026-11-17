@@ -367,6 +367,18 @@ object Hotkeys {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) VoxKeys.global(nav)
             return true
         }
+        // Alt+Shift+Z: the head-turn view on a panorama (the gyroscope follows the head) on or off; on again, straight
+        // ahead is the middle.
+        if (e.keyCode == KeyEvent.KEYCODE_Z && e.isShiftPressed) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) {
+                val on = !settings.headTurn
+                settings.headTurn = on
+                if (on) Native.headCenter()
+                android.widget.Toast.makeText(context.applicationContext, if (on) "Head turn on" else "Head turn off",
+                    android.widget.Toast.LENGTH_SHORT).show()
+            }
+            return true
+        }
         // Alt+Shift+D: the phone's Linux desktop (Desktop, the Termux:X11 app); Alt+D alone is the preview.
         if (e.keyCode == KeyEvent.KEYCODE_D && e.isShiftPressed) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Desktop.open(context)

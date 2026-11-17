@@ -1344,8 +1344,8 @@ namespace {
 // the pointer's x, y (1/10000 of the screen; -1 none), clean, crop top, crop bottom, (a panel's generation, unused
 // here), heads-up, its angle, a panel held on.
 ssh::ScreenOptions Options(JNIEnv *env, jintArray options) {
-  jint v[30] = {0, 50, 0, 100, 0, 0, 0, 100, 100, 100, 2, 0, 0, 1, 0, 100, 128, 1, 0, 1, 6, -1, -1, 1, 0, 0, 0, 0, 20, 0};
-  jsize n = std::min<jsize>(env->GetArrayLength(options), 30);
+  jint v[31] = {0, 50, 0, 100, 0, 0, 0, 100, 100, 100, 2, 0, 0, 1, 0, 100, 128, 1, 0, 1, 6, -1, -1, 1, 0, 0, 0, 0, 20, 0, 1};
+  jsize n = std::min<jsize>(env->GetArrayLength(options), 31);
   env->GetIntArrayRegion(options, 0, n, v);
   ssh::ScreenOptions o;
   o.fit = std::clamp(int(v[0]), 0, 2);
@@ -1377,6 +1377,7 @@ ssh::ScreenOptions Options(JNIEnv *env, jintArray options) {
   o.look_up = v[27] != 0;
   o.angle = std::clamp(int(v[28]), -60, 80);
   o.hold = v[29] != 0;
+  o.head = v[30] != 0;
   return o;
 }
 
@@ -1407,30 +1408,31 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
   const uint8_t *p = Pixels(env, buffer, w, h, stride);
   if (!p) return ssh::ScreenMirror::kSame;
   ssh::ScreenOptions o = Options(env, options);
-  // A panorama (screens side by side, at least 2.5 times as wide as tall: glasses-panorama): the head's turn
-  // picks the screen shown (HeadView), each one filling the glasses.
+  // A panorama (screens side by side, at least 2.5 times as wide as tall: glasses-panorama): with the head-turn
+  // view on, the part shown follows the head (HeadView); off, the middle screen. Either way it fills the glasses.
   if (h > 0 && w * 2 >= h * 5) {
     int screens = std::max(2, int(std::lround(double(w) * 3 / (double(h) * 4))));
-    ssh::HeadView &head = ssh::HeadView::Get();
-    head.Touch(screens);
-    int slice = head.Slice();
-    if (slice < 0) slice = screens / 2;
+    int pan = 500;
+    if (o.head) {
+      ssh::HeadView &head = ssh::HeadView::Get();
+      head.Touch(screens);
+      if (head.Pan() >= 0) pan = head.Pan();
+    }
     o.fit = ssh::ScreenOptions::kFill;
     o.zoom = 100;
-    o.pan_x = slice * 100 / (screens - 1);
+    o.pan_x = (pan + 5) / 10;
     o.pan_y = 50;
   }
   return screen->Frame(p, w, h, stride, o);
 }
 
-// The head-turn view (HeadView): screens * 16 + the one looked at, or -1 while off.
-JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_headSlice(JNIEnv *, jclass) {
+// The head-turn view (HeadView): screens * 10000 + where it sits (0 leftmost edge ... 1000 rightmost), or -1 off.
+JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_headPan(JNIEnv *, jclass) {
   ssh::HeadView &head = ssh::HeadView::Get();
-  int slice = head.Slice();
-  return slice < 0 ? -1 : head.Screens() * 16 + slice;
+  int pan = head.Pan();
+  return pan < 0 ? -1 : head.Screens() * 10000 + pan;
 }
 
-// The head-turn view's middle screen is where the head points now.
 JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headCenter(JNIEnv *, jclass) { ssh::HeadView::Get().Center(); }
 
 // Heads-up between frames (ScreenMirror::Look): 1 when the panels came on again (send a frame), else 0.

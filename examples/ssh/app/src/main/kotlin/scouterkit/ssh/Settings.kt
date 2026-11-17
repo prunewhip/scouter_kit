@@ -94,6 +94,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("screen_sharpen", true)
         set(v) = prefs.edit().putBoolean("screen_sharpen", v).apply()
     var screenFps: Int by Number("screen_fps", 5)
+    // A panorama from a server (screens side by side, glasses-panorama): the part shown follows the head's turn
+    // (the gyroscope), else the middle screen. Alt+Shift+Z.
+    var headTurn: Boolean
+        get() = prefs.getBoolean("head_turn", true)
+        set(v) = prefs.edit().putBoolean("head_turn", v).apply()
     // The phone's screen keeps the panels off while an arm is in the case (charging), or while both arms say
     // "not worn" (a guess from the arms' radio, so off by default).
     var screenHideCase: Boolean
@@ -137,7 +142,8 @@ class Settings(context: Context) {
         if (phoneForce) 0 else 1, angle,
         if (Session.overlay == Panels.HELP || Session.overlay == Panels.SETTINGS || Session.overlay == Panels.NOTE ||
             Session.overlay == Panels.INTRO || Session.overlay == Panels.HUB || Session.overlay == Panels.CAPTIONS ||
-            Session.overlay == Panels.HOME || Session.overlay == Panels.PEOPLE) 1 else 0)
+            Session.overlay == Panels.HOME || Session.overlay == Panels.PEOPLE) 1 else 0,
+        if (headTurn) 1 else 0)
 
     // Once: the fast path (black and white) for everyone, as 0.4 made it the default.
     fun migrate() {

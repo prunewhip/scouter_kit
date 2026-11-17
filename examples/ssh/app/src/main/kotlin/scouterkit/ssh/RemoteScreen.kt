@@ -18,7 +18,8 @@ import java.util.concurrent.atomic.AtomicReference
 class RemoteScreen(private val context: Context, val server: Settings.Server, private val onStopped: (String) -> Unit) {
     val key get() = "screen:${server.id}"
     @Volatile var state = Native.SCREEN_SAME
-    private var lastHead = -1 // Native.headSlice() last seen
+    private var lastHead = -1 // Native.headPan() last seen
+    private var lastSlice = -1 // the panorama's screen the pointer was put on
     @Volatile var images = 0 // images received so far (the service shows the screen once one has come)
     @Volatile private var released = false
     @Volatile private var stream: Bootstrap.Stream? = null
@@ -160,15 +161,19 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
                 options = now
                 due = true
             }
-            // A panorama: the head turned to another of its screens. It shows at once, and the pointer goes to its
-            // middle (an X desktop without a window manager types into the window under the pointer).
-            val head = Native.headSlice()
+            // A panorama: the head turned. The picture slides at once, and when another of its screens is mostly in
+            // view the pointer goes to that one's middle (an X desktop without a window manager types into the window
+            // under the pointer).
+            val head = Native.headPan()
             if (head != lastHead) {
                 if (head >= 0) {
-                    val n = head / 16
-                    val slice = head % 16
-                    RemoteInput.current?.takeIf { it.server.id == server.id }?.send("p ${(2 * slice + 1) * 10000 / (2 * n)} 5000")
-                }
+                    val n = head / 10000
+                    val slice = ((head % 10000) * (n - 1) + 500) / 1000
+                    if (slice != lastSlice) {
+                        lastSlice = slice
+                        RemoteInput.current?.takeIf { it.server.id == server.id }?.send("p ${(2 * slice + 1) * 10000 / (2 * n)} 5000")
+                    }
+                } else lastSlice = -1
                 lastHead = head
                 due = true
             }

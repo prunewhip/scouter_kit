@@ -72,9 +72,10 @@ object Native {
     // contrast, sharpen, dark in the case, dark when folded, gamma, threshold, steady, dither, detail, budget).
     // Heads-up on a screen, between frames: the head read, the panels off or on (1: on again, send a frame).
     @JvmStatic external fun screenLook(options: IntArray): Int
-    // The head-turn view (a panorama from a server: screens side by side, the head's turn picks one; HeadView):
-    // screens * 16 + the one looked at (0 leftmost), or -1 while off. headCenter: the middle one is straight ahead.
-    @JvmStatic external fun headSlice(): Int
+    // The head-turn view (a panorama from a server: screens side by side, the part shown follows the head;
+    // HeadView): screens * 10000 + where it sits (0 leftmost edge ... 1000 rightmost), or -1 while off.
+    // headCenter: straight ahead is the middle again.
+    @JvmStatic external fun headPan(): Int
     @JvmStatic external fun headCenter()
     @JvmStatic external fun screenFrame(buffer: java.nio.ByteBuffer, width: Int, height: Int, stride: Int,
                                         options: IntArray): Int

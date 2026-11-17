@@ -41,6 +41,7 @@ object Panels {
             "Alt+U" to "Tunes",
             "Alt+D" to "preview mode (demo)",
             "Alt+Shift+D" to "the phone's Linux desktop",
+            "Alt+Shift+Z" to "head turn on a panorama",
         ),
         "Media and voice" to listOf(
             "Alt+P" to "play / pause",
