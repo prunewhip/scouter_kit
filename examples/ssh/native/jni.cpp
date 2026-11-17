@@ -21,6 +21,9 @@
 #include "keys.hpp"
 #include "mosh_client.hpp"
 #include "screen.hpp"
+#include "head.hpp"
+
+#include <cmath>
 #include "terminal.hpp"
 #include "tunes.hpp"
 
@@ -1403,8 +1406,32 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
   if (!screen) return ssh::ScreenMirror::kStopped;
   const uint8_t *p = Pixels(env, buffer, w, h, stride);
   if (!p) return ssh::ScreenMirror::kSame;
-  return screen->Frame(p, w, h, stride, Options(env, options));
+  ssh::ScreenOptions o = Options(env, options);
+  // A panorama (screens side by side, at least 2.5 times as wide as tall: glasses-panorama): the head's turn
+  // picks the screen shown (HeadView), each one filling the glasses.
+  if (h > 0 && w * 2 >= h * 5) {
+    int screens = std::max(2, int(std::lround(double(w) * 3 / (double(h) * 4))));
+    ssh::HeadView &head = ssh::HeadView::Get();
+    head.Touch(screens);
+    int slice = head.Slice();
+    if (slice < 0) slice = screens / 2;
+    o.fit = ssh::ScreenOptions::kFill;
+    o.zoom = 100;
+    o.pan_x = slice * 100 / (screens - 1);
+    o.pan_y = 50;
+  }
+  return screen->Frame(p, w, h, stride, o);
 }
+
+// The head-turn view (HeadView): screens * 16 + the one looked at, or -1 while off.
+JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_headSlice(JNIEnv *, jclass) {
+  ssh::HeadView &head = ssh::HeadView::Get();
+  int slice = head.Slice();
+  return slice < 0 ? -1 : head.Screens() * 16 + slice;
+}
+
+// The head-turn view's middle screen is where the head points now.
+JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headCenter(JNIEnv *, jclass) { ssh::HeadView::Get().Center(); }
 
 // Heads-up between frames (ScreenMirror::Look): 1 when the panels came on again (send a frame), else 0.
 JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenLook(JNIEnv *env, jclass, jintArray options) {

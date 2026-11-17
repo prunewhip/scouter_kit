@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference
 class RemoteScreen(private val context: Context, val server: Settings.Server, private val onStopped: (String) -> Unit) {
     val key get() = "screen:${server.id}"
     @Volatile var state = Native.SCREEN_SAME
+    private var lastHead = -1 // Native.headSlice() last seen
     @Volatile var images = 0 // images received so far (the service shows the screen once one has come)
     @Volatile private var released = false
     @Volatile private var stream: Bootstrap.Stream? = null
@@ -157,6 +158,18 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
             val now = settings.screenOptions()
             if (!now.contentEquals(options)) {
                 options = now
+                due = true
+            }
+            // A panorama: the head turned to another of its screens. It shows at once, and the pointer goes to its
+            // middle (an X desktop without a window manager types into the window under the pointer).
+            val head = Native.headSlice()
+            if (head != lastHead) {
+                if (head >= 0) {
+                    val n = head / 16
+                    val slice = head % 16
+                    RemoteInput.current?.takeIf { it.server.id == server.id }?.send("p ${(2 * slice + 1) * 10000 / (2 * n)} 5000")
+                }
+                lastHead = head
                 due = true
             }
             val b = bitmap
