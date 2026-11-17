@@ -47,7 +47,12 @@ object Tabs {
         val path = "PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\"; export PATH; "
         return path + when {
             action == "new" -> "tmux new-window -t $t:"
-            action == "claude" -> findOrNew(t, "claude", "claude", "claude")
+            // Claude: the tab where it runs (its own name, or the claude-keepalive wrapper that runs it, which shows
+            // as bash), else a new one through the wrapper (one Claude at a time: a second goes to the first).
+            action == "claude" -> "w=$(tmux list-windows -t $t -F '#{window_index} #{pane_current_command} #{pane_start_command}' | " +
+                "awk '/claude/ {print $1; exit}'); " +
+                "if [ -n \"\$w\" ]; then tmux select-window -t $t:\$w; else tmux new-window -t $t: -n claude " +
+                "'if [ -x ~/bin/claude-keepalive ]; then ~/bin/claude-keepalive; else claude; fi'; fi"
             action == "cursor" -> findOrNew(t, "cursor|agent", "cursor", "cursor-agent || cursor")
             // Chrome on the glasses (glasses-tabs shows a tab named chrome as Chrome on a screen of its own).
             action == "chrome" -> "w=$(tmux list-windows -t $t -F '#{window_index} #{window_name}' | awk '$2 == \"chrome\" {print $1; exit}'); " +
