@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
@@ -36,6 +37,7 @@ std::atomic<bool> g_wrap{false};
 std::atomic<int> g_x{0}, g_y{0};
 std::atomic<bool> g_center{false};
 std::atomic<int> g_face{-1};
+std::atomic<int> g_pitch{-1000}; // the head's pitch, degrees (+ up); -1000 unknown
 
 g1::Arm *Pick() {
   if (g1::right.GetState().connected) return &g1::right;
@@ -83,6 +85,7 @@ bool HeadView::Window(int *x, int *y) {
 
 void HeadView::Center() { g_center = true; }
 void HeadView::Face(int x) { g_face = std::max(0, x); }
+int HeadView::Pitch() { return g_running ? g_pitch.load() : -1000; }
 
 void HeadView::Run() {
   g1::Arm *arm = Pick();
@@ -103,10 +106,15 @@ void HeadView::Run() {
       last = 0;
     }
     if (!arm) continue;
-    const uint8_t ids[2] = {g1::PROP_GYR_Y, g1::PROP_PITCH};
-    uint32_t v[2] = {g1::UNKNOWN, g1::UNKNOWN};
+    // The turn about the up of the world, not of the head: the rate's part along gravity (ω · a / |a|, both from
+    // the one sensor, so its mounting and the head's tilt cancel out: a nod is not a turn). Without the
+    // accelerometer, GYR_Y.
+    const uint8_t ids[7] = {g1::PROP_GYR_X, g1::PROP_GYR_Y, g1::PROP_GYR_Z, g1::PROP_ACC_X, g1::PROP_ACC_Y,
+                            g1::PROP_ACC_Z, g1::PROP_PITCH};
+    uint32_t v[7];
+    std::fill(std::begin(v), std::end(v), g1::UNKNOWN);
     bool got = arm->Props(ids, v);
-    if (!got || v[0] == g1::UNKNOWN) {
+    if (!got || v[1] == g1::UNKNOWN) {
       // No turn rate: the link busy, or the gyroscope off again (a session reset, as the terminal starting, turns
       // it off): asked for again after a few misses in a row. Zero and face still apply.
       misses++;
@@ -129,9 +137,17 @@ void HeadView::Run() {
     miss_run = 0;
     reads++;
     int64_t t = g1::NowUs();
-    double rate = int32_t(v[0]) / 1000.0; // degrees a second, + turning left (right-hand rule about up)
-    bool has_pitch = v[1] != g1::UNKNOWN;
-    double pitch = has_pitch ? double(int32_t(v[1])) : 0; // degrees, + up
+    double rate = int32_t(v[1]) / 1000.0; // degrees a second, + turning left (right-hand rule about up)
+    if (v[0] != g1::UNKNOWN && v[2] != g1::UNKNOWN && v[3] != g1::UNKNOWN && v[4] != g1::UNKNOWN &&
+        v[5] != g1::UNKNOWN) {
+      double ax = int32_t(v[3]), ay = int32_t(v[4]), az = int32_t(v[5]);
+      double n = std::sqrt(ax * ax + ay * ay + az * az);
+      if (n > 500 && n < 1500) // about 1 g: the head not jolted
+        rate = (int32_t(v[0]) * ax + int32_t(v[1]) * ay + int32_t(v[2]) * az) / n / 1000.0;
+    }
+    bool has_pitch = v[6] != g1::UNKNOWN;
+    double pitch = has_pitch ? double(int32_t(v[6])) : 0; // degrees, + up
+    if (has_pitch) g_pitch = int(pitch);
     if (g_center.exchange(false) || !pitch0_set) {
       yaw = 0;
       pitch0 = pitch;

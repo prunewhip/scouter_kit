@@ -22,6 +22,8 @@ public:
   void Center();
   // The window at x (the picture's pixels) is straight ahead now (a tab picked turns to face you).
   void Face(int x);
+  // The head's pitch (degrees, + up) as last read; -1000 while off or unknown.
+  int Pitch();
 
 private:
   void Run();

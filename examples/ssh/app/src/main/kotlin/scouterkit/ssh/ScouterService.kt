@@ -3779,8 +3779,12 @@ class ScouterService : Service() {
                 work.postDelayed(this, 120)
                 return
             }
+            // Heads-up mode: while the head is down the terminal is hidden, and the tabs wait (a look at the keys
+            // or a nod switches nothing); looking up again shows the tab the head faces.
+            val pitch = Native.headPitch()
+            val headDown = !settings.phoneForce && pitch > -1000 && pitch < settings.angle - 3
             val h = Native.headPan()
-            if (h >= 0) headAt(h / 4096 + TabRing.W / 2)
+            if (h >= 0 && !headDown) headAt(h / 4096 + TabRing.W / 2)
             work.postDelayed(this, 120)
         }
     }
