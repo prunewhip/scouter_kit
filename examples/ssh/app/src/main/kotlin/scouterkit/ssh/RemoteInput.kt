@@ -152,7 +152,7 @@ class RemoteInput(context: Context, val server: Settings.Server, private val onP
 
         private val AGENT = """import ctypes, os, select, sys
 if "DISPLAY" not in os.environ:
-    # A server may name its desktop in ~/.vox-display (the phone's own: the glasses' desktop, :2).
+    # A server may name its desktop in ~/.vox-display (this phone: the glasses desktop, :2).
     try:
         os.environ["DISPLAY"] = open(os.path.expanduser("~/.vox-display")).read().strip() or ":0"
     except OSError:
