@@ -151,7 +151,12 @@ class RemoteInput(context: Context, val server: Settings.Server, private val onP
         private const val KeyCharacterMapCombining = android.view.KeyCharacterMap.COMBINING_ACCENT
 
         private val AGENT = """import ctypes, os, select, sys
-os.environ.setdefault("DISPLAY", ":0")
+if "DISPLAY" not in os.environ:
+    # A server may name its desktop in ~/.vox-display (the phone's own: the glasses' desktop, :2).
+    try:
+        os.environ["DISPLAY"] = open(os.path.expanduser("~/.vox-display")).read().strip() or ":0"
+    except OSError:
+        os.environ["DISPLAY"] = ":0"
 if not os.environ.get("XAUTHORITY"):
     for p in ("/run/user/%d/gdm/Xauthority" % os.getuid(), os.path.expanduser("~/.Xauthority")):
         if os.path.exists(p):

@@ -40,6 +40,7 @@ object Panels {
             "Alt+B" to "low battery (10%)",
             "Alt+U" to "Tunes",
             "Alt+D" to "preview mode (demo)",
+            "Alt+Shift+D" to "the phone's Linux desktop",
         ),
         "Media and voice" to listOf(
             "Alt+P" to "play / pause",

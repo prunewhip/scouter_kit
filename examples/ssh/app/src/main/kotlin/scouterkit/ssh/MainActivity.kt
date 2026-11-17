@@ -894,12 +894,31 @@ class MainActivity : Activity() {
         tabStripKey = key
         tabStrip.removeAllViews()
         fun add(v: View) = tabStrip.addView(v, lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin = dp(8) })
-        for (t in list) add(chip("${t.index}  ${t.name}", t.active) { tab("select:${t.index}") }.apply {
-            setOnLongClickListener {
-                tab("close:${t.index}")
-                true
+        // Each tab: its name (tap: show it, hold: close it) and an × that closes it.
+        for (t in list) {
+            val name = chip("${t.index}  ${t.name}", t.active) { tab("select:${t.index}") }.apply {
+                setOnLongClickListener {
+                    tab("close:${t.index}")
+                    true
+                }
+                setPadding(dp(14), dp(8), dp(4), dp(8))
             }
-        })
+            val pill = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = name.background
+            }
+            name.background = null
+            pill.addView(name)
+            pill.addView(text("×", 18f, if (t.active) Ui.ON_ACCENT else Ui.MUTED, Ui.BOLD).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(8), dp(4), dp(12), dp(4))
+                contentDescription = "Close tab ${t.index} ${t.name}"
+                setOnClickListener { tab("close:${t.index}") }
+                pressable()
+            })
+            add(pill)
+        }
         add(chip("+", false) { tab("new") })
         add(chip("Claude", false) { tab("claude") })
         add(chip("Cursor", false) { tab("cursor") })
@@ -1600,7 +1619,7 @@ class MainActivity : Activity() {
         tabsState.text = when {
             Session.tabs.isNotEmpty() -> Session.tabs
             Session.tabList.isEmpty() -> "Tabs are the tmux windows of the server in use."
-            else -> "Tap a tab to show it, hold it to close it."
+            else -> "Tap a tab to show it, × closes it. Alt+T opens one; type computer for the desktop (Alt+Shift+D)."
         }
         if (::sportsState.isInitialized) sportsState.text = Sports.game?.let { g ->
             val vs = "${g.away.name} at ${g.home.name}"

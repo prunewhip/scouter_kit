@@ -309,12 +309,18 @@ class Settings(context: Context) {
     }
 
     // What the glasses can show, in order: each saved server's terminal, the phone's screen, each other server's
-    // screen (SSH, vox-screen). Keys: "term:ID", PHONE, "screen:ID"; with a name for buttons and shortcuts.
+    // screen (SSH, vox-screen), last the phone's Linux desktop made for the glasses (this phone's own server's
+    // vox-screen: XFCE at 640 x 200, glasses-desktop). Keys: "term:ID", PHONE, "screen:ID"; with a name for
+    // buttons and shortcuts.
     fun sources(): List<Pair<String, String>> {
         val l = servers()
         return l.map { "term:${it.id}" to "${it.name} · terminal" } + (PHONE to "Phone screen") +
-            l.filter { !it.local }.map { "screen:${it.id}" to "${it.name} · screen" }
+            l.filter { !it.local }.map { "screen:${it.id}" to "${it.name} · screen" } +
+            l.filter { it.local }.map { "screen:${it.id}" to DESKTOP_NAME }
     }
+
+    // A server's screen by name: this phone's own is the glasses' Linux desktop.
+    fun screenName(s: Server?): String = if (s?.local == true) DESKTOP_NAME else s?.name ?: "Screen"
 
     // A step from one source to another on a grid: the machines across (this phone, then each other saved
     // server), terminal above screen. Left and right keep the kind where the other machine has it.
@@ -437,6 +443,7 @@ class Settings(context: Context) {
     val rows get() = maxOf(2, grid(dx, dy, termTop + dashRows, termBottom).second - LookUp.rows(this))
 
     companion object {
+        const val DESKTOP_NAME = "Desktop"
         const val TERMINAL = "terminal"
         const val SCREEN = "screen"
         const val FIT = "fit"

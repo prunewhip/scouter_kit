@@ -909,7 +909,7 @@ class ScouterService : Service() {
         val lines = when {
             key == Settings.PHONE -> listOf("PHONE SCREEN", "", "Not shared right now", "Share it in Vox: Phone screen", "", hint)
             key.startsWith("screen:") -> {
-                val name = settings.servers().firstOrNull { "screen:${it.id}" == key }?.name ?: "Screen"
+                val name = settings.screenName(settings.servers().firstOrNull { "screen:${it.id}" == key })
                 if (key in closed) listOf("${name.uppercase()} SCREEN", "", "Closed", "Choose it again to start it", "", hint)
                 else if (remoteWhy.isEmpty()) listOf("${name.uppercase()} SCREEN", "", "Starting…", "", hint)
                 else listOf("${name.uppercase()} SCREEN", "", remoteWhy, "Trying again by itself", "", hint)
@@ -3194,7 +3194,7 @@ class ScouterService : Service() {
         val server = settings.servers().firstOrNull { it.id == id }
         return when {
             key == Settings.PHONE -> "Phone" to "screen"
-            key.startsWith("screen:") -> (server?.name ?: "Screen") to "screen"
+            key.startsWith("screen:") -> settings.screenName(server) to "screen"
             else -> (server?.name ?: "Terminal") to "terminal"
         }
     }

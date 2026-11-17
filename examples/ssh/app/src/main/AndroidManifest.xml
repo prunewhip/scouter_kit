@@ -51,6 +51,8 @@
 
     <queries>
         <package android:name="com.termux" />
+        <!-- The phone's Linux desktop (Alt+Shift+D, Desktop). -->
+        <package android:name="com.termux.x11" />
         <!-- Google's Reading mode, opened from the Screen tab. -->
         <package android:name="com.google.android.accessibility.reader" />
         <!-- The look-up header names the apps whose notifications it shows. -->
