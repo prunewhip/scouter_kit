@@ -90,7 +90,7 @@ void HeadView::Run() {
   LOG("head: on (%d x %d screens%s, gyroscope %u Hz)", g_cols.load(), g_rows.load(), g_wrap ? ", 360" : "", kRateHz);
   double yaw = 0, bias = 0, pitch0 = 0;
   bool pitch0_set = false;
-  int reads = 0, misses = 0, logged_x = -1;
+  int reads = 0, misses = 0, miss_run = 0, logged_x = -1;
   int64_t log_at = 0;
   int still_n = 0;
   int64_t last = 0;
@@ -105,10 +105,28 @@ void HeadView::Run() {
     if (!arm) continue;
     const uint8_t ids[2] = {g1::PROP_GYR_Y, g1::PROP_PITCH};
     uint32_t v[2] = {g1::UNKNOWN, g1::UNKNOWN};
-    if (!arm->Props(ids, v) || v[0] == g1::UNKNOWN) {
+    bool got = arm->Props(ids, v);
+    if (!got || v[0] == g1::UNKNOWN) {
+      // No turn rate: the link busy, or the gyroscope off again (a session reset, as the terminal starting, turns
+      // it off): asked for again after a few misses in a row. Zero and face still apply.
       misses++;
+      if (++miss_run % 8 == 0) {
+        arm->SysWrite(g1::PROP_GYRO_RATE, kRateHz);
+        LOG("head: no turn rate (%d in a row, %s): gyroscope asked for again", miss_run, got ? "unknown" : "no reply");
+      }
+      if (g_center.exchange(false)) yaw = 0;
+      int face = g_face.exchange(-1);
+      if (face >= 0) {
+        int fx, fy;
+        Home(&fx, &fy);
+        yaw = (fx - face) / kPxPerDeg;
+        int cols = g_cols;
+        if (!g_wrap) g_x = std::clamp(int(std::lround(fx - yaw * kPxPerDeg)), 0, (cols - 1) * kScreenW);
+      }
+      last = 0;
       continue;
     }
+    miss_run = 0;
     reads++;
     int64_t t = g1::NowUs();
     double rate = int32_t(v[0]) / 1000.0; // degrees a second, + turning left (right-hand rule about up)
