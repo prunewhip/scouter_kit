@@ -90,6 +90,8 @@ void HeadView::Run() {
   LOG("head: on (%d x %d screens%s, gyroscope %u Hz)", g_cols.load(), g_rows.load(), g_wrap ? ", 360" : "", kRateHz);
   double yaw = 0, bias = 0, pitch0 = 0;
   bool pitch0_set = false;
+  int reads = 0, misses = 0, logged_x = -1;
+  int64_t log_at = 0;
   int still_n = 0;
   int64_t last = 0;
   while (g1::NowUs() - g_touched < kIdleUs) {
@@ -103,7 +105,11 @@ void HeadView::Run() {
     if (!arm) continue;
     const uint8_t ids[2] = {g1::PROP_GYR_Y, g1::PROP_PITCH};
     uint32_t v[2] = {g1::UNKNOWN, g1::UNKNOWN};
-    if (!arm->Props(ids, v) || v[0] == g1::UNKNOWN) continue;
+    if (!arm->Props(ids, v) || v[0] == g1::UNKNOWN) {
+      misses++;
+      continue;
+    }
+    reads++;
     int64_t t = g1::NowUs();
     double rate = int32_t(v[0]) / 1000.0; // degrees a second, + turning left (right-hand rule about up)
     bool has_pitch = v[1] != g1::UNKNOWN;
@@ -150,6 +156,12 @@ void HeadView::Run() {
     if (rows > 1 && has_pitch) y = std::clamp(int(std::lround(hy - (pitch - pitch0) * kPxPerDeg)), 0, (rows - 1) * kScreenH);
     g_x = x;
     g_y = y;
+    // A line a second while the window moves (how the head is followed: turn, bias, reads that failed).
+    if (t - log_at >= 1000000 && std::abs(x - logged_x) >= 8) {
+      log_at = t;
+      logged_x = x;
+      LOG("head: turn %.0f deg, window x %d y %d (bias %.1f dps; %d reads, %d failed)", yaw, x, y, bias, reads, misses);
+    }
   }
   if (arm) arm->SysWrite(g1::PROP_GYRO_RATE, 0);
   g_running = false;

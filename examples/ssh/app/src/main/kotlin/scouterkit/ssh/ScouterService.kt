@@ -3794,6 +3794,7 @@ class ScouterService : Service() {
         if (col == headCol) return
         val from = headCol
         headCol = col
+        Log.i(TAG, "tabs around: place ${col - TabRing.CENTER} (view at $xc)")
         headShow(col, from)
     }
 
@@ -3815,6 +3816,7 @@ class ScouterService : Service() {
             return
         }
         val style = if (from < 0 || col == from) Fx.JUMP else if (col > from) Fx.TAB_RIGHT else Fx.TAB_LEFT
+        Log.i(TAG, "tabs around: tab ${tab.index} ${tab.name}${if (tab.active) " (shown already)" else ""}")
         if (TabRing.chrome(tab)) {
             if (!chromeShown) {
                 chromeShown = true
