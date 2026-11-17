@@ -3733,6 +3733,7 @@ class ScouterService : Service() {
     private var headTicking = false
     private var headSelectedAt = 0L // the head picked a tab: tmux's own answer is not followed until a moment later
     private var headSettleAt = 0L   // a turn set by Vox (face, start): the head's reading is not used until then
+    private var headEmptyNoteAt = 0L // the last "no tab here" note
     private var chromeShown = false // the head turned to the chrome tab: the phone's Desktop shows Chrome
 
     private fun localServer() = settings.servers().firstOrNull { it.local }
@@ -3801,7 +3802,18 @@ class ScouterService : Service() {
     private fun headShow(col: Int, from: Int) {
         val local = localServer() ?: return
         val tabs = tabCache[local.id] ?: Session.tabList
-        val tab = TabRing.tabAt(col, tabs, settings.tabOrder) ?: return
+        val tab = TabRing.tabAt(col, tabs, settings.tabOrder)
+        if (tab == null) {
+            // Nothing placed there: say so (once a few seconds), what shows stays.
+            val now = SystemClock.uptimeMillis()
+            if (now - headEmptyNoteAt > 4000) {
+                headEmptyNoteAt = now
+                val side = if (col > TabRing.CENTER) "right" else "left"
+                note(if (tabs.size <= 1) "Only one tab · Alt+T adds one (it goes to the ${if (settings.tabOrder == TabRing.LEFT) "left" else "right"})"
+                    else "No tab to the $side · Alt+Z: back to tab 1")
+            }
+            return
+        }
         val style = if (from < 0 || col == from) Fx.JUMP else if (col > from) Fx.TAB_RIGHT else Fx.TAB_LEFT
         if (TabRing.chrome(tab)) {
             if (!chromeShown) {
