@@ -164,8 +164,9 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
             // A panorama or a sphere: the head moved. The picture slides at once, and when the window is mostly on
             // another of its screens the pointer goes to that one's middle (an X desktop without a window manager
             // types into the window under the pointer).
-            val head = Native.headPan()
-            TabRing.cols = if (head >= 0) (bitmap?.width ?: 0) / 640 else 0
+            // (Only a picture of several screens: a single one, as Chrome for tabs around you, keeps its pointer.)
+            val pic0 = bitmap
+            val head = if (pic0 != null && (pic0.width > 640 || pic0.height > 480)) Native.headPan() else -1
             if (head != lastHead) {
                 val pic = bitmap
                 if (head >= 0 && pic != null) {

@@ -1440,6 +1440,12 @@ JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headCenter(JNIEnv *, jclass) {
 // The head-turn view: the window at x (the picture's pixels) is straight ahead now.
 JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headFace(JNIEnv *, jclass, jint x) { ssh::HeadView::Get().Face(x); }
 
+// Tabs around you (Vox's own terminal switched by the head): the head followed for a row of `cols` places while
+// this is called (each tick; it stops by itself a few seconds after the last).
+JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headTrack(JNIEnv *, jclass, jint cols) {
+  ssh::HeadView::Get().Touch(std::max(1, int(cols)), 1, false);
+}
+
 // Heads-up between frames (ScreenMirror::Look): 1 when the panels came on again (send a frame), else 0.
 JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenLook(JNIEnv *env, jclass, jintArray options) {
   std::shared_ptr<ssh::ScreenMirror> screen = Mirror();

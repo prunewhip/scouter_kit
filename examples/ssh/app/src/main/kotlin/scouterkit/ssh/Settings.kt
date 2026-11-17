@@ -96,6 +96,10 @@ class Settings(context: Context) {
     var screenFps: Int by Number("screen_fps", 5)
     // The tabs around you (TabRing, glasses-tabs): where a new tab goes, alternate (right, left...), right or left.
     var tabOrder: String by Text("tab_order", TabRing.ALTERNATE)
+    // Tabs around you (TabRing): turning the head switches the phone terminal's tabs (with head turn on).
+    var tabsAround: Boolean
+        get() = prefs.getBoolean("tabs_around", true)
+        set(v) = prefs.edit().putBoolean("tabs_around", v).apply()
     // A panorama from a server (screens side by side, glasses-panorama): the part shown follows the head's turn
     // (the gyroscope), else the middle screen. Alt+Shift+Z.
     var headTurn: Boolean
@@ -337,7 +341,9 @@ class Settings(context: Context) {
         val local = l.firstOrNull { it.local }
         val machines = listOf(local?.let { "term:${it.id}" } to PHONE) +
             l.filter { !it.local }.map { "term:${it.id}" to "screen:${it.id}" }
-        var m = machines.indexOfFirst { it.first == from || it.second == from }
+        // The phone's Desktop (its own server's screen) sits where the phone's screen does: never the laptop's.
+        val at = if (local != null && from == "screen:${local.id}") PHONE else from
+        var m = machines.indexOfFirst { it.first == at || it.second == at }
         val screen = from == PHONE || from.startsWith("screen:")
         if (m < 0) m = 0
         return when (dir) {

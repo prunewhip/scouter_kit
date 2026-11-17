@@ -367,17 +367,10 @@ object Hotkeys {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) VoxKeys.global(nav)
             return true
         }
-        // Alt+Z: zero -- straight ahead is the first screen again (the head-turn view: tab 1, screen 1). Alt+0 is
-        // heads-up mode.
-        if (e.keyCode == KeyEvent.KEYCODE_Z && !e.isShiftPressed) {
+        // Alt+Z (or Alt+`): zero -- straight ahead is the first again (tabs around you: tab 1; a panorama: its
+        // start). Alt+0 is heads-up mode.
+        if ((e.keyCode == KeyEvent.KEYCODE_Z && !e.isShiftPressed) || e.keyCode == KeyEvent.KEYCODE_GRAVE) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Native.headCenter()
-            return true
-        }
-        // Alt+Shift+Up / Down, the tabs around you: the screen in view nearer or farther.
-        if (e.isShiftPressed && (e.keyCode == KeyEvent.KEYCODE_DPAD_UP || e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) &&
-            TabRing.active()) {
-            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0)
-                TabRing.distance(context, if (e.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
             return true
         }
         // Alt+Shift+Z: the head-turn view on a panorama (the gyroscope follows the head) on or off; on again, straight

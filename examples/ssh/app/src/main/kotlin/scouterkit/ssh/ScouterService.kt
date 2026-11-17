@@ -139,6 +139,10 @@ class ScouterService : Service() {
                 }
             }
             val remoteShown = Session.screenSource.startsWith("screen:")
+            if (onLaptop() && (laptopIn == null || laptopIn?.ended == true) && SystemClock.uptimeMillis() >= inputRetryAt) {
+                inputRetryAt = SystemClock.uptimeMillis() + 2000
+                laptopInput()
+            }
             val s = (if (remoteShown) remote?.state else screen?.state) ?: run {
                 if (screen == null && remote == null) return
                 Native.SCREEN_SAME
@@ -565,6 +569,7 @@ class ScouterService : Service() {
     // tried; 3 s after keyer's link has gone (or the probe's end) the service lets go.
     private fun refresh() {
         if (ended) return
+        work.post { headTabsEnsure() }
         if (!bluetoothOn(this)) return bluetoothOff()
         startKeyer()
         if (!active()) {
@@ -1280,6 +1285,7 @@ class ScouterService : Service() {
         remote?.key == Session.screenSource
 
     @Volatile private var laptopIn: RemoteInput? = null
+    private var inputRetryAt = 0L // the next try of a keyboard link that failed (screenTicker)
     private var laptopButton = 0 // the laptop's button held (1 left, 3 right), 0 none
     private var wheelV = 0f // wheel notches not sent yet (fractions of the trackpad's fine steps)
     private var wheelH = 0f
@@ -3114,17 +3120,14 @@ class ScouterService : Service() {
         }
         val words = flag("Realtime words", { settings.voiceRealtime }, { settings.voiceRealtime = it })
         val t = mutableListOf<Panels.Tweak>()
+        // Tabs around you (TabRing): turning the head switches the phone terminal's tabs.
+        t += flag("Tabs around you", { settings.tabsAround }, { settings.tabsAround = it }) { refresh() }
+        t += pick("New tabs go", TabRing.ORDERS, { settings.tabOrder }, { settings.tabOrder = it })
+        t += flag("Head turn (Alt+Shift+Z)", { settings.headTurn }, { settings.headTurn = it }) {
+            if (settings.headTurn) Native.headCenter()
+            refresh()
+        }
         if (settings.show == Settings.SCREEN) {
-            // The tabs around you (glasses-view tabs) and the head-turn view.
-            if (TabRing.active()) {
-                t += pick("New tabs go", TabRing.ORDERS, { settings.tabOrder }, { settings.tabOrder = it }) {
-                    TabRing.run(this, "order ${settings.tabOrder}")
-                }
-                t += Panels.Tweak("This screen's distance", { "Left: nearer   Right: farther" }) { d -> TabRing.distance(this, d) }
-            }
-            t += flag("Head turn (Alt+Shift+Z)", { settings.headTurn }, { settings.headTurn = it }) {
-                if (settings.headTurn) Native.headCenter()
-            }
             t += pick("Picture", listOf("2" to "black and white (fast)", "4" to "4 greys", "8" to "8 greys", "16" to "16 greys"),
                 { settings.screenLevels.toString() }, { settings.screenLevels = it.toInt() })
             t += num("Invert", { settings.screenInvertPct }, { settings.screenInvertPct = it }, 0, 100, 10, { "$it%" })
@@ -3723,6 +3726,112 @@ class ScouterService : Service() {
     // The tabs for the dashboard: asked of tmux every 5 s while the terminal shows on the glasses (over the kept
     // SSH connection), and right after a tab action.
     private var tabsAsking = false
+
+    // ------------------------------------------------ tabs around you (TabRing)
+
+    private var headCol = -1        // the place the head is at (TabRing), -1 none yet
+    private var headTicking = false
+    private var headSelectedAt = 0L // the head picked a tab: tmux's own answer is not followed until a moment later
+    private var headSettleAt = 0L   // a turn set by Vox (face, start): the head's reading is not used until then
+    private var chromeShown = false // the head turned to the chrome tab: the phone's Desktop shows Chrome
+
+    private fun localServer() = settings.servers().firstOrNull { it.local }
+
+    private fun headTabsOn(): Boolean {
+        if (!settings.tabsAround || !settings.headTurn || Session.glasses != "ready" || Session.blank) return false
+        val local = localServer() ?: return false
+        val key = chosen()
+        return key == "term:${local.id}" || (chromeShown && key == "screen:${local.id}")
+    }
+
+    private fun headTabsEnsure() {
+        if (headTicking || !headTabsOn()) return
+        headTicking = true
+        work.post(headTabsTick)
+    }
+
+    private val headTabsTick = object : Runnable {
+        override fun run() {
+            work.removeCallbacks(this)
+            if (!headTabsOn()) {
+                headTicking = false
+                TabRing.running = false
+                headCol = -1
+                if (chromeShown && !chosen().startsWith("screen:")) chromeShown = false
+                return
+            }
+            TabRing.running = true
+            Native.headTrack(TabRing.COLS)
+            if (headCol < 0) {
+                // Starting: the world turns so the tab in use is straight ahead (no jump to another tab).
+                val local = localServer()
+                val tabs = local?.let { tabCache[it.id] } ?: Session.tabList
+                val active = tabs.firstOrNull { it.active }
+                val c = active?.let { TabRing.colOf(it.index, tabs, settings.tabOrder) } ?: TabRing.CENTER
+                headCol = c
+                Native.headFace(c * TabRing.W)
+                headSettleAt = SystemClock.uptimeMillis() + 500
+                work.postDelayed(this, 120)
+                return
+            }
+            if (SystemClock.uptimeMillis() < headSettleAt) {
+                work.postDelayed(this, 120)
+                return
+            }
+            val h = Native.headPan()
+            if (h >= 0) headAt(h / 4096 + TabRing.W / 2)
+            work.postDelayed(this, 120)
+        }
+    }
+
+    // The view's middle at xc (HeadView's pixels): past a little more than halfway into the next place, that place.
+    private fun headAt(xc: Int) {
+        val w = TabRing.W
+        val cur = if (headCol < 0) TabRing.CENTER else headCol
+        val col = if (headCol < 0 || kotlin.math.abs(xc - (cur * w + w / 2)) > w / 2 + w / 10)
+            (xc / w).coerceIn(0, TabRing.COLS - 1) else cur
+        if (col == headCol) return
+        val from = headCol
+        headCol = col
+        headShow(col, from)
+    }
+
+    // What sits at place `col` comes on the glasses: a terminal tab (Vox's own terminal switched to it), the chrome
+    // tab (the phone's Desktop: Chrome), nothing there (what shows stays).
+    private fun headShow(col: Int, from: Int) {
+        val local = localServer() ?: return
+        val tabs = tabCache[local.id] ?: Session.tabList
+        val tab = TabRing.tabAt(col, tabs, settings.tabOrder) ?: return
+        val style = if (from < 0 || col == from) Fx.JUMP else if (col > from) Fx.TAB_RIGHT else Fx.TAB_LEFT
+        if (TabRing.chrome(tab)) {
+            if (!chromeShown) {
+                chromeShown = true
+                choose("screen:${local.id}", style)
+            }
+            return
+        }
+        if (chromeShown || chosen() != "term:${local.id}") {
+            chromeShown = false
+            choose("term:${local.id}", style)
+        }
+        if (!tab.active) {
+            headSelectedAt = SystemClock.uptimeMillis()
+            tabs("select:${tab.index}")
+        }
+    }
+
+    // The tabs changed some other way (a tab picked, Alt+[ / ], a new tab): the world turns so it is ahead.
+    private fun headFollow(s: Settings.Server, list: List<Tabs.Tab>) {
+        if (!TabRing.running || !s.local || SystemClock.uptimeMillis() - headSelectedAt < 3000) return
+        val a = list.firstOrNull { it.active } ?: return
+        val c = TabRing.colOf(a.index, list, settings.tabOrder) ?: return
+        if (c == headCol) return
+        val from = headCol
+        headCol = c
+        Native.headFace(c * TabRing.W)
+        headSettleAt = SystemClock.uptimeMillis() + 500
+        headShow(c, from)
+    }
     private val tabPoll = object : Runnable {
         override fun run() {
             if (Session.shown && settings.show == Settings.TERMINAL && settings.dashRows > 0) fetchTabs()
@@ -3757,6 +3866,7 @@ class ScouterService : Service() {
                     Session.tabList = list
                     dash()
                 }
+                headFollow(s, list)
             }
         }.start()
     }
@@ -3797,9 +3907,6 @@ class ScouterService : Service() {
             return
         }
         val cmd = Tabs.command(action, session) ?: return
-        // The tabs around you: the tab picked turns to face you.
-        if (action.startsWith("select:") && TabRing.active())
-            action.removePrefix("select:").toIntOrNull()?.let { TabRing.face(it, settings.tabOrder) }
         tabTransition(action, s)
         Thread {
             val r = runCatching { Bootstrap(vault).runShared(s.host, s.port, s.user, cmd) }
