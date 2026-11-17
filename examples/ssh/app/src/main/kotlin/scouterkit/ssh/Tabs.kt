@@ -49,6 +49,10 @@ object Tabs {
             action == "new" -> "tmux new-window -t $t:"
             action == "claude" -> findOrNew(t, "claude", "claude", "claude")
             action == "cursor" -> findOrNew(t, "cursor|agent", "cursor", "cursor-agent || cursor")
+            // Chrome on the glasses (glasses-tabs shows a tab named chrome as Chrome on a screen of its own).
+            action == "chrome" -> "w=$(tmux list-windows -t $t -F '#{window_index} #{window_name}' | awk '$2 == \"chrome\" {print $1; exit}'); " +
+                "if [ -n \"\$w\" ]; then tmux select-window -t $t:\$w; else tmux new-window -t $t: -n chrome " +
+                "'printf \"Chrome is on the glasses (glasses-view tabs). Close this tab to close it.\\n\"; exec sleep infinity'; fi"
             action == "next" -> "tmux next-window -t $t"
             action == "prev" -> "tmux previous-window -t $t"
             action == "close" -> "[ \"$(tmux display -p -t $t '#{window_index}')\" != 0 ] && tmux kill-window -t $t"

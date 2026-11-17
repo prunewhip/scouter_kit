@@ -154,7 +154,9 @@ class RemoteInput(context: Context, val server: Settings.Server, private val onP
 if "DISPLAY" not in os.environ:
     # A server may name its desktop in ~/.vox-display (this phone: the glasses desktop, :2).
     try:
-        os.environ["DISPLAY"] = open(os.path.expanduser("~/.vox-display")).read().strip() or ":0"
+        view = open(os.path.expanduser("~/.vox-display")).read().strip()
+        # a view name (glasses-view): its X display; the generated ones (synth, sphere) take no input
+        os.environ["DISPLAY"] = {"tabs": ":4", "synth": ":9", "sphere": ":9"}.get(view, view) or ":0"
     except OSError:
         os.environ["DISPLAY"] = ":0"
 if not os.environ.get("XAUTHORITY"):

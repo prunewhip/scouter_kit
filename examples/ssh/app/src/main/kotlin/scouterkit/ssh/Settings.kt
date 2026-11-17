@@ -94,6 +94,8 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("screen_sharpen", true)
         set(v) = prefs.edit().putBoolean("screen_sharpen", v).apply()
     var screenFps: Int by Number("screen_fps", 5)
+    // The tabs around you (TabRing, glasses-tabs): where a new tab goes, alternate (right, left...), right or left.
+    var tabOrder: String by Text("tab_order", TabRing.ALTERNATE)
     // A panorama from a server (screens side by side, glasses-panorama): the part shown follows the head's turn
     // (the gyroscope), else the middle screen. Alt+Shift+Z.
     var headTurn: Boolean

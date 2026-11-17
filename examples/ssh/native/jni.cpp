@@ -1409,15 +1409,14 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
   if (!p) return ssh::ScreenMirror::kSame;
   ssh::ScreenOptions o = Options(env, options);
   // A panorama or a sphere: a picture made of whole 640 x 480 screens, more than one (glasses-panorama: 3 x 1;
-  // glasses-sphere: a 360-degree ring of columns whose last repeats the first, 6 or more, with rows above and
-  // below). With the head-turn view on, the window shown follows the head (HeadView); off, the middle screen.
+  // glasses-tabs: 11 x 1; glasses-sphere: 3 rows, a 360-degree ring whose last column repeats the first). With the head-turn view on, the window shown follows the head (HeadView); off, the middle screen.
   constexpr int kW = ssh::HeadView::kScreenW, kH = ssh::HeadView::kScreenH;
   if (w % kW == 0 && h % kH == 0 && (w / kW) * (h / kH) > 1) {
     int cols = w / kW, rows = h / kH;
     int x = (cols - 1) * kW / 2, y = (rows - 1) * kH / 2;
     if (o.head) {
       ssh::HeadView &head = ssh::HeadView::Get();
-      head.Touch(cols, rows, cols >= 6);
+      head.Touch(cols, rows, rows >= 3); // a sphere (rows above and below) goes all the way round
       head.Window(&x, &y);
     }
     o.src_x = x;
@@ -1437,6 +1436,9 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_headPan(JNIEnv *, jclass) {
 }
 
 JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headCenter(JNIEnv *, jclass) { ssh::HeadView::Get().Center(); }
+
+// The head-turn view: the window at x (the picture's pixels) is straight ahead now.
+JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headFace(JNIEnv *, jclass, jint x) { ssh::HeadView::Get().Face(x); }
 
 // Heads-up between frames (ScreenMirror::Look): 1 when the panels came on again (send a frame), else 0.
 JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenLook(JNIEnv *env, jclass, jintArray options) {

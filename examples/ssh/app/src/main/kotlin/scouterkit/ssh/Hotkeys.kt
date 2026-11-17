@@ -367,6 +367,19 @@ object Hotkeys {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) VoxKeys.global(nav)
             return true
         }
+        // Alt+Z: zero -- straight ahead is the first screen again (the head-turn view: tab 1, screen 1). Alt+0 is
+        // heads-up mode.
+        if (e.keyCode == KeyEvent.KEYCODE_Z && !e.isShiftPressed) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Native.headCenter()
+            return true
+        }
+        // Alt+Shift+Up / Down, the tabs around you: the screen in view nearer or farther.
+        if (e.isShiftPressed && (e.keyCode == KeyEvent.KEYCODE_DPAD_UP || e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) &&
+            TabRing.active()) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0)
+                TabRing.distance(context, if (e.keyCode == KeyEvent.KEYCODE_DPAD_UP) -1 else 1)
+            return true
+        }
         // Alt+Shift+Z: the head-turn view on a panorama (the gyroscope follows the head) on or off; on again, straight
         // ahead is the middle.
         if (e.keyCode == KeyEvent.KEYCODE_Z && e.isShiftPressed) {
@@ -389,7 +402,7 @@ object Hotkeys {
         val panel = when (e.keyCode) {
             KeyEvent.KEYCODE_A -> Panels.HELP
             KeyEvent.KEYCODE_S -> Panels.SETTINGS
-            KeyEvent.KEYCODE_0, KeyEvent.KEYCODE_Z -> "lookup"
+            KeyEvent.KEYCODE_0 -> "lookup"
             KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS, KeyEvent.KEYCODE_NUMPAD_ADD -> "bright:1"
             KeyEvent.KEYCODE_MINUS, KeyEvent.KEYCODE_NUMPAD_SUBTRACT -> "bright:-1"
             KeyEvent.KEYCODE_P -> "media:toggle"

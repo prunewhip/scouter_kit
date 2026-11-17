@@ -3115,6 +3115,16 @@ class ScouterService : Service() {
         val words = flag("Realtime words", { settings.voiceRealtime }, { settings.voiceRealtime = it })
         val t = mutableListOf<Panels.Tweak>()
         if (settings.show == Settings.SCREEN) {
+            // The tabs around you (glasses-view tabs) and the head-turn view.
+            if (TabRing.active()) {
+                t += pick("New tabs go", TabRing.ORDERS, { settings.tabOrder }, { settings.tabOrder = it }) {
+                    TabRing.run(this, "order ${settings.tabOrder}")
+                }
+                t += Panels.Tweak("This screen's distance", { "Left: nearer   Right: farther" }) { d -> TabRing.distance(this, d) }
+            }
+            t += flag("Head turn (Alt+Shift+Z)", { settings.headTurn }, { settings.headTurn = it }) {
+                if (settings.headTurn) Native.headCenter()
+            }
             t += pick("Picture", listOf("2" to "black and white (fast)", "4" to "4 greys", "8" to "8 greys", "16" to "16 greys"),
                 { settings.screenLevels.toString() }, { settings.screenLevels = it.toInt() })
             t += num("Invert", { settings.screenInvertPct }, { settings.screenInvertPct = it }, 0, 100, 10, { "$it%" })
@@ -3787,6 +3797,9 @@ class ScouterService : Service() {
             return
         }
         val cmd = Tabs.command(action, session) ?: return
+        // The tabs around you: the tab picked turns to face you.
+        if (action.startsWith("select:") && TabRing.active())
+            action.removePrefix("select:").toIntOrNull()?.let { TabRing.face(it, settings.tabOrder) }
         tabTransition(action, s)
         Thread {
             val r = runCatching { Bootstrap(vault).runShared(s.host, s.port, s.user, cmd) }
@@ -3812,7 +3825,7 @@ class ScouterService : Service() {
         }
         val active = list.getOrNull(at)
         val style = when {
-            action == "new" || action == "claude" || action == "cursor" -> Fx.TAB_RIGHT
+            action == "new" || action == "claude" || action == "cursor" || action == "chrome" -> Fx.TAB_RIGHT
             action == "next" -> Fx.TAB_RIGHT
             action == "prev" -> Fx.TAB_LEFT
             // Closing the tab shown: tmux shows another.
@@ -3823,7 +3836,7 @@ class ScouterService : Service() {
         }
         val label = when {
             action == "new" -> "New tab" to s.name
-            action == "claude" || action == "cursor" -> action.replaceFirstChar { it.uppercase() } to s.name
+            action == "claude" || action == "cursor" || action == "chrome" -> action.replaceFirstChar { it.uppercase() } to s.name
             target != null -> "${target.index} ${target.name}" to s.name
             else -> s.name to "tab"
         }

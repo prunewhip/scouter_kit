@@ -20,6 +20,8 @@ public:
   bool Window(int *x, int *y);
   // Straight ahead (as the head points now) is the start again: the first screen (a ring) or the middle.
   void Center();
+  // The window at x (the picture's pixels) is straight ahead now (a tab picked turns to face you).
+  void Face(int x);
 
 private:
   void Run();

@@ -165,6 +165,7 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
             // another of its screens the pointer goes to that one's middle (an X desktop without a window manager
             // types into the window under the pointer).
             val head = Native.headPan()
+            TabRing.cols = if (head >= 0) (bitmap?.width ?: 0) / 640 else 0
             if (head != lastHead) {
                 val pic = bitmap
                 if (head >= 0 && pic != null) {

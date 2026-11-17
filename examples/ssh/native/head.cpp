@@ -35,6 +35,7 @@ std::atomic<int> g_cols{1}, g_rows{1};
 std::atomic<bool> g_wrap{false};
 std::atomic<int> g_x{0}, g_y{0};
 std::atomic<bool> g_center{false};
+std::atomic<int> g_face{-1};
 
 g1::Arm *Pick() {
   if (g1::right.GetState().connected) return &g1::right;
@@ -81,6 +82,7 @@ bool HeadView::Window(int *x, int *y) {
 }
 
 void HeadView::Center() { g_center = true; }
+void HeadView::Face(int x) { g_face = std::max(0, x); }
 
 void HeadView::Run() {
   g1::Arm *arm = Pick();
@@ -110,6 +112,12 @@ void HeadView::Run() {
       yaw = 0;
       pitch0 = pitch;
       pitch0_set = has_pitch;
+    }
+    int face = g_face.exchange(-1);
+    if (face >= 0) { // that window straight ahead: the turn that puts it there
+      int fx, fy;
+      Home(&fx, &fy);
+      yaw = (fx - face) / kPxPerDeg;
     }
     if (last) {
       double dt = std::min((t - last) / 1e6, 0.25);

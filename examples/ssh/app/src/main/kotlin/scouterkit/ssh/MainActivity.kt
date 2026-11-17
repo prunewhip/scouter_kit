@@ -922,6 +922,7 @@ class MainActivity : Activity() {
         add(chip("+", false) { tab("new") })
         add(chip("Claude", false) { tab("claude") })
         add(chip("Cursor", false) { tab("cursor") })
+        add(chip("Chrome", false) { tab("chrome") })
     }
 
     // ------------------------------------------------ Voice

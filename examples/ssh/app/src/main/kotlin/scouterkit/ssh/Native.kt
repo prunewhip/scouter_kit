@@ -77,6 +77,8 @@ object Native {
     // off. headCenter: straight ahead (as the head points now) is the start again.
     @JvmStatic external fun headPan(): Int
     @JvmStatic external fun headCenter()
+    // The head-turn view: the window at x (the picture's pixels) is straight ahead now.
+    @JvmStatic external fun headFace(x: Int)
     @JvmStatic external fun screenFrame(buffer: java.nio.ByteBuffer, width: Int, height: Int, stride: Int,
                                         options: IntArray): Int
     // What the glasses show (the last picture sent), else what they would show for this frame, into out (640 x 480
