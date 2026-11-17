@@ -151,9 +151,13 @@ object Dashboard {
             val phoneBox = RectF(w - pad - 6f - phoneW, barY, w - pad - 6f, barY + barH)
             val room = phoneBox.left - 8f - (barH + 6f) // the + after the tabs
             var shown = 0
+            val first = tabs.minByOrNull { it.index }?.index
+            val xw = barH * 0.85f // a tab's x (closes it; the session's first tab has none: it never closes)
+            val xPaint = paint(barH * 0.7f, 9, LIGHT).apply { textAlign = Paint.Align.CENTER }
             for (t in tabs) {
                 val text = "${t.index} " + TextUtils.ellipsize(t.name, tabText, barH * 6f, TextUtils.TruncateAt.END)
-                val tw = tabText.measureText(text) + 12f
+                val closable = t.index != first
+                val tw = tabText.measureText(text) + 12f + if (closable) xw else 0f
                 if (x + tw > room) {
                     c.drawText("…", x, textY, tabText)
                     x += tabText.measureText("…") + 6f
@@ -170,8 +174,22 @@ object Dashboard {
                     c.drawText(text, x + 6f, textY, tabText)
                 }
                 val action = "select:${t.index}"
-                hits += Hit(box.left, box.right, action, barY, barY + barH)
-                if (hover == action) hovered(box)
+                val selectRight = if (closable) box.right - xw else box.right
+                hits += Hit(box.left, selectRight, action, barY, barY + barH)
+                if (hover == action) hovered(RectF(box.left, box.top, selectRight, box.bottom))
+                if (closable) {
+                    val xBox = RectF(selectRight, barY, box.right, barY + barH)
+                    val close = "close:${t.index}"
+                    val on = hover == close
+                    if (on) {
+                        fill.color = grey(if (t.active) 6 else 14)
+                        c.drawRoundRect(xBox, 4f, 4f, fill)
+                    }
+                    xPaint.color = if (t.active xor on) grey(0) else grey(11)
+                    c.drawText("×", xBox.centerX(), textY, xPaint)
+                    hits += Hit(xBox.left, xBox.right, close, barY, barY + barH)
+                    if (on) hovered(xBox)
+                }
                 x += tw + 5f
                 shown++
             }
