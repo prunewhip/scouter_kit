@@ -56,6 +56,9 @@ struct ScreenOptions {
   // A panorama from a server (screens side by side): the part shown follows the head's turn (HeadView), else the
   // middle screen.
   bool head = true;
+  // An exact part of the source (its pixels), instead of fit / pan / zoom: the head-turn view's window. src_w <= 0:
+  // none.
+  int src_x = 0, src_y = 0, src_w = 0, src_h = 0;
 };
 
 // What the mirror may take back when the arms' arena runs short (the terminal's kept fonts): called, with no lock

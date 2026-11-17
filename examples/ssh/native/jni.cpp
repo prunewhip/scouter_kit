@@ -1408,29 +1408,32 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
   const uint8_t *p = Pixels(env, buffer, w, h, stride);
   if (!p) return ssh::ScreenMirror::kSame;
   ssh::ScreenOptions o = Options(env, options);
-  // A panorama (screens side by side, at least 2.5 times as wide as tall: glasses-panorama): with the head-turn
-  // view on, the part shown follows the head (HeadView); off, the middle screen. Either way it fills the glasses.
-  if (h > 0 && w * 2 >= h * 5) {
-    int screens = std::max(2, int(std::lround(double(w) * 3 / (double(h) * 4))));
-    int pan = 500;
+  // A panorama or a sphere: a picture made of whole 640 x 480 screens, more than one (glasses-panorama: 3 x 1;
+  // glasses-sphere: a 360-degree ring of columns whose last repeats the first, 6 or more, with rows above and
+  // below). With the head-turn view on, the window shown follows the head (HeadView); off, the middle screen.
+  constexpr int kW = ssh::HeadView::kScreenW, kH = ssh::HeadView::kScreenH;
+  if (w % kW == 0 && h % kH == 0 && (w / kW) * (h / kH) > 1) {
+    int cols = w / kW, rows = h / kH;
+    int x = (cols - 1) * kW / 2, y = (rows - 1) * kH / 2;
     if (o.head) {
       ssh::HeadView &head = ssh::HeadView::Get();
-      head.Touch(screens);
-      if (head.Pan() >= 0) pan = head.Pan();
+      head.Touch(cols, rows, cols >= 6);
+      head.Window(&x, &y);
     }
-    o.fit = ssh::ScreenOptions::kFill;
+    o.src_x = x;
+    o.src_y = y;
+    o.src_w = kW;
+    o.src_h = kH;
+    o.fit = ssh::ScreenOptions::kStretch;
     o.zoom = 100;
-    o.pan_x = (pan + 5) / 10;
-    o.pan_y = 50;
   }
   return screen->Frame(p, w, h, stride, o);
 }
 
-// The head-turn view (HeadView): screens * 10000 + where it sits (0 leftmost edge ... 1000 rightmost), or -1 off.
+// The head-turn view (HeadView): its window's top-left in the picture, x * 4096 + y, or -1 while off.
 JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_headPan(JNIEnv *, jclass) {
-  ssh::HeadView &head = ssh::HeadView::Get();
-  int pan = head.Pan();
-  return pan < 0 ? -1 : head.Screens() * 10000 + pan;
+  int x, y;
+  return ssh::HeadView::Get().Window(&x, &y) ? x * 4096 + y : -1;
 }
 
 JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_headCenter(JNIEnv *, jclass) { ssh::HeadView::Get().Center(); }

@@ -1,23 +1,24 @@
 #pragma once
 
-// Head-turn view: a server's picture made of several screens side by side (a panorama, glasses-panorama: three
-// terminals or three synthwave scenes in 1920 x 480) shows the part the head turns to, following it smoothly
-// (the picture slides as the head turns, a frame at a time). The gyroscope (VM.md §2.5 GYR_Y, the turn about the
-// head's up axis) runs only while such a picture comes (GYRO_RATE 26 Hz on one arm); the turn is summed from its
-// rate, its bias learnt while the head is still, and held within kEdgeDeg either way: that far left shows the
-// leftmost edge, that far right the rightmost, so turning back always comes home.
+// Head-turn view: a server's picture made of screens (640 x 480 each, the glasses' size) in columns and rows -- a
+// panorama (glasses-panorama: three terminals) or a sphere (glasses-sphere: a 360-degree ring with rows above and
+// below) -- shows the window the head points at, following it (a frame at a time). Turning: the gyroscope (VM.md
+// §2.5 GYR_Y, about the head's up axis; GYRO_RATE 26 Hz on one arm while such a picture comes), summed from its
+// rate with its bias learnt while the head is still. Up and down: PITCH (the accelerometer against gravity: no
+// drift). Both kPxPerDeg pixels a degree. A ring (wrap) goes all the way round: its picture repeats its first column
+// after the last, so the window never splits; a panorama stops at its edges.
 namespace ssh {
 
 class HeadView {
 public:
+  static constexpr int kScreenW = 640, kScreenH = 480;
   static HeadView &Get();
-  // Each panorama frame: on (starting the gyroscope) with this many screens side by side. It turns itself off
-  // (gyroscope too) once frames stop coming for a few seconds.
-  void Touch(int screens);
-  // Where the view sits, 0 (the leftmost edge) ... 1000 (the rightmost); -1 while off.
-  int Pan();
-  int Screens();
-  // Straight ahead is the middle again.
+  // Each such frame: on (the gyroscope too) for a picture of cols x rows screens; wrap: a 360-degree ring (its last
+  // column repeats the first). Off by itself (the gyroscope too) once frames stop for a few seconds.
+  void Touch(int cols, int rows, bool wrap);
+  // The window's top-left in the picture's pixels; false while off.
+  bool Window(int *x, int *y);
+  // Straight ahead (as the head points now) is the start again: the first screen (a ring) or the middle.
   void Center();
 
 private:

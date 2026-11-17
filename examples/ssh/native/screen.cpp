@@ -95,6 +95,10 @@ Rect Place(int pw, int ph, const ScreenOptions &o) {
 }
 
 Rect Source(int sw, int sh, int dw, int dh, const ScreenOptions &o) {
+  if (o.src_w > 0 && o.src_h > 0) { // an exact window (the head-turn view)
+    int rw = std::min(o.src_w, sw), rh = std::min(o.src_h, sh);
+    return {std::clamp(o.src_x, 0, sw - rw), std::clamp(o.src_y, 0, sh - rh), rw, rh};
+  }
   int rw = sw, rh = sh;
   if (o.fit == ScreenOptions::kFill && dw > 0 && dh > 0) {
     if (int64_t(sw) * dh > int64_t(sh) * dw) rw = std::max(1, int(int64_t(sh) * dw / dh));
@@ -1113,7 +1117,8 @@ int ScreenMirror::Frame(const uint8_t *rgba, int w, int h, int stride, const Scr
   if (w != src_w_ || h != src_h_ || o.fit != src_o_.fit || o.pan_x != src_o_.pan_x || o.pan_y != src_o_.pan_y ||
       o.zoom != src_o_.zoom || o.rotate != src_o_.rotate || o.out_x != src_o_.out_x || o.out_y != src_o_.out_y ||
       o.out_w != src_o_.out_w || o.out_h != src_o_.out_h || o.crop_top != src_o_.crop_top ||
-      o.crop_bottom != src_o_.crop_bottom)
+      o.crop_bottom != src_o_.crop_bottom || o.src_x != src_o_.src_x || o.src_y != src_o_.src_y ||
+      o.src_w != src_o_.src_w || o.src_h != src_o_.src_h)
     ptr_dirty_ = true;
   src_w_ = w;
   src_h_ = h;

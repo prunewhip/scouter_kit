@@ -161,19 +161,22 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
                 options = now
                 due = true
             }
-            // A panorama: the head turned. The picture slides at once, and when another of its screens is mostly in
-            // view the pointer goes to that one's middle (an X desktop without a window manager types into the window
-            // under the pointer).
+            // A panorama or a sphere: the head moved. The picture slides at once, and when the window is mostly on
+            // another of its screens the pointer goes to that one's middle (an X desktop without a window manager
+            // types into the window under the pointer).
             val head = Native.headPan()
             if (head != lastHead) {
-                if (head >= 0) {
-                    val n = head / 10000
-                    val slice = ((head % 10000) * (n - 1) + 500) / 1000
-                    if (slice != lastSlice) {
-                        lastSlice = slice
-                        RemoteInput.current?.takeIf { it.server.id == server.id }?.send("p ${(2 * slice + 1) * 10000 / (2 * n)} 5000")
+                val pic = bitmap
+                if (head >= 0 && pic != null) {
+                    val cx = head / 4096 + 320
+                    val cy = head % 4096 + 240
+                    val screenAt = (cy / 480) * 1000 + cx / 640
+                    if (screenAt != lastSlice) {
+                        lastSlice = screenAt
+                        RemoteInput.current?.takeIf { it.server.id == server.id }
+                            ?.send("p ${cx * 10000L / pic.width} ${cy * 10000L / pic.height}")
                     }
-                } else lastSlice = -1
+                } else if (head < 0) lastSlice = -1
                 lastHead = head
                 due = true
             }
