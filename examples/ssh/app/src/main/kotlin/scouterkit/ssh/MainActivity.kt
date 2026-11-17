@@ -910,7 +910,7 @@ class MainActivity : Activity() {
             }
             name.background = null
             pill.addView(name)
-            pill.addView(text("×", 18f, if (t.active) Ui.ON_ACCENT else Ui.MUTED, Ui.BOLD).apply {
+            if (Tabs.closable(t, list)) pill.addView(text("×", 18f, if (t.active) Ui.ON_ACCENT else Ui.MUTED, Ui.BOLD).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(8), dp(4), dp(12), dp(4))
                 contentDescription = "Close tab ${t.index} ${t.name}"

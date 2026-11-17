@@ -6,6 +6,9 @@ package scouterkit.ssh
 object Tabs {
     class Tab(val index: Int, val name: String, val active: Boolean)
 
+    // A tab the x may close: not Claude's own (named claude by claude-keepalive), and never the last one.
+    fun closable(t: Tab, all: List<Tab>) = all.size > 1 && t.name != "claude"
+
     // tmux list-windows' lines (index|name|active) as tabs.
     fun parse(out: String): List<Tab> = out.lines().mapNotNull { line ->
         val p = line.split("|")
@@ -60,9 +63,12 @@ object Tabs {
                 "'printf \"Chrome is on the glasses (glasses-view tabs). Close this tab to close it.\\n\"; exec sleep infinity'; fi"
             action == "next" -> "tmux next-window -t $t"
             action == "prev" -> "tmux previous-window -t $t"
-            action == "close" -> "[ \"$(tmux display -p -t $t '#{window_index}')\" != 0 ] && tmux kill-window -t $t"
+            // Closing: never Claude's tab (named claude) nor the last one.
+            action == "close" -> "[ \"$(tmux display -p -t $t '#{window_name}')\" != claude ] && " +
+                "[ \"$(tmux list-windows -t $t | wc -l)\" -gt 1 ] && tmux kill-window -t $t"
             action.startsWith("close:") -> action.removePrefix("close:").filter { it.isDigit() }.ifEmpty { return null }.let { n ->
-                "[ \"$(tmux list-windows -t $t -F '#{window_index}' | head -n 1)\" != $n ] && tmux kill-window -t $t:$n"
+                "[ \"$(tmux display -p -t $t:$n '#{window_name}')\" != claude ] && " +
+                    "[ \"$(tmux list-windows -t $t | wc -l)\" -gt 1 ] && tmux kill-window -t $t:$n"
             }
             action.startsWith("select:") -> "tmux select-window -t $t:${action.removePrefix("select:").filter { it.isDigit() }}"
             action == "list" -> "tmux list-windows -t $t -F '#{window_index}|#{window_name}|#{window_active}'"

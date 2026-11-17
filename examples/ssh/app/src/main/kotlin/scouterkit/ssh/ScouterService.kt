@@ -1683,7 +1683,7 @@ class ScouterService : Service() {
         Session.overlay = ""
         work.removeCallbacks(noteEnd)
         Native.overlay(null, null, false)
-        Native.screenOverlay(null, 0, 0, 0, 0)
+        screenTabs(poke = false)
         Session.overlayGen++
         screen?.poke()
         remote?.poke()
@@ -3597,6 +3597,92 @@ class ScouterService : Service() {
         Session.changed()
     }
 
+    // ------------------------------------------------ the tab bar over a screen
+
+    // Every screen on the glasses (the phone's, a server's) keeps the tab bar across its top -- the tabs only, as
+    // the terminal's dashboard draws them -- so the tabs work the same everywhere: Alt+[ / ], Alt+T or a tab's
+    // number take you to the terminal on that tab, and on the phone's screen the cursor pushed past the top goes
+    // onto the bar (left / right along it, a click picks, down goes back to the phone). A panel (help, settings)
+    // takes its place while open.
+    private var stripHits: List<Dashboard.Hit> = emptyList()
+    private var stripHover = -1 // the place on the bar the phone's cursor is on, -1 off the bar
+    private var stripKey = ""
+    private val stripSoon = Runnable { screenTabs() }
+
+    private fun stripOn() = settings.tabsOnScreens && settings.show == Settings.SCREEN && Session.overlay.isEmpty() &&
+        Session.tabList.isNotEmpty() && !Session.blank
+
+    private fun screenTabs(poke: Boolean = true) {
+        if (!stripOn()) {
+            val had = stripHits.isNotEmpty()
+            stripHits = emptyList()
+            stripHover = -1
+            stripKey = ""
+            Native.screenOverlay(null, 0, 0, 0, 0)
+            if (had && poke) {
+                Session.overlayGen++
+                screen?.poke()
+                remote?.poke()
+            }
+            return
+        }
+        val st = Native.screenStats()
+        val w = st[5]
+        val h = st[6]
+        if (w <= 0 || h <= 0) return
+        val hover = stripHits.getOrNull(stripHover)?.action
+        val key = "$w|" + Session.tabList.joinToString { "${it.index}:${it.name}:${it.active}" } + "|$hover"
+        if (key == stripKey) return
+        stripKey = key
+        val f = Dashboard.render(this, settings, w - w % 2, 120, null, false, hover, look = "tabsonly")
+        val ww = w - w % 2
+        val sh = minOf(h, ((f.hits.maxOfOrNull { it.bottom } ?: 24f) + 5f).toInt())
+        // The bar's greys to the overlay's on / off (a level of 7 or more lights).
+        val stride = ww / 2
+        val out = ByteArray(ww * sh)
+        for (y in 0 until sh) for (x in 0 until ww) {
+            val b = f.packed[y * stride + x / 2].toInt()
+            val level = if (x % 2 == 0) (b shr 4) and 15 else b and 15
+            if (level >= 7) out[y * ww + x] = 0xFF.toByte()
+        }
+        f.preview.recycle()
+        stripHits = f.hits
+        Native.screenOverlay(out, ww, sh, 0, 0)
+        if (poke) {
+            Session.overlayGen++
+            screen?.poke()
+            remote?.poke()
+        }
+    }
+
+    // The phone's cursor on the bar: its moves step along the places; true when the bar took the move.
+    private fun stripMove(dx: Int, dy: Int): Boolean {
+        if (stripHits.isEmpty()) return false
+        if (stripHover < 0) {
+            if (dy >= 0 || cursorY > 0f) return false
+            val active = Session.tabList.firstOrNull { it.active }?.let { "select:${it.index}" }
+            stripHover = stripHits.indexOfFirst { it.action == active }.coerceAtLeast(0)
+        } else if (dy > 0) {
+            stripHover = -1
+        } else if (dx != 0) {
+            stripHover = (stripHover + if (dx > 0) 1 else -1).coerceIn(0, stripHits.size - 1)
+        }
+        screenTabs()
+        return true
+    }
+
+    private fun stripClick(what: String): Boolean {
+        val hit = stripHits.getOrNull(stripHover) ?: return false
+        stripHover = -1
+        when {
+            hit.action == "phone" -> phoneScreen()
+            what == "right" && hit.action.startsWith("select:") -> tabs("close:" + hit.action.removePrefix("select:"))
+            else -> tabs(hit.action)
+        }
+        screenTabs()
+        return true
+    }
+
     // ------------------------------------------------ the cursor on the phone's screen
 
     // The phone's own screen on the glasses: the pointer is a cursor on it, its clicks are taps (VoxKeys).
@@ -3616,6 +3702,9 @@ class ScouterService : Service() {
             "off" -> pointerOff()
             "move" -> {
                 if (!Session.pointer) pointerOn()
+                val mx = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                val my = parts.getOrNull(2)?.toIntOrNull() ?: 0
+                if (stripMove(mx, my)) return
                 // A step: 1/60 of the screen across, 1/45 down (the keyboard's arrows, a cell of the touchpad).
                 cursorX = (cursorX + (parts.getOrNull(1)?.toIntOrNull() ?: 0) * 167).coerceIn(0f, 10000f)
                 cursorY = (cursorY + (parts.getOrNull(2)?.toIntOrNull() ?: 0) * 222).coerceIn(0f, 10000f)
@@ -3623,10 +3712,16 @@ class ScouterService : Service() {
             }
             "glide" -> { // glasses pixels (the touchpad)
                 if (!Session.pointer) pointerOn()
+                val gx = parts.getOrNull(1)?.toFloatOrNull() ?: 0f
+                val gy = parts.getOrNull(2)?.toFloatOrNull() ?: 0f
+                if (kotlin.math.abs(gy) > 6f || (stripHover >= 0 && kotlin.math.abs(gx) > 12f)) {
+                    if (stripMove(if (kotlin.math.abs(gx) > 12f) gx.toInt() else 0, if (kotlin.math.abs(gy) > 6f) gy.toInt() else 0)) return
+                } else if (stripHover >= 0) return
                 cursorBy(parts.getOrNull(1)?.toFloatOrNull() ?: 0f, parts.getOrNull(2)?.toFloatOrNull() ?: 0f)
             }
             "click", "right", "up", "down" -> {
                 if (!Session.pointer) pointerOn()
+                if ((parts[0] == "click" || parts[0] == "right") && stripClick(parts[0])) return
                 wakeForInput()
                 val b = screenBounds()
                 val x = cursorX / 10000f * (b.width() - 1)
@@ -3885,6 +3980,7 @@ class ScouterService : Service() {
                     dash()
                 }
                 headFollow(s, list)
+                screenTabs()
             }
         }.start()
     }
@@ -3925,6 +4021,11 @@ class ScouterService : Service() {
             return
         }
         val cmd = Tabs.command(action, session) ?: return
+        // From a screen (the phone's, a server's): a tab picked, made or stepped to is shown, so back to the
+        // terminal (the tabs work the same on every page).
+        if (settings.show == Settings.SCREEN && !action.startsWith("close") && action != "list" && !action.startsWith("scroll") &&
+            !action.startsWith("mouse") && !(chromeShown && action.startsWith("select:")))
+            choose("term:${s.id}", if (action == "prev") Fx.TAB_LEFT else Fx.TAB_RIGHT)
         tabTransition(action, s)
         Thread {
             val r = runCatching { Bootstrap(vault).runShared(s.host, s.port, s.user, cmd) }
@@ -4524,6 +4625,11 @@ class ScouterService : Service() {
         if (show == Settings.SCREEN && Session.screenSource.isEmpty()) Session.screenSource = remote?.key ?: Settings.PHONE
         settings.show = show
         Session.source = settings.sourceName(chosen())
+        // A screen coming on: the tab bar over it once its picture's size is known (stripKey: drawn anew).
+        stripKey = ""
+        stripHover = -1
+        work.removeCallbacks(stripSoon)
+        work.postDelayed(stripSoon, 400)
         if (!onPhone()) hideCursor()
         lookSwitch() // first: the first picture goes with its look
         if (show == Settings.SCREEN) {

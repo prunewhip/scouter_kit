@@ -96,6 +96,10 @@ class Settings(context: Context) {
     var screenFps: Int by Number("screen_fps", 5)
     // The tabs around you (TabRing, glasses-tabs): where a new tab goes, alternate (right, left...), right or left.
     var tabOrder: String by Text("tab_order", TabRing.ALTERNATE)
+    // The tab bar stays across the top of every screen on the glasses (the phone's, a server's): the tabs only.
+    var tabsOnScreens: Boolean
+        get() = prefs.getBoolean("tabs_on_screens", true)
+        set(v) = prefs.edit().putBoolean("tabs_on_screens", v).apply()
     // Tabs around you (TabRing): turning the head switches the phone terminal's tabs (with head turn on).
     var tabsAround: Boolean
         get() = prefs.getBoolean("tabs_around", true)

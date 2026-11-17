@@ -66,15 +66,18 @@ object Dashboard {
     class Layout(val tabs: Boolean, val widgets: List<Widget>)
 
     fun layout(settings: Settings, style: String = settings.dashStyle): Layout = when (style) {
-        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(BATTERY)))
-        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(BATTERY)))
-        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(BATTERY)))
+        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(PHONE), Widget(BATTERY)))
+        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(PHONE), Widget(BATTERY)))
+        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(PHONE), Widget(BATTERY)))
         "tunes" -> Layout(false, listOf(Widget(MEDIA), Widget(TUNES, 2), Widget(CLOCK)))
-        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(BATTERY)))
+        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(PHONE), Widget(BATTERY)))
         "focus" -> Layout(false, listOf(Widget(CLOCK), Widget(NOTES, 2)))
         "minimal" -> Layout(false, listOf(Widget(CLOCK), Widget(PHONE), Widget(BATTERY)))
         "custom" -> custom(settings)
-        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(BATTERY)))
+        // Only the tab bar (over a screen on the glasses: the phone's, a server's).
+        "tabsonly" -> Layout(true, emptyList())
+        // The phone's battery as a number (PHONE) beside the glasses' (BATTERY) in every layout with batteries.
+        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(PHONE), Widget(BATTERY)))
     }
 
     // The user's own layout (Settings.dashLayout): {"tabs": true, "widgets": [{"type": "clock", "weight": 1}, ...]}.
@@ -151,12 +154,11 @@ object Dashboard {
             val phoneBox = RectF(w - pad - 6f - phoneW, barY, w - pad - 6f, barY + barH)
             val room = phoneBox.left - 8f - (barH + 6f) // the + after the tabs
             var shown = 0
-            val first = tabs.minByOrNull { it.index }?.index
-            val xw = barH * 0.85f // a tab's x (closes it; the session's first tab has none: it never closes)
+            val xw = barH * 0.85f // a tab's x (closes it): every tab but Claude's, while there are two or more
             val xPaint = paint(barH * 0.7f, 9, LIGHT).apply { textAlign = Paint.Align.CENTER }
             for (t in tabs) {
                 val text = "${t.index} " + TextUtils.ellipsize(t.name, tabText, barH * 6f, TextUtils.TruncateAt.END)
-                val closable = t.index != first
+                val closable = Tabs.closable(t, tabs)
                 val tw = tabText.measureText(text) + 12f + if (closable) xw else 0f
                 if (x + tw > room) {
                     c.drawText("…", x, textY, tabText)
@@ -376,7 +378,7 @@ object Dashboard {
             val letter = paint(rowH * 0.17f, 8, CONDENSED)
             pct.measureText("100%+") + 4f + 30f + 4f + letter.measureText("L")
         }
-        PHONE -> paint(rowH * 0.2f, 13, MEDIUM).measureText("100%") + 30f + 8f
+        PHONE -> paint(rowH * 0.3f, 15, MEDIUM).measureText("100%+") + 30f + 8f
         WEATHER -> {
             val n = Weather.now
             val big = paint(rowH * 0.42f, 15, THIN)
@@ -638,7 +640,7 @@ object Dashboard {
         val bh = maxOf(6f, rowH * 0.13f)
         val cy = r.top + rowH * 0.62f
         bar(c, RectF(r.left, cy - bh / 2, r.left + 30f, cy + bh / 2), level, line, fill)
-        val pct = paint(rowH * 0.2f, 13, MEDIUM).apply { textAlign = Paint.Align.RIGHT }
+        val pct = paint(rowH * 0.3f, 15, MEDIUM).apply { textAlign = Paint.Align.RIGHT }
         c.drawText(if (level >= 0) "$level%" + if (charging) "+" else "" else "–", r.right, cy + pct.textSize * 0.36f, pct)
     }
 
