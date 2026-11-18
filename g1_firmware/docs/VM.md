@@ -342,7 +342,7 @@ greys differ in one plane). The record of n bytes at src:
 
 | Offset | Size | What |
 |---|---|---|
-| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole); other bits error 4 |
+| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole), bit 2 *scale 2* (0.5.64+: each plane pixel is drawn as 2 × 2 panel pixels), bit 3 *pixel coding* (0.5.64+: every plane's record is pixel coded, below); other bits error 4 |
 | 1 | u8 | P, the number of planes, 1…4 (else error 4) |
 | 2 | 6 | if flags bit 0: u16 y0, u16 rows, s16 dy |
 | | | then for each plane in order: u24 length L ≥ 1, then L bytes, an ordinary `VIDEO` record (§3.7) for that plane |
@@ -360,6 +360,21 @@ the level); the move: y0 + rows ≤ h and 0 < |dy| < rows (error 4); each plane'
 2. Each plane's record is decoded into its bitmap with its state, exactly as `VIDEO` would.
 3. Every row that a move or any plane changed is drawn once, from its first to its last changed pixel (widened
    as `VIDEO`), its pixels composed from all the planes through the level map; then the panel is latched once.
+**Pixel coding** (flag bit 3, g1v0 0.5.64+). Each state is `VIDEOX_PIX_STATE` = 4100 bytes (2050 u16
+probabilities in VIDEO's model; checked as above with that size). Planes are decoded from the top plane down. A
+plane's record is a flags byte (bit 0 reset: every probability 2048 first; bit 1 redraw; other bits error 4) and
+range-coder bytes as VIDEO's. Each row first decodes *same* = bit(2048 + s), s = the row above's *same* (1 for row 0):
+a same row keeps its pixels. Otherwise every pixel x is bit(c), c = W | WW<<1 | NW<<2 | N<<3 | NE<<4 | T<<5 |
+TE<<6 | TS<<7 | U<<8: W, WW = pixels x − 1, x − 2 of this row (decoded), NW, N, NE = x − 1, x, x + 1 of the row above
+(decoded), T, TE = pixels x, x + 1 of this row as the plane held them (the previous frame), TS = pixel x of the row
+below (the previous frame), U = the pixel's bits of planes p + 1 … p + 3 (bit 0 = plane p + 1; 0 for planes that do
+not exist); positions outside the plane read 0. The plane is written in place. At most w + 1 decisions a row.
+On natural video it takes 1.4–1.7× fewer bytes than transition coding (cartoons 1.1–1.3×; `tests/videox_test.cpp`).
+
+**Scale 2** (flag bit 2): plane pixel (c, r) is panel pixels (x + 2c … x + 2c + 1, y + 2r … y + 2r + 1); the
+rectangle is 2w × 2h, clipped as `DRAW`. With pixel coding at half size, natural video takes ~1.5 KB a frame at 4
+greys instead of ~2.5 KB for transitions (512 × 480 picture).
+
 As `VIDEO`: nothing visible changed, no power-on and no latch; error 7 in safe mode; the microphone indicator stays;
 it counts as a `DRAW` for §6.6; `now` is called every 16 rows of every plane. Its time is about P times `VIDEO`'s
 for the same pixels (bound: about 1 s per plane at 64 MHz; g1v0 0.5.62 runs `VIDEO` and `VIDEOX` at 128 MHz).

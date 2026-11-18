@@ -537,6 +537,44 @@ int main() {
     std::printf("greys auto: still picture %d bytes at full detail\n", gm.stats().bytes);
     CHECK(gm.stats().bytes > moving_bytes);
     gm.Stop();
+
+    // 0.5.64+: the motion stream (half size, pixel coded, scale 2); back to the still picture, every pixel exact
+    g1::emulator::SetFirmware(5, 64);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 64; }, 10000));
+    ssh::ScreenMirror mm;
+    CHECK(mm.Start(100, 9, &error));
+    int mmoving = 0, mbytes = 0;
+    for (int f = 0; f < 8; f++) {
+      auto vid = video(f);
+      int r = 0;
+      CHECK(WaitFor([&] { r = mm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+      if (f >= 2 && mm.stats().detail == 2) {
+        mmoving++;
+        mbytes = std::max(mbytes, mm.stats().bytes);
+      }
+    }
+    std::printf("greys auto 0.5.64: %d moving frames coarse, largest %d bytes (0.5.62 path: %d)\n", mmoving, mbytes,
+                moving_bytes);
+    CHECK(mmoving >= 3);
+    CHECK(WaitFor([&] {
+      int r = mm.Frame(held.data(), 540, 471, gs, go);
+      return r == ssh::ScreenMirror::kShown && mm.stats().detail == 1;
+    }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    {
+      std::vector<uint8_t> pv;
+      int pw = 0, ph = 0;
+      CHECK(mm.Preview(&pv, &pw, &ph));
+      const uint8_t *pl = g1::emulator::Panel(0);
+      int wrong = 0;
+      for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+      std::printf("greys auto 0.5.64: %d of %d pixels differ from the exact picture after the motion\n", wrong, pw * ph);
+      CHECK(wrong == 0);
+    }
+    mm.Stop();
     g1::emulator::SetFirmware(5, 0);
   }
   fx->Stop();

@@ -1005,8 +1005,8 @@ int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, ui
 	}
 	x->flags = a[src];
 	x->planes = a[src + 1];
-	if (x->flags > 3 || x->planes == 0 || x->planes > VM_VIDEOX_PLANES) {
-		*detail = x->flags > 3 ? x->flags : x->planes;
+	if (x->flags > 15 || x->planes == 0 || x->planes > VM_VIDEOX_PLANES) {
+		*detail = x->flags > 15 ? x->flags : x->planes;
 		return VM_E_FORMAT;
 	}
 	if ((int64_t)pt + 4 * x->planes > ARENA || (int64_t)stt + 4 * x->planes > ARENA || (int64_t)lv + 16 > ARENA) {
@@ -1020,7 +1020,7 @@ int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, ui
 		wr[nw][0] = x->plane[p];
 		wr[nw++][1] = x->plane[p] + (int64_t)(h - 1) * stride + (w + 7) / 8;
 		wr[nw][0] = x->state[p];
-		wr[nw++][1] = (int64_t)x->state[p] + VM_VIDEO_STATE;
+		wr[nw++][1] = (int64_t)x->state[p] + (x->flags & VM_VX_PIXELS ? VM_VIDEOX_PIX_STATE : VM_VIDEO_STATE);
 	}
 	for (i = 0; i < nw; i++) {
 		if (wr[i][1] > ARENA) {
@@ -1198,3 +1198,115 @@ void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_vide
 		*out = (uint8_t)((lv[i0] & 15) << 4 | (x + 1 < x1 ? lv[i1] & 15 : 0));
 	}
 }
+
+/* VIDEOX's pixel coding (flags bit 3, §3.8): plane p's record (u8 flags: bit 0 reset, bit 1 redraw; then range
+ * coder bytes as VIDEO's) decoded in place, row by row: a "row same" decision (context: the row above's), then
+ * each pixel from 11 bits of context: W, WW, NW, N, NE of this frame, the previous frame's pixel and its right and
+ * lower neighbours (still in the plane: in-place decoding writes a pixel after reading it), and the pixel's bits of
+ * the next three planes up, decoded first. At most w + 1 decisions a row. */
+#define PX_ROW 2048 /* + the row above's "same" */
+
+static inline uint32_t bit1(const uint8_t *row, uint32_t x)
+{
+	return (uint32_t)(row[x >> 3] >> (7 - (x & 7))) & 1;
+}
+
+void vm_videox_pixels(uint8_t *a, const uint32_t *v, const struct vm_videox *x, uint32_t p, vm_span_fn *span,
+		      void *ctx)
+{
+	uint32_t stride = v[1], w = v[2], h = v[3], src = x->at[p], n = x->len[p], st = x->state[p];
+	uint32_t flags = a[src], prev = 1;
+	const uint8_t *up_plane[3] = {0, 0, 0};
+	struct rc r;
+
+	if (flags & 1) {
+		for (uint32_t i = 0; i < VM_VIDEOX_PIX_STATE / 2; i++) {
+			a[st + 2 * i] = 0;
+			a[st + 2 * i + 1] = 8;
+		}
+	}
+	for (uint32_t k = 0; k < 3; k++) {
+		if (p + 1 + k < x->planes) {
+			up_plane[k] = a + x->plane[p + 1 + k];
+		}
+	}
+	r.range = 0xFFFFFFFFu;
+	r.code = 0;
+	r.p = a + src + 1;
+	r.end = a + src + n;
+	r.prob = a + st;
+	for (int i = 0; i < 4; i++) {
+		r.code = r.code << 8 | (r.p < r.end ? *r.p++ : 0);
+	}
+	for (uint32_t y = 0; y < h; y++) {
+		uint8_t *row = a + x->plane[p] + y * stride;
+		const uint8_t *above = y ? row - stride : 0, *below = y + 1 < h ? row + stride : 0;
+		uint32_t lo = w, hi = 0;
+
+		if (!(y & 15)) {
+			span(ctx, y, 0, 0, row);
+		}
+		prev = rc_bit(&r, PX_ROW + prev);
+		if (prev) {
+			if (flags & 2) {
+				span(ctx, y, 0, w, row);
+			}
+			continue;
+		}
+		for (uint32_t xx = 0; xx < w; xx++) {
+			uint32_t t = bit1(row, xx), c, b, up = 0;
+
+			c = (xx ? bit1(row, xx - 1) : 0) | (xx > 1 ? bit1(row, xx - 2) : 0) << 1;
+			if (above) {
+				c |= (xx ? bit1(above, xx - 1) : 0) << 2 | bit1(above, xx) << 3 |
+				     (xx + 1 < w ? bit1(above, xx + 1) : 0) << 4;
+			}
+			c |= t << 5 | (xx + 1 < w ? bit1(row, xx + 1) : 0) << 6 | (below ? bit1(below, xx) : 0) << 7;
+			for (uint32_t k = 0; k < 3; k++) {
+				if (up_plane[k]) {
+					up |= bit1(up_plane[k] + y * stride, xx) << k;
+				}
+			}
+			c |= up << 8;
+			b = rc_bit(&r, c);
+			if (b != t) {
+				row[xx >> 3] ^= (uint8_t)(0x80 >> (xx & 7));
+				if (xx < lo) {
+					lo = xx;
+				}
+				hi = xx + 1;
+			}
+		}
+		if (flags & 2) {
+			span(ctx, y, 0, w, row);
+		} else if (hi > lo) {
+			span(ctx, y, lo, hi, row);
+		}
+	}
+}
+
+/* scale 2 (flags bit 2): pixels x0..x1-1 of plane row y, each drawn twice: one byte (two equal nibbles) a pixel */
+void vm_videox_compose2(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, uint32_t y, uint32_t x0,
+			uint32_t x1, uint8_t *out)
+{
+	const uint8_t *lv = a + v[6];
+	const uint8_t *row[VM_VIDEOX_PLANES];
+	uint8_t twice[16];
+	uint32_t planes = xl->planes;
+
+	for (uint32_t i = 0; i < 16; i++) {
+		twice[i] = (uint8_t)((lv[i] & 15) << 4 | (lv[i] & 15));
+	}
+	for (uint32_t p = 0; p < planes; p++) {
+		row[p] = a + xl->plane[p] + y * v[1];
+	}
+	for (uint32_t x = x0; x < x1; x++) {
+		uint32_t i = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			i |= bit1(row[p], x) << p;
+		}
+		*out++ = twice[i];
+	}
+}
+

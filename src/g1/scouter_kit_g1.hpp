@@ -271,13 +271,20 @@ struct RowMove {
 };
 class PlaneVideoEncoder {
  public:
-  PlaneVideoEncoder(int width, int height, int planes); // 1...640 x 1...480, 1...4 planes
+  // kTransitions: every plane an ordinary VIDEO stream (text, UI, cartoons);
+  // kPixels (g1v0 0.5.64+): every plane coded pixel by pixel from its
+  // neighbours, the previous frame and the planes above (natural video: about
+  // 1.5-1.8x fewer bytes); its states are kPixelState bytes each.
+  enum Coding { kTransitions, kPixels };
+  static constexpr uint32_t kPixelState = 4100;
+  PlaneVideoEncoder(int width, int height, int planes, Coding coding = kTransitions); // 1...640 x 1...480, 1...4
   // index: width x height bytes, row by row (bits above the planes ignored).
   // move: applied first (on the arm and here); FindMove gives a good one.
   // Empty, and the encoder unchanged, for a bad size or move, or a record
   // over max_bytes.
+  // scale2 (0.5.64+): the arm draws the planes at twice their size.
   std::vector<uint8_t> Encode(std::span<const uint8_t> index, bool redraw = false, RowMove move = {},
-                              size_t max_bytes = SIZE_MAX);
+                              size_t max_bytes = SIZE_MAX, bool scale2 = false);
   // The vertical shift that turns most of the last encoded frame into this
   // one (scrolling), as a move; rows == 0 when none covers at least
   // min_rows rows.
@@ -289,8 +296,13 @@ class PlaneVideoEncoder {
 
  private:
   int w_, h_, n_;
+  Coding coding_;
   std::vector<VideoEncoder> enc_;
   std::vector<uint8_t> last_; // the last index frame, masked to the planes
+  std::vector<std::vector<uint16_t>> pp_; // kPixels: each plane's probabilities
+  bool pstarted_ = false;
+  std::vector<uint8_t> PixelPlane(const std::vector<uint8_t> &cur, const std::vector<uint8_t> &prev, int p,
+                                  bool redraw, std::vector<uint16_t> &probs) const;
 };
 
 // Arena memory, the same on both arms and shared with the fonts and bitmaps

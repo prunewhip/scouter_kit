@@ -35,7 +35,7 @@ int main(int argc, char **argv)
 		int valid = rndn(4) != 0;   /* mostly a valid layout (planes and states apart), else anywhere */
 		for (int p = 0; p < 4; p++) {
 			uint32_t pa = valid ? base + (uint32_t)p * psize : rndn(8) ? rndn(0x20000) : rnd();
-			uint32_t sa = valid ? sbase + (uint32_t)p * (VM_VIDEO_STATE + rndn(32)) : rndn(8) ? 0x20000 + rndn(0x8000) : rnd();
+			uint32_t sa = valid ? sbase + (uint32_t)p * (VM_VIDEOX_PIX_STATE + rndn(32)) : rndn(8) ? 0x20000 + rndn(0x8000) : rnd();
 			if ((uint64_t)v[0] + 4 * p + 4 <= VM_ARENA_SIZE) memcpy(a + v[0] + 4 * p, &pa, 4);
 			if ((uint64_t)v[9] + 4 * p + 4 <= VM_ARENA_SIZE) memcpy(a + v[9] + 4 * p, &sa, 4);
 		}
@@ -49,7 +49,7 @@ int main(int argc, char **argv)
 			for (uint32_t i = 0; i < len; i++) a[v[7] + i] = (uint8_t)rnd();
 			if (len >= 2 && rndn(4)) {   /* a well-formed header most of the time */
 				uint32_t pos = v[7] + 2, left;
-				a[v[7]] = (uint8_t)rndn(4);
+				a[v[7]] = (uint8_t)rndn(16);   /* move, redraw, scale 2, pixel coding */
 				a[v[7] + 1] = (uint8_t)planes;
 				if (a[v[7]] & 1) pos += 6;
 				for (int p = 0; p < planes && pos + 3 <= v[7] + len; p++) {
@@ -67,14 +67,19 @@ int main(int argc, char **argv)
 			continue;
 		}
 		if (x.flags & 1) vm_videox_move(a, v, &x, mark, NULL);
-		for (uint32_t p = 0; p < x.planes; p++) {
+		for (uint32_t p = x.planes; p-- > 0;) {
 			uint32_t pv[10];
-			vm_videox_plane(v, &x, p, pv);
-			vm_video_decode(a, pv, &vs, span, NULL);
+			if (x.flags & VM_VX_PIXELS) {
+				vm_videox_pixels(a, v, &x, p, span, NULL);
+			} else {
+				vm_videox_plane(v, &x, p, pv);
+				vm_video_decode(a, pv, &vs, span, NULL);
+			}
 		}
 		for (uint32_t y = 0; y < v[3]; y++) {
 			uint32_t x0 = rndn(v[2]), x1 = x0 + 1 + rndn(v[2] - x0);
 			{ uint8_t pair[256]; vm_videox_pairs(a, v, pair); vm_videox_compose(a, v, &x, pair, y, x0, x1, out); }
+			if (x1 - x0 <= VM_PANEL_W / 2) vm_videox_compose2(a, v, &x, y, x0, x1, out);
 		}
 		ok++;
 	}

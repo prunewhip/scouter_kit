@@ -3233,7 +3233,7 @@ static void videox_send(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, i
 
 	for (uint32_t p = 0; p < 4; p++) {
 		put32(arena + VX_PT + 4 * p, bmp + p * h * stride);
-		put32(arena + VX_ST + 4 * p, st + p * VM_VIDEO_STATE);
+		put32(arena + VX_ST + 4 * p, st + p * VM_VIDEOX_PIX_STATE);   /* room for pixel-coded states */
 		memcpy(ref + VX_PT + 4 * p, arena + VX_PT + 4 * p, 4);
 		memcpy(ref + VX_ST + 4 * p, arena + VX_ST + 4 * p, 4);
 	}
@@ -3243,22 +3243,28 @@ static void videox_send(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, i
 	run();
 }
 
-static void videox_ref(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
-		       uint32_t planes, uint32_t lv)
+static void videox_ref_scaled(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
+			      uint32_t planes, uint32_t lv, uint32_t sc)
 {
-	for (uint32_t r = 0; r < h; r++) {
-		for (uint32_t c = 0; c < w; c++) {
+	for (uint32_t r = 0; r < h * sc; r++) {
+		for (uint32_t c = 0; c < w * sc; c++) {
 			int64_t px = (int64_t)x + c, py = (int64_t)y + r;
-			uint32_t i = 0;
+			uint32_t i = 0, sr = r / sc, scol = c / sc;
 
 			for (uint32_t p = 0; p < planes; p++) {
-				i |= (uint32_t)(arena[bmp + p * h * stride + r * stride + c / 8] >> (7 - c % 8) & 1) << p;
+				i |= (uint32_t)(arena[bmp + p * h * stride + sr * stride + scol / 8] >> (7 - scol % 8) & 1) << p;
 			}
 			if (px >= 0 && px < VM_PANEL_W && py >= 0 && py < VM_PANEL_H) {
 				ref_panel[py][px] = arena[lv + i];
 			}
 		}
 	}
+}
+
+static void videox_ref(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
+		       uint32_t planes, uint32_t lv)
+{
+	videox_ref_scaled(bmp, stride, w, h, x, y, planes, lv, 1);
 }
 
 /* a record at src: flags, planes, the move (if flags bit 0), then per plane a u24 length and len[p] bytes
@@ -3334,8 +3340,8 @@ static void test_videox(void)
 	for (int it = 0; it < 300; it++) {
 		uint32_t w = rndn(6) ? 1 + rndn(200) : 1 + rndn(640), h = rndn(6) ? 2 + rndn(60) : 2 + rndn(478);
 		uint32_t sw = (w + 7) / 8 + rndn(3), planes = 1 + rndn(4), sb = 0x8000 + rndn(16);
-		uint32_t ss = sb + planes * h * sw + rndn(16), rs = ss + planes * VM_VIDEO_STATE + rndn(16);
-		uint32_t ls = rs + 8 + planes * 1503 + rndn(16);
+		uint32_t ss = sb + planes * h * sw + rndn(16), rs = ss + planes * VM_VIDEOX_PIX_STATE + rndn(16);
+		uint32_t ls = rs + 8 + planes * 1503 + rndn(16), sflags = rndn(4) << 2;   /* scale 2, pixel coding */
 		int32_t x = (int32_t)rndn(800) - 150, y = (int32_t)rndn(600) - 60;
 
 		for (uint32_t i = 0; i < 16; i++) {
@@ -3345,7 +3351,8 @@ static void test_videox(void)
 			arena[sb + i] = (uint8_t)rnd();
 		}
 		for (int k = 0; k < 4; k++) {
-			uint32_t flags = k == 0 ? 2 : rndn(4), y0 = 0, rows = 0;
+			/* the first redraws; then any of move, redraw, scale 2 (stream-wide) and pixel coding */
+			uint32_t flags = (k == 0 ? 2 : rndn(4)) | sflags, y0 = 0, rows = 0;
 			int32_t dy = 0;
 
 			if (flags & 1) {
@@ -3362,7 +3369,7 @@ static void test_videox(void)
 			f.nev = 0;
 			videox_send(sb, sw, w, h, x, y, ls, rs, n, ss);
 			CHECK_EQ(f.nev, 0);
-			videox_ref(sb, sw, w, h, x, y, planes, ls);
+			videox_ref_scaled(sb, sw, w, h, x, y, planes, ls, flags & 4 ? 2 : 1);
 			CHECK_EQ(memcmp(ref_panel, f.panel, sizeof(ref_panel)), 0);
 		}
 	}
@@ -3444,10 +3451,10 @@ static void test_videox(void)
 	videox_send(bmp, stride, 37, 23, 0, 0, lv, st + 10, n, st);
 	EXPECT_ERROR(3, VIDEOX, 0, st + 10, 0);
 	CHECK_EQ(memcmp(ref + 0x2000, arena + 0x2000, VM_ARENA_SIZE - 0x2000), 0);
-	arena[src] = 4;
-	ref[src] = 4;
+	arena[src] = 16;   /* flags above bit 3 */
+	ref[src] = 16;
 	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
-	EXPECT_ERROR(4, VIDEOX, 0, 4, 0);
+	EXPECT_ERROR(4, VIDEOX, 0, 16, 0);
 	arena[src] = 0;
 	ref[src] = 0;
 	arena[src + 1] = 5;

@@ -196,6 +196,21 @@ and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, 
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
 
+### What 0.5.64 adds (VIDEOX: 8 pixels a step, pixel coding, scale 2)
+
+- **VIDEOX composes 8 pixels a step** (a spread table and a per-instruction 256-entry pair table): 8.4× faster than
+  0.5.62's per-pixel loop on the same output (bench on the phone's CPU); on the arms 0.5.62 took 390 ms for a full
+  16-grey 640 × 480 page, of which the compose was the largest share after the decode.
+- **Pixel coding** (record flag bit 3, VM.md §3.8): each plane coded pixel by pixel from an 11-bit context (this
+  frame's neighbours, the previous frame in place, the planes above), states of 4100 bytes; planes decode top down.
+  **Scale 2** (flag bit 2): plane pixels drawn as 2 × 2. Measured with the library's encoder on a phone-camera clip
+  (512 × 480, 60 frames): 1.72× fewer bytes than transitions at 4 greys half size, 1.41× at 16 greys full size;
+  cartoons 1.08–1.34×. Through Vox's mirror (auto greys) the gain over the top-planes trick was ~9% on camera
+  video and a loss on cartoons, so Vox 1.00 leaves it off until the encoder picks the smaller coding per frame.
+- Tests: `vm_test` (random records with every flag, the panel against the planes at scale 1 and 2 and at odd
+  offsets; an odd width's last nibble is 0), `videox_test` (the pixel encoder against the core, with and without
+  scale 2), `videox_fuzz` (all flags, ASan/UBSan clean, 200 000 cases).
+
 ### What 0.5.62 adds (the radio while drawing, VIDEOX, 128 MHz decoding, updates only in the case)
 
 - **The executor runs below Bluetooth's RX thread** (priority 9; `CONFIG_BT_RX_PRIO` is 8, a `BUILD_ASSERT` keeps

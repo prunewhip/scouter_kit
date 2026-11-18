@@ -833,7 +833,7 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	const struct vm_host *h = vm->host;
 	struct vm_videox x;
 	struct videox_out o;
-	int64_t ox = s32(v[4]), oy = s32(v[5]), bx0, by0, bx1, by1;
+	int64_t ox = s32(v[4]), oy = s32(v[5]), bx0, by0, bx1, by1, sc;
 	uint32_t w = v[2], hh = v[3];
 	int state, err = vm_videox_check(vm->arena, v, &x, detail);
 
@@ -855,47 +855,75 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	if (x.flags & 1) {
 		vm_videox_move(vm->arena, v, &x, videox_mark, &o);
 	}
-	for (uint32_t p = 0; p < x.planes; p++) {
+	/* from the top plane down: pixel coding reads the planes above (transition coding does not care) */
+	for (uint32_t p = x.planes; p-- > 0;) {
 		uint32_t pv[10];
 
-		vm_videox_plane(v, &x, p, pv);
-		vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
+		if (x.flags & VM_VX_PIXELS) {
+			vm_videox_pixels(vm->arena, v, &x, p, videox_span, &o);
+		} else {
+			vm_videox_plane(v, &x, p, pv);
+			vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
+		}
 	}
 	vm_videox_pairs(vm->arena, v, vm->vxpair);
+	sc = x.flags & VM_VX_SCALE2 ? 2 : 1;
 	bx0 = ox < 0 ? 0 : ox;
 	by0 = oy < 0 ? 0 : oy;
-	bx1 = ox + w > VM_PANEL_W ? VM_PANEL_W : ox + w;
-	by1 = oy + hh > VM_PANEL_H ? VM_PANEL_H : oy + hh;
+	bx1 = ox + sc * w > VM_PANEL_W ? VM_PANEL_W : ox + sc * w;
+	by1 = oy + sc * hh > VM_PANEL_H ? VM_PANEL_H : oy + sc * hh;
 	state = bx0 < bx1 && by0 < by1 ? 0 : -1;
 	for (uint32_t r = 0; r < hh && state >= 0; r++) {
-		int64_t y = oy + r, a, b;
 		uint32_t x0 = (x.flags & 2) ? 0 : vm->vx0[r], x1 = (x.flags & 2) ? w : vm->vx1[r];
 
 		if (!(r & 15)) {
 			h->now(h->ctx);
 		}
-		if (x0 >= x1 || y < 0 || y >= VM_PANEL_H) {
+		if (x0 >= x1) {
 			continue;
 		}
-		a = ox + x0;
-		b = ox + x1;
-		a = a < 0 ? 0 : a;
-		b = b > VM_PANEL_W ? VM_PANEL_W : b;
-		if (a >= b) {
-			continue;
-		}
-		if (!((b - a) & 1) && a > bx0) {
-			a--; /* an odd width: one panel window per row, as VIDEO */
-		}
-		if (state == 0) {
-			state = h->panel_begin(h->ctx, (int32_t)bx0, (int32_t)by0, (int32_t)(bx1 - bx0), (int32_t)(by1 - by0)) == 0 ? 1 : -1;
-			if (state < 0) {
-				break;
+		for (int64_t k = 0; k < sc && state >= 0; k++) {
+			int64_t y = oy + sc * r + k, a = ox + sc * x0, b = ox + sc * x1;
+
+			if (y < 0 || y >= VM_PANEL_H) {
+				continue;
 			}
+			a = a < 0 ? 0 : a;
+			b = b > VM_PANEL_W ? VM_PANEL_W : b;
+			if (a >= b) {
+				continue;
+			}
+			if (sc == 1 && !((b - a) & 1) && a > bx0) {
+				a--; /* an odd width: one panel window per row, as VIDEO */
+			}
+			if (state == 0) {
+				state = h->panel_begin(h->ctx, (int32_t)bx0, (int32_t)by0, (int32_t)(bx1 - bx0), (int32_t)(by1 - by0)) == 0 ? 1 : -1;
+				if (state < 0) {
+					break;
+				}
+			}
+			if (sc == 1) {
+				vm_videox_compose(vm->arena, v, &x, vm->vxpair, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
+			} else {
+				/* a panel pixel at an odd offset from ox is the right half of its plane pixel: compose from the
+				 * pixel it halves, then drop the first nibble */
+				int64_t off = a - ox, sx0 = off / 2, sx1 = (b - ox + 1) / 2;
+
+				vm_videox_compose2(vm->arena, v, &x, r, (uint32_t)sx0, (uint32_t)sx1, vm->row2);
+				if (off & 1) {
+					for (int64_t i = 0; i < sx1 - sx0; i++) {
+						vm->row[i] = (uint8_t)(vm->row2[i] << 4 | vm->row2[i + 1] >> 4);
+					}
+				} else {
+					memcpy(vm->row, vm->row2, (size_t)(sx1 - sx0) < sizeof(vm->row) ? (size_t)(sx1 - sx0) : sizeof(vm->row));
+				}
+				if ((b - a) & 1) {
+					vm->row[(b - a) / 2] &= 0xF0; /* a 0 nibble after an odd last pixel (vm_host.panel_row) */
+				}
+			}
+			indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+			(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
 		}
-		vm_videox_compose(vm->arena, v, &x, vm->vxpair, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
-		indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
-		(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
 	}
 	if (state == 1) {
 		h->panel_end(h->ctx);

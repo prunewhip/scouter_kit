@@ -22,10 +22,14 @@ namespace {
 constexpr uint32_t kCode = 2048;       // the VIDEO path's stored code (table, pool, the decode and the cursor)
 constexpr uint32_t kPtrWords = 16;     // the cursor's words: X, Y, On (the host's), then its own
 constexpr uint32_t kRecordMax = 65536; // the largest record sent; a larger change waits for a smaller one
-constexpr uint32_t kCodeX = 512;        // the VIDEOX path's stored code (table, pool, two calls)
+constexpr uint32_t kCodeX = 768;        // the VIDEOX path's stored code (table, pool, three calls)
 constexpr uint32_t kRecordMaxX = 49152; // VIDEOX's largest record (its planes take most of the arena)
 constexpr int64_t kMotionHoldUs = 300000; // auto greys: the motion mode lasts this long after the last moving frame
 constexpr size_t kMotionBudget = 4096;    // ... and a moving frame's record stays this small (about 10 fps)
+// The motion stream (0.5.64's pixel coding at half size, scale 2): measured through this mirror on real video it
+// saved only ~9% on camera footage and cost ~1.8x on cartoons against the top-planes trick, so it is off until the
+// encoder picks the smaller coding per frame.
+constexpr bool kMotionStream = false;
 constexpr uint32_t kHeader = 12;       // due time, frame number, record size
 constexpr int kQueued = 4;             // commands not yet sent on an arm's link: more, and a frame is skipped
 
@@ -602,6 +606,18 @@ static bool HasVideoX() {
   return any;
 }
 
+// ... and 0.5.64 or later: VIDEOX's pixel coding and scale 2 (the motion stream).
+static bool HasPixelVideo() {
+  bool any = false;
+  for (g1::Arm *a : {&g1::left, &g1::right}) {
+    auto st = a->GetState();
+    if (!st.present) continue;
+    if (!st.connected || st.firmware_major * 10000 + st.firmware_minor * 100 + st.firmware_patch < 564) return false;
+    any = true;
+  }
+  return any;
+}
+
 bool ScreenMirror::Path(int levels) {
   want_levels_ = levels;
   int planes = levels == 4 ? 2 : levels == 8 ? 3 : 4;
@@ -858,6 +874,34 @@ bool ScreenMirror::StartVideoX(int planes) {
     Put32(tabs, size_t(4 * k), uint32_t(v.parts[size_t(k)]));
     Put32(tabs, size_t(16 + 4 * k), v.state + uint32_t(k) * g1::kVideoState);
   }
+  // The motion stream: 2 pixel-coded planes at half size, their states, its tables and level map (4 greys).
+  std::vector<uint8_t> mtabs(48, 0), mmap(16, 0);
+  if (kMotionStream && v.planes == 4 && HasPixelVideo()) {
+    size_t had = v.parts.size();
+    int mw = w_ / 2, mh = h_ / 2;
+    uint32_t ms = uint32_t(((mw + 7) / 8 + 3) & ~3);
+    int64_t p0 = g1::Alloc(ms * uint32_t(mh)), p1 = p0 >= 0 ? g1::Alloc(ms * uint32_t(mh)) : -1;
+    int64_t mst = p1 >= 0 ? g1::Alloc(2 * g1::PlaneVideoEncoder::kPixelState) : -1, mt = mst >= 0 ? g1::Alloc(48) : -1;
+    for (int64_t a : {p0, p1, mst, mt})
+      if (a >= 0) v.parts.push_back(a);
+    if (mt >= 0) {
+      v.mw = mw;
+      v.mh = mh;
+      v.mstride = ms;
+      v.mplane_tab = uint32_t(mt);
+      v.mstate_tab = uint32_t(mt) + 16;
+      v.mlevels = uint32_t(mt) + 32;
+      Put32(mtabs, 0, uint32_t(p0));
+      Put32(mtabs, 4, uint32_t(p1));
+      Put32(mtabs, 16, uint32_t(mst));
+      Put32(mtabs, 20, uint32_t(mst) + g1::PlaneVideoEncoder::kPixelState);
+      for (int k = 0; k <= 3; k++) mtabs[size_t(32 + (k ^ (k >> 1)))] = uint8_t(k * 5);
+    } else {
+      for (size_t i = had; i < v.parts.size(); i++) g1::Free(g1::Address(v.parts[i]));
+      v.parts.resize(had);
+      LOG("screen: no room for the motion stream (arena free %d)", sk::free_memory);
+    }
+  }
   const int n = (1 << v.planes) - 1; // steps between black and full
   std::vector<uint8_t> map(16, 0);
   for (int k = 0; k <= n; k++) map[size_t(k ^ (k >> 1))] = uint8_t((k * 15 + n / 2) / n);
@@ -870,7 +914,7 @@ bool ScreenMirror::StartVideoX(int planes) {
     if (!arm.GetState().present) continue;
     int px = i == 0 ? x_ - std::max(0, -dx_) : x_ - std::max(0, dx_);
     int py = i == 0 ? y_ + std::max(0, -dy_) : y_ + std::max(0, dy_);
-    g1::Program p(v.code, 32);
+    g1::Program p(v.code, 48);
     g1::Address at = p.Here();
     p.SleepUntil(g1::ArenaWord(v.buf / 4));
     p.VideoX(p.Const(v.plane_tab), p.Const(v.stride), p.Const(uint32_t(w_)), p.Const(uint32_t(h_)), p.Const(uint32_t(px)),
@@ -883,6 +927,15 @@ bool ScreenMirror::StartVideoX(int planes) {
              p.Const(uint32_t(py)), p.Const(v.levels_at), p.Const(v.buf + kHeader), g1::ArenaWord(v.buf / 4 + 2),
              p.Const(v.state_tab));
     p.Ret();
+    g1::Address motion = 0; // the motion stream at scale 2 (the record's flags say so)
+    if (v.mw) {
+      motion = p.Here();
+      p.SleepUntil(g1::ArenaWord(v.buf / 4));
+      p.VideoX(p.Const(v.mplane_tab), p.Const(v.mstride), p.Const(uint32_t(v.mw)), p.Const(uint32_t(v.mh)),
+               p.Const(uint32_t(px)), p.Const(uint32_t(py)), p.Const(v.mlevels), p.Const(v.buf + kHeader),
+               g1::ArenaWord(v.buf / 4 + 2), p.Const(v.mstate_tab));
+      p.Ret();
+    }
     std::string why;
     if (!p.Valid(&why)) {
       error_ = "the VIDEOX code: " + why;
@@ -896,13 +949,26 @@ bool ScreenMirror::StartVideoX(int planes) {
       arm.WriteArena(uint32_t(v.parts[size_t(k)]), std::vector<uint8_t>(size_t(v.stride) * size_t(h_), 0));
     arm.WriteArena(v.plane_tab, tabs);
     arm.WriteArena(v.levels_at, map);
+    if (v.mw) {
+      arm.WriteArena(uint32_t(v.parts[size_t(v.planes) + 1]), std::vector<uint8_t>(size_t(v.mstride) * size_t(v.mh), 0));
+      arm.WriteArena(uint32_t(v.parts[size_t(v.planes) + 2]), std::vector<uint8_t>(size_t(v.mstride) * size_t(v.mh), 0));
+      arm.WriteArena(v.mplane_tab, mtabs);
+    }
     if (!arm.Load(p)) {
       error_ = "the VIDEOX code did not load (a firmware before 0.5.62?)";
       return false;
     }
     v.call[size_t(i)] = at;
     v.hidden[size_t(i)] = hidden;
+    v.callm[size_t(i)] = motion;
     v.epochs[size_t(i)] = arm.GetState().epoch_changes;
+  }
+  if (v.mw) {
+    v.menc = std::make_unique<g1::PlaneVideoEncoder>(v.mw, v.mh, 2, g1::PlaneVideoEncoder::kPixels);
+    v.mpix.assign(size_t(v.mw) * size_t(v.mh), 0);
+    v.mredraw = true;
+    v.in_motion = false;
+    LOG("screen: motion stream %d x %d, pixel coded, drawn at scale 2", v.mw, v.mh);
   }
   v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
   v.pix.assign(size_t(w_) * h_, 0);
@@ -939,9 +1005,41 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready) {
     arm.Call(v.call[size_t(i)]);
   }
   v.redraw = false;
+  v.in_motion = false;
   v.k++;
   v.sent = int(msg.size());
   v.shown = v.pix;
+  return true;
+}
+
+// frame_ (made at detail 2: 2 x 2 blocks) as a motion-stream record: half size, 4 greys, pixel coded, drawn at
+// scale 2; the first after still pictures redraws every row (the panel shows the full stream's picture).
+bool ScreenMirror::SendMotion(size_t max_bytes) {
+  Video &v = video_;
+  for (int y = 0; y < v.mh; y++)
+    for (int x = 0; x < v.mw; x++) {
+      int val = frame_[size_t(2 * y) * size_t(w_) + size_t(2 * x)], k = (val * 3 + 127) / 255;
+      v.mpix[size_t(y) * size_t(v.mw) + size_t(x)] = uint8_t(k ^ (k >> 1));
+    }
+  std::vector<uint8_t> rec = v.menc->Encode(v.mpix, v.mredraw, {}, std::min<size_t>(max_bytes, v.room), true);
+  if (rec.empty()) return false;
+  int64_t lead = std::min<int64_t>(v.lead + int64_t(rec.size()) * 1000000 / 40000, 1000000);
+  std::vector<uint8_t> msg(kHeader + rec.size());
+  Put32(msg, 4, v.k);
+  Put32(msg, 8, uint32_t(rec.size()));
+  std::memcpy(msg.data() + kHeader, rec.data(), rec.size());
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    Put32(msg, 0, arm.DeviceTime(lead));
+    arm.WriteArena(v.buf, msg);
+    arm.Call(v.callm[size_t(i)]);
+  }
+  v.mredraw = false;
+  v.in_motion = true;
+  v.redraw = true; // the full stream's picture is no longer on the panel: its next record draws every row
+  v.k++;
+  v.sent = int(msg.size());
   return true;
 }
 
@@ -1397,6 +1495,19 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
     }
     exact_ = frame_;
+    if (now < moving_until_us_ && v.mw) {
+      Make(o, c, 2);
+      Compose();
+      if (v.in_motion && frame_ == prev_ && prev_detail_ == 2) return kLater; // the refinement comes when it holds
+      if (!v.in_motion) v.mredraw = true;
+      if (SendMotion(v.room)) {
+        prev_ = frame_;
+        prev_detail_ = 2;
+        Count(video_.sent, 2);
+        return kLater;
+      }
+      return kBusy;
+    }
     if (now < moving_until_us_) {
       size_t budget = std::min<size_t>(v.room, kMotionBudget);
       for (int n = 2; n <= 4; n++) {

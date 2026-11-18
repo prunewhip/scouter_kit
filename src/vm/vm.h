@@ -178,6 +178,7 @@ struct vm {
 	struct vm_video video;
 	uint16_t vx0[VM_PANEL_H], vx1[VM_PANEL_H]; /* VIDEOX: each row's span to draw */
 	uint8_t vxpair[256];                      /* VIDEOX: levels of two pixels for a byte of two indices */
+	uint8_t row2[VM_PANEL_W / 2 + 2];         /* VIDEOX at scale 2: a row before its half-pixel shift */
 };
 
 /* Boot: zero the arena (VM_ARENA_SIZE bytes, owned by the caller), program stopped, default

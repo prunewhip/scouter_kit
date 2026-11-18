@@ -1,5 +1,7 @@
 // PlaneVideoEncoder (library) against the VM core's VIDEOX decoding (src/vm): every record decodes to the
 // frame that was encoded, plane by plane, with and without row moves; FindMove finds a scroll.
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,7 +26,7 @@ static int decode(std::vector<uint8_t> &a, uint32_t bmp, uint32_t stride, int w,
   std::memcpy(a.data() + src, rec.data(), rec.size());
   const uint32_t pt = 0x3FE00, stt = 0x3FE40; // the tables: planes back to back from bmp, states from st
   for (uint32_t p = 0; p < 4; p++) {
-    uint32_t pa = bmp + p * uint32_t(h) * stride, sa = st + p * scouter_kit::g1::kVideoState;
+    uint32_t pa = bmp + p * uint32_t(h) * stride, sa = st + p * scouter_kit::g1::PlaneVideoEncoder::kPixelState;
     for (int b = 0; b < 4; b++) {
       a[pt + 4 * p + uint32_t(b)] = uint8_t(pa >> (8 * b));
       a[stt + 4 * p + uint32_t(b)] = uint8_t(sa >> (8 * b));
@@ -35,10 +37,14 @@ static int decode(std::vector<uint8_t> &a, uint32_t bmp, uint32_t stride, int w,
   int err = vm_videox_check(a.data(), v, &x, &detail);
   if (err) return err;
   if (x.flags & 1) vm_videox_move(a.data(), v, &x, noop_mark, nullptr);
-  for (uint32_t p = 0; p < x.planes; p++) {
+  for (uint32_t p = x.planes; p-- > 0;) { // top down, as the VM
     uint32_t pv[10];
-    vm_videox_plane(v, &x, p, pv);
-    vm_video_decode(a.data(), pv, &vs, noop_span, nullptr);
+    if (x.flags & VM_VX_PIXELS) {
+      vm_videox_pixels(a.data(), v, &x, p, noop_span, nullptr);
+    } else {
+      vm_videox_plane(v, &x, p, pv);
+      vm_video_decode(a.data(), pv, &vs, noop_span, nullptr);
+    }
   }
   return 0;
 }
@@ -63,7 +69,7 @@ int main() {
     scouter_kit::g1::PlaneVideoEncoder enc(w, h, n);
     std::vector<uint8_t> a(VM_ARENA_SIZE, 0);
     uint32_t stride = uint32_t(enc.Stride()), bmp = 0x100, st = bmp + uint32_t(n) * uint32_t(h) * stride + 4;
-    uint32_t src = st + uint32_t(n) * scouter_kit::g1::kVideoState + 4, lv = 0x3FF00;
+    uint32_t src = st + uint32_t(n) * scouter_kit::g1::PlaneVideoEncoder::kPixelState + 4, lv = 0x3FF00;
     for (int i = 0; i < 16; i++) a[lv + uint32_t(i)] = uint8_t(i);
     // a "document": text-like rows of runs, scrolled now and then
     std::vector<uint8_t> doc(size_t(w) * size_t(h) * 3);
@@ -94,6 +100,38 @@ int main() {
       total += rec.size();
       frames++;
     }
+  }
+  // pixel coding (0.5.64+): natural-ish moving grey frames, with and without scale 2, decode to what was encoded
+  {
+    std::mt19937 r2(11);
+    size_t pbytes = 0, tbytes = 0;
+    for (int it = 0; it < 12; it++) {
+      int w = 16 + int(r2() % 300), h = 8 + int(r2() % 200), n = 1 + int(r2() % 4);
+      if (it == 0) w = 256, h = 240, n = 2;
+      scouter_kit::g1::PlaneVideoEncoder pe(w, h, n, scouter_kit::g1::PlaneVideoEncoder::kPixels);
+      scouter_kit::g1::PlaneVideoEncoder te(w, h, n);
+      std::vector<uint8_t> a(VM_ARENA_SIZE, 0);
+      uint32_t stride = uint32_t(pe.Stride()), bmp = 0x100, st = bmp + uint32_t(n) * uint32_t(h) * stride + 4;
+      uint32_t src = st + uint32_t(n) * scouter_kit::g1::PlaneVideoEncoder::kPixelState + 4, lv = 0x3FF00;
+      for (int i = 0; i < 16; i++) a[lv + uint32_t(i)] = uint8_t(i);
+      for (int f = 0; f < 10; f++) {
+        std::vector<uint8_t> idx(size_t(w) * size_t(h));
+        for (int y = 0; y < h; y++)
+          for (int x = 0; x < w; x++) {
+            double g = 0.5 + 0.45 * std::sin((x + 5 * f) / 9.0) * std::cos((y - 3 * f) / 7.0) + (r2() % 100) / 2000.0;
+            int k = std::clamp(int(g * ((1 << n) - 1) + 0.5), 0, (1 << n) - 1);
+            idx[size_t(y) * size_t(w) + size_t(x)] = uint8_t(k ^ (k >> 1));
+          }
+        if (f == 6) std::fill(idx.begin() + std::ptrdiff_t(idx.size() / 3), idx.begin() + std::ptrdiff_t(idx.size() / 2), uint8_t(0));
+        std::vector<uint8_t> rec = pe.Encode(idx, f == 0, {}, SIZE_MAX, f % 2 == 1);
+        std::vector<uint8_t> trec = te.Encode(idx, f == 0);
+        CHECK(!rec.empty());
+        CHECK(decode(a, bmp, stride, w, h, lv, src, rec, st) == 0);
+        CHECK(planes_match(a, bmp, stride, w, h, n, idx));
+        if (f) pbytes += rec.size(), tbytes += trec.size();
+      }
+    }
+    std::printf("pixel coding: %zu bytes vs %zu with transitions on smooth moving grey frames\n", pbytes, tbytes);
   }
   // bad moves are refused without changing anything
   scouter_kit::g1::PlaneVideoEncoder e(16, 16, 2);

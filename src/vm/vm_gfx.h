@@ -86,6 +86,9 @@ void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t leve
  * calls mark for each row whose content it changed; vm_videox_plane gives plane p's VIDEO operands;
  * vm_videox_compose makes pixels x0..x1-1 of row y as 4 bpp from the planes, like vm_video_expand. */
 #define VM_VIDEOX_PLANES 4
+#define VM_VX_SCALE2 4             /* record flag: the planes are drawn at twice their size */
+#define VM_VX_PIXELS 8             /* record flag: every plane is pixel coded (vm_videox_pixels) */
+#define VM_VIDEOX_PIX_STATE 4100u  /* a pixel-coded plane's state: 2050 u16 probabilities */
 struct vm_videox {
 	uint32_t planes, flags, y0, rows;
 	int32_t dy;
@@ -96,6 +99,12 @@ typedef void vm_mark_fn(void *ctx, uint32_t y);
 int vm_videox_check(const uint8_t *arena, const uint32_t *v, struct vm_videox *x, uint32_t *detail);
 void vm_videox_move(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx);
 void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv);
+/* pixel coding (VM_VX_PIXELS): plane p's record decoded in place, spans as vm_video_decode's; planes are decoded
+ * from the top one down (the context reads the planes above); compose2: scale 2, one byte (two pixels) a pixel */
+void vm_videox_pixels(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t p, vm_span_fn *span,
+		      void *ctx);
+void vm_videox_compose2(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t y, uint32_t x0,
+			uint32_t x1, uint8_t *out);
 /* pair: 256 bytes from vm_videox_pairs (two pixels' levels for a byte of two indices), made once per VIDEOX */
 void vm_videox_pairs(const uint8_t *arena, const uint32_t *v, uint8_t *pair);
 void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, const uint8_t *pair,

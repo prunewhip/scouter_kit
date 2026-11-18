@@ -803,21 +803,78 @@ bool VideoEncoder::Move(int y0, int rows, int dy) {
   return true;
 }
 
-PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes) : w_(width), h_(height), n_(planes) {
+PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes, Coding coding)
+    : w_(width), h_(height), n_(planes), coding_(coding) {
   if (w_ < 1 || w_ > kPanelW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
     n_ = 0;
     return;
   }
   for (int p = 0; p < n_; p++) enc_.emplace_back(w_, h_);
   last_.assign(size_t(w_) * size_t(h_), 0);
+  pp_.assign(size_t(n_), std::vector<uint16_t>(kPixelState / 2, 2048));
+}
+
+// One plane pixel by pixel, as vm_videox_pixels decodes it (VM.md 3.8): a "row same" decision (context 2048 + the
+// row above's), then each pixel from W, WW, NW, N, NE of this frame, the previous frame's pixel and its right and
+// lower neighbours, and the pixel's bits of the next three planes up (already coded: planes go top down).
+std::vector<uint8_t> PlaneVideoEncoder::PixelPlane(const std::vector<uint8_t> &cur, const std::vector<uint8_t> &prev,
+                                                   int p, bool redraw, std::vector<uint16_t> &probs) const {
+  std::vector<uint8_t> out = {uint8_t((pstarted_ ? 0 : 1) | (redraw ? 2 : 0))};
+  if (!pstarted_) std::fill(probs.begin(), probs.end(), uint16_t(2048));
+  RangeEncoder e{probs.data(), out};
+  const int w = w_, h = h_;
+  auto bit = [&](const std::vector<uint8_t> &img, int x, int y) -> uint32_t {
+    return uint32_t(img[size_t(y) * size_t(w) + size_t(x)] >> p) & 1;
+  };
+  uint32_t prev_same = 1;
+  for (int y = 0; y < h; y++) {
+    bool same = true;
+    for (int x = 0; x < w && same; x++) same = bit(cur, x, y) == bit(prev, x, y);
+    e.Bit(2048 + prev_same, same);
+    prev_same = same;
+    if (same) continue;
+    for (int x = 0; x < w; x++) {
+      uint32_t c = (x ? bit(cur, x - 1, y) : 0) | (x > 1 ? bit(cur, x - 2, y) : 0) << 1;
+      if (y) c |= (x ? bit(cur, x - 1, y - 1) : 0) << 2 | bit(cur, x, y - 1) << 3 | (x + 1 < w ? bit(cur, x + 1, y - 1) : 0) << 4;
+      c |= bit(prev, x, y) << 5 | (x + 1 < w ? bit(prev, x + 1, y) : 0) << 6 | (y + 1 < h ? bit(prev, x, y + 1) : 0) << 7;
+      uint32_t up = 0;
+      for (int k = 0; k < 3; k++)
+        if (p + 1 + k < n_) up |= (uint32_t(cur[size_t(y) * size_t(w) + size_t(x)]) >> (p + 1 + k) & 1) << k;
+      e.Bit(c | up << 8, bit(cur, x, y));
+    }
+  }
+  e.Finish();
+  return out;
 }
 
 std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, bool redraw, RowMove move,
-                                               size_t max_bytes) {
+                                               size_t max_bytes, bool scale2) {
   if (n_ == 0) return {};
   const size_t px = size_t(w_) * size_t(h_);
   const uint8_t mask = uint8_t((1u << n_) - 1);
-  std::vector<uint8_t> out = {uint8_t((move.rows ? 1 : 0) | (redraw ? 2 : 0)), uint8_t(n_)};
+  std::vector<uint8_t> out = {uint8_t((move.rows ? 1 : 0) | (redraw ? 2 : 0) | (scale2 ? 4 : 0) |
+                                      (coding_ == kPixels ? 8 : 0)),
+                              uint8_t(n_)};
+  if (coding_ == kPixels) {
+    if (move.rows) return {}; // pixel coding has no row move: the previous frame is its context already
+    std::vector<uint8_t> cur(px), prev = last_;
+    for (size_t i = 0; i < px; i++) cur[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
+    auto pp = pp_;
+    std::vector<std::vector<uint8_t>> recs(static_cast<size_t>(n_));
+    for (int p = n_ - 1; p >= 0; p--) recs[size_t(p)] = PixelPlane(cur, prev, p, redraw, pp[size_t(p)]);
+    for (int p = 0; p < n_; p++) {
+      const auto &r = recs[size_t(p)];
+      out.push_back(uint8_t(r.size()));
+      out.push_back(uint8_t(r.size() >> 8));
+      out.push_back(uint8_t(r.size() >> 16));
+      out.insert(out.end(), r.begin(), r.end());
+    }
+    if (out.size() > max_bytes) return {};
+    pp_ = std::move(pp);
+    pstarted_ = true;
+    last_ = std::move(cur);
+    return out;
+  }
   if (move.rows) {
     if (move.y0 < 0 || move.rows < 2 || move.y0 + move.rows > h_ || move.dy == 0 || std::abs(move.dy) >= move.rows)
       return {};
