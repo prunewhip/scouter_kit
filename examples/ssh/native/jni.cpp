@@ -1310,6 +1310,30 @@ JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_linkStats(JNIEnv *env, jc
   return a;
 }
 
+// Each arm's power as the firmware measures it: battery current (mA, positive while discharging: BATT_MA, a
+// 64-sample average), voltage (mV) and percent; per arm (left, then right), 0 when not connected or no answer.
+JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_powerStats(JNIEnv *env, jclass) {
+  jint v[6] = {};
+  {
+    std::lock_guard<std::mutex> lock(g_glasses_mutex);
+    if (g_glasses) {
+      int arm = 0;
+      for (scouter_kit::g1::Arm *a : {&scouter_kit::g1::left, &scouter_kit::g1::right}) {
+        if (a->GetState().connected) {
+          uint32_t ma = 0, mv = 0, pct = 0;
+          if (a->Prop(scouter_kit::g1::PROP_BATT_MA, &ma)) v[arm * 3] = jint(int32_t(ma));
+          if (a->Prop(scouter_kit::g1::PROP_BATT_MV, &mv)) v[arm * 3 + 1] = jint(mv);
+          if (a->Prop(scouter_kit::g1::PROP_BATT_PCT, &pct)) v[arm * 3 + 2] = jint(pct);
+        }
+        arm++;
+      }
+    }
+  }
+  jintArray a = env->NewIntArray(6);
+  env->SetIntArrayRegion(a, 0, 6, v);
+  return a;
+}
+
 // Each arm's BRIGHTNESS as it is now (left, right; -1: not connected or no answer).
 JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_brightnessRead(JNIEnv *env, jclass) {
   jint v[2] = {-1, -1};

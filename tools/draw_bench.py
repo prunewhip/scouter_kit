@@ -41,6 +41,7 @@ def main():
     ap.add_argument("--n", type=int, default=3)
     ap.add_argument("--out", required=True)
     ap.add_argument("--video", action="store_true", help="0.5.42+: VIDEO's worst cases instead of the DRAW sizes")
+    ap.add_argument("--videox", action="store_true", help="0.5.62+: VIDEOX, 16 greys as 4 planes with row moves")
     args = ap.parse_args()
     arm = g.Arm(g.BleTransport(args.ble), name=args.name)
     arm.setup()
@@ -52,6 +53,17 @@ def main():
         arm.run_until(lambda: last in arm.fences, 120, "the last VIDEO")
         out = {"hello": {k: h[k] for k in ("version", "role")}, "record_bytes": [len(r) for r in recs],
                "video_ms": video_ms(arm, len(recs)), "panel": arm.panel_read(0, 480)}
+        print(json.dumps(out), flush=True)
+        arm.set_panel(0)
+        arm.wait_idle(10)
+    elif args.videox:
+        with tempfile.TemporaryDirectory() as tmp:
+            recs = videox_records(tmp)
+        h = arm.hello()
+        last = videox_send(arm, recs)
+        arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOX")
+        out = {"hello": {k: h[k] for k in ("version", "role")}, "record_bytes": [len(r) for r in recs],
+               "videox_ms": videox_ms(arm, len(recs)), "panel": arm.panel_read(0, 480)}
         print(json.dumps(out), flush=True)
         arm.set_panel(0)
         arm.wait_idle(10)

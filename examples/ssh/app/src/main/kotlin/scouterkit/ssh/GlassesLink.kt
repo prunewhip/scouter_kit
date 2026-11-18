@@ -334,7 +334,7 @@ class GlassesLink(
         val SECURITY = setOf(5, 6, 0x3D, 15, 137)
         const val SETUP_MS = 12000L // connected to subscribed, at most
         const val WRITE_STALL_MS = 3000L // a write's callback, at most
-        const val IDLE_LINK_MS = 5000L // writes stopped this long: the balanced link again
+        const val IDLE_LINK_MS = 15000L // writes stopped this long: the balanced link again (shorter flapped)
         // The waits before each direct connection again (then autoConnect).
         val DIRECT_WAITS = longArrayOf(300, 1000, 2000, 4000)
         val SERVICE: UUID = UUID.fromString("f3da4d59-277a-4fc9-a1ed-41c9c22d4400")

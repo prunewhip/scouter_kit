@@ -153,6 +153,8 @@ object Native {
     @JvmStatic external fun brightnessRead(): IntArray
     // Per arm (left, right): interval µs, packets, resent, queued, firmware (major<<16|minor<<8|patch)
     @JvmStatic external fun linkStats(): IntArray
+    // Per arm (left, right): battery mA (positive: discharging), mV, percent
+    @JvmStatic external fun powerStats(): IntArray
     // The display off (nothing shows; the TouchBar still reports) or on again.
     @JvmStatic external fun blank(on: Boolean)
     // Left %, right %, left charging, right charging (-1 unknown); blocks while the arms answer.

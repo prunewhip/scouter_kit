@@ -190,7 +190,9 @@ class ScouterService : Service() {
                         "${if (i == 0) "L" else "R"} ${"%.2f".format(s[b] / 1000.0)} ms ${pps}/s resent $resent q ${s[b + 3]} " +
                             "fw ${fw shr 16}.${(fw shr 8) and 0xFF}.${fw and 0xFF}"
                     }
-                    Log.i(TAG, "link: $arms")
+                    val p = Native.powerStats()
+                    Log.i(TAG, "link: $arms | power L ${p[0]} mA ${p[1]} mV ${p[2]}%, R ${p[3]} mA ${p[4]} mV ${p[5]}% | " +
+                        "${Session.screenSource.ifEmpty { "terminal" }}")
                 }
                 linkLast = s
                 linkAt = now
