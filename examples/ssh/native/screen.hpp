@@ -205,7 +205,9 @@ private:
   bool StartVideo();
   bool StartVideoX(int planes);                        // the grey fast path (g1v0 0.5.62+), fewer planes if short
   // frame_ (or video_.pix, pix_ready) as a VIDEOX record, a scroll first: false when larger than max_bytes
-  bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move, bool pix_ready = false);
+  bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move, bool pix_ready = false,
+                  scouter_kit::g1::BlockMove block = {});
+  scouter_kit::g1::Sprite PointerSprite(); // the sprite fields for the next record (and where it then is)
   bool SendMotion(size_t max_bytes); // frame_ (at detail 2) on the motion stream: false when larger than max_bytes
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
@@ -290,6 +292,10 @@ private:
     std::unique_ptr<scouter_kit::g1::PlaneVideoEncoder> menc;
     std::vector<uint8_t> mpix;
     bool in_motion = false, mredraw = true;
+    // 0.5.66+: block moves, and the pointer as VIDEOX's sprite (64 bytes at sprite_at) instead of in the picture
+    bool v66 = false;
+    uint32_t sprite_at = 0;
+    int spr_x = -32768, spr_y = 0; // where the arms draw it now (-32768: nowhere)
     uint32_t k = 0;
     int64_t lead = 30000; // µs from now to the frame's due time (VideoReady)
     int sent = 0;         // the last record's bytes with its header

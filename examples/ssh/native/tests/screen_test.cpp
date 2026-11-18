@@ -575,6 +575,69 @@ int main() {
       CHECK(wrong == 0);
     }
     mm.Stop();
+
+    // 0.5.66+: the pointer as the arms' sprite (a move costs a tiny record, no frame), and a dragged window as a
+    // block move; the panel always the exact picture (with the arrow over it)
+    g1::emulator::SetFirmware(5, 66);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 66; }, 10000));
+    ssh::ScreenMirror sm;
+    CHECK(sm.Start(100, 9, &error));
+    go.detail = 1;
+    auto desk = [&](int wx, int wy) { // a "window" of grey text on a mid-grey desktop
+      std::vector<uint8_t> p(size_t(gs) * 471);
+      for (int y = 0; y < 471; y++)
+        for (int x = 0; x < 540; x++) {
+          int g = 136;
+          if (x >= wx && x < wx + 200 && y >= wy && y < wy + 120)
+            g = ((x - wx) / 6 + (y - wy) / 11) % 4 ? 240 : ((x - wx) * 7 + (y - wy) * 3) % 3 ? 34 : 102;
+          uint8_t *px = &p[size_t(y) * size_t(gs) + size_t(x) * 4];
+          px[0] = px[1] = px[2] = uint8_t(g);
+          px[3] = 255;
+        }
+      return p;
+    };
+    auto exact = [&] { // the panel (left eye) against the last picture sent, outside the arrow's box
+      std::vector<uint8_t> pv;
+      int pw = 0, ph = 0;
+      if (!sm.Preview(&pv, &pw, &ph)) return -1;
+      const uint8_t *pl = g1::emulator::Panel(0);
+      int wrong = 0;
+      for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+      return wrong;
+    };
+    auto d0 = desk(40, 60);
+    CHECK(WaitFor([&] { return sm.Frame(d0.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(exact() == 0);
+    int frames0 = sm.frames();
+    auto at = [](int v) { return (v * 10000 + 538) / 539; };
+    auto aty = [](int v) { return (v * 10000 + 469) / 470; };
+    sm.Pointer(at(300), aty(300), true);
+    CHECK(WaitFor([&] { return !sm.PointerPending(); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    int lit = 0, dark = 0; // the arrow at picture (299, 299): panel (399, 299)
+    for (int y = 299; y < 315; y++)
+      for (int x = 399; x < 415; x++) lit += g1::emulator::Panel(0)[size_t(y) * 640 + size_t(x)] == 15, dark += g1::emulator::Panel(0)[size_t(y) * 640 + size_t(x)] == 0;
+    std::printf("pointer sprite: %d lit and %d dark pixels in its box, %d frames sent for it\n", lit, dark, sm.frames() - frames0);
+    CHECK(lit > 20 && dark > 10);
+    CHECK(sm.frames() == frames0);
+    sm.Pointer(at(300), aty(300), false); // off: the picture back where it was
+    CHECK(WaitFor([&] { return !sm.PointerPending(); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK(exact() == 0);
+    // the window dragged twice
+    for (int k = 1; k <= 2; k++) {
+      auto d = desk(40 + 37 * k, 60 + 23 * k);
+      CHECK(WaitFor([&] { return sm.Frame(d.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 5000));
+      std::printf("dragged window: %d bytes\n", sm.stats().bytes);
+      CHECK(sm.stats().bytes < 1500);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(exact() == 0);
+    sm.Stop();
     g1::emulator::SetFirmware(5, 0);
   }
   fx->Stop();

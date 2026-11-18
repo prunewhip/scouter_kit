@@ -619,6 +619,49 @@ static bool HasPixelVideo() {
   return any;
 }
 
+// ... and 0.5.66 or later: VIDEOX block moves and the sprite.
+static bool HasVideoX66() {
+  bool any = false;
+  for (g1::Arm *a : {&g1::left, &g1::right}) {
+    auto st = a->GetState();
+    if (!st.present) continue;
+    if (!st.connected || st.firmware_major * 10000 + st.firmware_minor * 100 + st.firmware_patch < 566) return false;
+    any = true;
+  }
+  return any;
+}
+
+// The pointer as VIDEOX's sprite: 16 rows of u16 mask, u16 ink (big-endian): the arrow of ArrowMasks at 16 x 16,
+// its body lit, its outline dark.
+static std::vector<uint8_t> SpriteArrow() {
+  const float poly[][2] = {{1, 1}, {1, 13.6f}, {3.9f, 10.9f}, {6.1f, 15.6f}, {8.2f, 14.7f}, {6, 10.1f}, {10.2f, 10.1f}};
+  const int np = int(std::size(poly));
+  auto inside = [&](float x, float y) {
+    bool in = false;
+    for (int a = 0, b = np - 1; a < np; b = a++)
+      if ((poly[a][1] > y) != (poly[b][1] > y) &&
+          x < (poly[b][0] - poly[a][0]) * (y - poly[a][1]) / (poly[b][1] - poly[a][1]) + poly[a][0])
+        in = !in;
+    return in;
+  };
+  std::vector<uint8_t> out(64, 0);
+  for (int y = 0; y < 16; y++) {
+    uint32_t mask = 0, ink = 0;
+    for (int x = 0; x < 16; x++) {
+      bool body = inside(x + 0.5f, y + 0.5f), edge = false;
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) edge |= inside(x + dx + 0.5f, y + dy + 0.5f);
+      if (body || edge) mask |= 0x8000u >> x;
+      if (body) ink |= 0x8000u >> x;
+    }
+    out[size_t(4 * y)] = uint8_t(mask >> 8);
+    out[size_t(4 * y + 1)] = uint8_t(mask);
+    out[size_t(4 * y + 2)] = uint8_t(ink >> 8);
+    out[size_t(4 * y + 3)] = uint8_t(ink);
+  }
+  return out;
+}
+
 bool ScreenMirror::Path(int levels) {
   want_levels_ = levels;
   int planes = levels == 4 ? 2 : levels == 8 ? 3 : 4;
@@ -836,7 +879,7 @@ bool ScreenMirror::StartVideoX(int planes) {
     v.parts.clear();
   };
   auto take = [&](int p, uint32_t room) {
-    v.base = g1::Alloc(kCodeX + 32 + 16 + kHeader + room + 4);
+    v.base = g1::Alloc(kCodeX + 32 + 16 + 64 + kHeader + room + 4);
     if (v.base < 0) return false;
     for (int k = 0; k < p; k++) {
       int64_t a = g1::Alloc(v.stride * uint32_t(h_));
@@ -846,7 +889,7 @@ bool ScreenMirror::StartVideoX(int planes) {
     int64_t st = g1::Alloc(uint32_t(p) * g1::kVideoState);
     if (st < 0) return release(), false;
     v.parts.push_back(st);
-    v.size = kCodeX + 32 + 16 + kHeader + room + 4 + uint32_t(p) * (v.stride * uint32_t(h_) + g1::kVideoState);
+    v.size = kCodeX + 32 + 16 + 64 + kHeader + room + 4 + uint32_t(p) * (v.stride * uint32_t(h_) + g1::kVideoState);
     v.planes = p;
     v.room = room;
     return true;
@@ -867,7 +910,10 @@ bool ScreenMirror::StartVideoX(int planes) {
   v.plane_tab = v.code + kCodeX;
   v.state_tab = v.plane_tab + 16;
   v.levels_at = v.state_tab + 16;
-  v.buf = v.levels_at + 16;
+  v.sprite_at = v.levels_at + 16;
+  v.buf = v.sprite_at + 64;
+  v.v66 = HasVideoX66();
+  v.spr_x = -32768;
   v.bitmap = uint32_t(v.parts[0]);
   v.state = uint32_t(v.parts[size_t(v.planes)]);
   std::vector<uint8_t> tabs(32, 0);
@@ -950,6 +996,7 @@ bool ScreenMirror::StartVideoX(int planes) {
       arm.WriteArena(uint32_t(v.parts[size_t(k)]), std::vector<uint8_t>(size_t(v.stride) * size_t(h_), 0));
     arm.WriteArena(v.plane_tab, tabs);
     arm.WriteArena(v.levels_at, map);
+    if (v.v66) arm.WriteArena(v.sprite_at, SpriteArrow());
     if (v.mw) {
       arm.WriteArena(uint32_t(v.parts[size_t(v.planes) + 1]), std::vector<uint8_t>(size_t(v.mstride) * size_t(v.mh), 0));
       arm.WriteArena(uint32_t(v.parts[size_t(v.planes) + 2]), std::vector<uint8_t>(size_t(v.mstride) * size_t(v.mh), 0));
@@ -985,12 +1032,19 @@ bool ScreenMirror::StartVideoX(int planes) {
 
 // frame_ as a VIDEOX record to both arms, drawn at the same due time, with a row move when the picture scrolled;
 // false (nothing sent, the encoder as it was) when larger than max_bytes.
-bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready) {
+bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g1::BlockMove block) {
   Video &v = video_;
   if (!pix_ready)
     for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
-  std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw, m, std::min<size_t>(max_bytes, v.room));
-  if (rec.empty()) return false;
+  int sx = v.spr_x, sy = v.spr_y;
+  g1::Sprite sprite = PointerSprite();
+  std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw, m, std::min<size_t>(max_bytes, v.room), false, block, sprite);
+  if (rec.empty()) {
+    v.spr_x = sx; // not sent: the arms still draw it where they did
+    v.spr_y = sy;
+    return false;
+  }
+  if (block.w) LOG("screen: block %d x %d moved by (%d, %d)", block.w, block.h, block.dx, block.dy);
   if (m.rows) {
     v.moves++;
     LOG("screen: scroll %+d rows (band %d..%d)", m.dy, m.y0, m.y0 + m.rows - 1);
@@ -1045,6 +1099,30 @@ bool ScreenMirror::SendMotion(size_t max_bytes) {
   v.k++;
   v.sent = int(msg.size());
   return true;
+}
+
+// The sprite fields for a record on 0.5.66+ (the pointer drawn by the arms over the picture): the rectangle where
+// it was (drawn from the planes again) and where it goes; updates spr_x/spr_y to that. Off on older firmware.
+g1::Sprite ScreenMirror::PointerSprite() {
+  Video &v = video_;
+  g1::Sprite s;
+  if (!v.v66) return s;
+  int x = 0, y = 0;
+  bool on = ptr_on_ && src_w_ > 1 && Locate(ptr_cx_, ptr_cy_, src_w_, src_h_, src_o_, w_, h_, &x, &y);
+  if (!on && v.spr_x == -32768) return s;
+  s.on = true;
+  s.address = v.sprite_at;
+  if (v.spr_x != -32768) {
+    s.rx = std::max(0, v.spr_x);
+    s.ry = std::max(0, v.spr_y);
+    s.rw = std::max(0, std::min(w_, v.spr_x + 16) - s.rx);
+    s.rh = std::max(0, std::min(h_, v.spr_y + 16) - s.ry);
+  }
+  s.x = on ? x - 1 : -32768; // the arrow's tip is (1, 1) of its box
+  s.y = on ? y - 1 : 0;
+  v.spr_x = s.x;
+  v.spr_y = s.y;
+  return s;
 }
 
 // Whether a record may go now: both arms connected with little queued; a rebooted arm (its bitmap and decoder
@@ -1211,6 +1289,16 @@ void ScreenMirror::SendPointer(bool force) {
   if (ptr_redo_us_ && now >= ptr_redo_us_) {
     ptr_redo_us_ = 0;
     force = true;
+  }
+  if (started_ && levels_ == 1 && v.v66 && !hidden_ && !paused_ && !v.redraw && !v.shown.empty()) {
+    // greys on 0.5.66+: a record of unchanged planes that moves the arms' sprite (a few bytes)
+    int x = 0, y = 0;
+    bool on = ptr_on_ && src_w_ > 1 && Locate(ptr_cx_, ptr_cy_, src_w_, src_h_, src_o_, w_, h_, &x, &y);
+    if (!force && !ptr_dirty_ && ((on && x - 1 == v.spr_x && y - 1 == v.spr_y) || (!on && v.spr_x == -32768))) return;
+    if (VideoReady() != kShown) return;
+    v.pix = v.shown;
+    if (SendVideoX(v.room, {}, true)) ptr_dirty_ = false;
+    return;
   }
   if (!started_ || levels_ != 2 || !v.ptr_state || hidden_ || paused_) return; // greys: in the next frame
   if (ptr_redo_us_ || v.redraw) return; // a transition draws the picture meanwhile, or the panels lost it
@@ -1422,7 +1510,7 @@ int ScreenMirror::Frame(const uint8_t *rgba, int w, int h, int stride, const Scr
   src_o_ = o;
   // The cursor: the arms draw it themselves on the black and white path; greys get it in the picture.
   ScreenOptions oc = o;
-  bool drawn_in = levels_ != 2 && ptr_on_;
+  bool drawn_in = levels_ != 2 && ptr_on_ && !(levels_ == 1 && video_.v66); // 0.5.66 greys: the arms' sprite
   oc.cursor_x = drawn_in ? ptr_cx_ : -1;
   oc.cursor_y = drawn_in ? ptr_cy_ : -1;
   Rect c = Base(rgba, w, h, stride, oc, w_, h_, &luma_, &rot_, &base_);
@@ -1547,16 +1635,20 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   }
   // The scroll is found on the exact picture; "steady" (a pixel changed by one level keeps its old one: noise from a
   // camera or video) applies only when nothing scrolled, since it would break the shifted rows' match.
+  g1::BlockMove block;
   auto make = [&](int n) {
     Make(o, c, n);
     Compose();
     move = {};
+    block = {};
     if (redraw || prev_.size() != frame_.size()) return;
     if (n == 1) {
       for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
       move = v.penc->FindMove(v.pix);
+      // 0.5.66+: a dragged window or a sideways scroll when nothing scrolled up or down
+      if (!move.rows && v.v66) block = v.penc->FindBlockMove(v.pix);
     }
-    if (!move.rows && o.steady && v.planes == 4 && prev_detail_ == n) Steady(&frame_, prev_, w_, h_);
+    if (!move.rows && !block.w && o.steady && v.planes == 4 && prev_detail_ == n) Steady(&frame_, prev_, w_, h_);
   };
   // The detail asked for (auto: every pixel when that fits the budget, every pixel whatever the size when nothing
   // moved), coarser only when a record would not fit the arms' room: a picture always goes.
@@ -1565,7 +1657,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   for (int n = first; n <= last; n++) {
     make(n);
     if (frame_ == prev_ && !redraw) return n == 1 ? kSame : kLater;
-    if (SendVideoX(n == last ? room : budget, move)) {
+    if (SendVideoX(n == last ? room : budget, move, false, block)) {
       prev_ = frame_;
       prev_detail_ = n;
       Count(video_.sent, n);
