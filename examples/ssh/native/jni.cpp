@@ -1284,6 +1284,32 @@ JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_brightness(JNIEnv *, jclass, j
   scouter_kit::g1::right.SetBrightness(level);
 }
 
+// The links as measured (Phase 1 timing): per arm (left, then right) the connection interval (µs), packets sent,
+// packets resent, commands queued, firmware version (major << 16 | minor << 8 | patch); 0s when not connected.
+JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_linkStats(JNIEnv *env, jclass) {
+  jint v[10] = {};
+  {
+    std::lock_guard<std::mutex> lock(g_glasses_mutex);
+    if (g_glasses) {
+      int arm = 0;
+      for (scouter_kit::g1::Arm *a : {&scouter_kit::g1::left, &scouter_kit::g1::right}) {
+        auto st = a->GetState();
+        if (st.connected) {
+          v[arm * 5 + 0] = st.interval_us;
+          v[arm * 5 + 1] = jint(st.packets);
+          v[arm * 5 + 2] = jint(st.resent);
+          v[arm * 5 + 3] = st.queued;
+          v[arm * 5 + 4] = st.firmware_major << 16 | st.firmware_minor << 8 | st.firmware_patch;
+        }
+        arm++;
+      }
+    }
+  }
+  jintArray a = env->NewIntArray(10);
+  env->SetIntArrayRegion(a, 0, 10, v);
+  return a;
+}
+
 // Each arm's BRIGHTNESS as it is now (left, right; -1: not connected or no answer).
 JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_brightnessRead(JNIEnv *env, jclass) {
   jint v[2] = {-1, -1};

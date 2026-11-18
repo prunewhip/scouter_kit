@@ -35,8 +35,8 @@ android {
         applicationId = "io.github.pruittcolon.scouter" // this fork's ID; the code stays in package scouterkit.ssh (JNI names)
         minSdk = 31
         targetSdk = 34
-        versionCode = 98
-        versionName = "0.96"
+        versionCode = 99
+        versionName = "0.97"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             // 16 KB pages: newer Android builds may use them; the library loads either way.

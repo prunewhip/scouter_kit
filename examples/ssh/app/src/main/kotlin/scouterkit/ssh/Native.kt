@@ -151,6 +151,8 @@ object Native {
 
     // Each arm's brightness as it is now (left, right; -1: not known).
     @JvmStatic external fun brightnessRead(): IntArray
+    // Per arm (left, right): interval µs, packets, resent, queued, firmware (major<<16|minor<<8|patch)
+    @JvmStatic external fun linkStats(): IntArray
     // The display off (nothing shows; the TouchBar still reports) or on again.
     @JvmStatic external fun blank(on: Boolean)
     // Left %, right %, left charging, right charging (-1 unknown); blocks while the arms answer.

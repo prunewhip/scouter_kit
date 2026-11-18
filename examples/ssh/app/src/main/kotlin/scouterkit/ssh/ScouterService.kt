@@ -171,6 +171,33 @@ class ScouterService : Service() {
             work.postDelayed(this, 8000)
         }
     }
+    // The links as measured, every 10 s while the glasses are up: interval, packets a second and resends per arm
+    // (log "link: ..."), the numbers behind the speed of everything on the glasses.
+    private var linkLast = IntArray(10)
+    private var linkAt = 0L
+    private val linkTicker = object : Runnable {
+        override fun run() {
+            if (Session.glasses == "ready") {
+                val now = android.os.SystemClock.uptimeMillis()
+                val s = Native.linkStats()
+                val dt = (now - linkAt).coerceAtLeast(1)
+                if (linkAt > 0L) {
+                    val arms = (0..1).joinToString(", ") { i ->
+                        val b = i * 5
+                        val fw = s[b + 4]
+                        val pps = (s[b + 1] - linkLast[b + 1]) * 1000L / dt
+                        val resent = s[b + 2] - linkLast[b + 2]
+                        "${if (i == 0) "L" else "R"} ${"%.2f".format(s[b] / 1000.0)} ms ${pps}/s resent $resent q ${s[b + 3]} " +
+                            "fw ${fw shr 16}.${(fw shr 8) and 0xFF}.${fw and 0xFF}"
+                    }
+                    Log.i(TAG, "link: $arms")
+                }
+                linkLast = s
+                linkAt = now
+            }
+            work.postDelayed(this, 10000)
+        }
+    }
     // Each arm's battery, every 30 s while the glasses are up.
     private val batteryTicker = object : Runnable {
         override fun run() {
@@ -337,6 +364,7 @@ class ScouterService : Service() {
         work.postDelayed(watchdog, 60000)
         work.postDelayed(batteryTicker, 5000)
         work.postDelayed(brightTicker, 8000)
+        work.postDelayed(linkTicker, 10000)
         Ready.healSoon(this, "service start")
         registerReceiver(lock, IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) })
         getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
@@ -535,6 +563,7 @@ class ScouterService : Service() {
         Session.tunes = false
         work.removeCallbacks(batteryTicker)
         work.removeCallbacks(brightTicker)
+        work.removeCallbacks(linkTicker)
         runCatching { unregisterReceiver(lock) }
         runCatching { unregisterReceiver(bonds) }
         runCatching { unregisterReceiver(adapterState) }
