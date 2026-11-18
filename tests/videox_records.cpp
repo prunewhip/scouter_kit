@@ -42,5 +42,17 @@ int main() {
   if (!m.rows) return 2;
   emit(enc.Encode(g, false, m));
   emit(enc.Encode(at(0), true));
+  // 0.5.66+: a "window" (a block of the page) dragged twice: block moves found by FindBlockMove
+  std::vector<uint8_t> base = at(0), win(size_t(220) * 140);
+  for (int y = 0; y < 140; y++)
+    for (int x = 0; x < 220; x++) win[size_t(y) * 220 + size_t(x)] = base[size_t(100 + y) * size_t(w) + size_t(60 + x)] ^ 5;
+  for (int k = 1; k <= 2; k++) {
+    std::vector<uint8_t> fr(size_t(w) * size_t(h), 2);
+    for (int y = 0; y < 140; y++)
+      for (int x = 0; x < 220; x++) fr[size_t(100 + 40 * k + y) * size_t(w) + size_t(60 + 70 * k + x)] = win[size_t(y) * 220 + size_t(x)];
+    scouter_kit::g1::BlockMove b = k > 1 ? enc.FindBlockMove(fr) : scouter_kit::g1::BlockMove{};
+    if (k > 1 && !b.w) return 3;
+    emit(enc.Encode(fr, false, {}, SIZE_MAX, false, b));
+  }
   return 0;
 }

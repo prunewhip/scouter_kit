@@ -196,6 +196,19 @@ and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, 
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
 
+### What 0.5.66 adds (VIDEOX block moves, the sprite, wide canvases; 128 MHz held through bursts)
+
+- **Block move** (record flag bit 4) and **sprite** (bit 5, a redraw rectangle and a 16 × 16 mask + ink composed over
+  the picture at either scale), VM.md §3.8; **pixel-coded planes up to 2048 wide** (a canvas the arm pans).
+- `g1_clock_boost` keeps 128 MHz 40 ms after its last user (`CLOCK_HOLD_MS`, a delayable work item): frames back to
+  back no longer switch the clock twice each.
+- Library: `VideoEncoder::MoveRect`, `PlaneVideoEncoder` `Encode(..., block, sprite)`, `FindBlockMove` (16 × 16
+  tiles found anywhere in the last frame by a 2-D rolling hash; the displacement most agree on, checked exactly).
+- Tests: `vm_test` `test_videox_ext` (150 random block moves, overlapping ones too, against a plain copy; the
+  sprite at the edges, moved with a redraw rectangle, no trace; errors), `videox_test` (a dragged window found 7 of
+  7 times, 9–11× fewer bytes, exact decode), `videox_fuzz` with every flag (ASan/UBSan clean), Vox's `screen_test`
+  on emulated 0.5.66 arms (the pointer with 0 frames sent; a drag step ~300 bytes; the panel exact).
+
 ### What 0.5.64 adds (VIDEOX: 8 pixels a step, pixel coding, scale 2)
 
 - **VIDEOX composes 8 pixels a step** (a spread table and a per-instruction 256-entry pair table): 8.4× faster than

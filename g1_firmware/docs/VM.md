@@ -342,9 +342,11 @@ greys differ in one plane). The record of n bytes at src:
 
 | Offset | Size | What |
 |---|---|---|
-| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole), bit 2 *scale 2* (0.5.64+: each plane pixel is drawn as 2 × 2 panel pixels), bit 3 *pixel coding* (0.5.64+: every plane's record is pixel coded, below); other bits error 4 |
+| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole), bit 2 *scale 2* (0.5.64+: each plane pixel is drawn as 2 × 2 panel pixels), bit 3 *pixel coding* (0.5.64+: every plane's record is pixel coded, below), bit 4 *block move* (0.5.66+), bit 5 *sprite* (0.5.66+); other bits error 4 |
 | 1 | u8 | P, the number of planes, 1…4 (else error 4) |
 | 2 | 6 | if flags bit 0: u16 y0, u16 rows, s16 dy |
+| | 12 | if flags bit 4: u16 bx, by, bw, bh, s16 dx, dy |
+| | 16 | if flags bit 5: u16 rx, ry, rw, rh, s16 sx, sy, u32 sprite |
 | | | then for each plane in order: u24 length L ≥ 1, then L bytes, an ordinary `VIDEO` record (§3.7) for that plane |
 
 The lengths must end exactly at n (error 4, detail the offset). Checked before anything changes, in this order:
@@ -370,6 +372,19 @@ TE<<6 | TS<<7 | U<<8: W, WW = pixels x − 1, x − 2 of this row (decoded), NW,
 below (the previous frame), U = the pixel's bits of planes p + 1 … p + 3 (bit 0 = plane p + 1; 0 for planes that do
 not exist); positions outside the plane read 0. The plane is written in place. At most w + 1 decisions a row.
 On natural video it takes 1.4–1.7× fewer bytes than transition coding (cartoons 1.1–1.3×; `tests/videox_test.cpp`).
+
+**Block move** (flag bit 4, 0.5.66+): after the row move and before the planes decode, the rectangle (bx, by, bw,
+bh) of every plane moves by (dx, dy) (as `memmove`: overlap is safe); both rectangles must lie inside the planes
+and bw, bh ≥ 1 (else error 4, detail the field's offset). The destination rows' changed parts are drawn. A dragged
+window or a sideways scroll costs its newly shown part (the library's `FindBlockMove` finds it: ~300 bytes a drag
+step in Vox's mirror). **Sprite** (flag bit 5, 0.5.66+): rows ry … ry + rh − 1, pixels rx … rx + rw − 1 (clipped;
+rw or rh 0: none) are drawn whatever the planes did, and unless sx = −32768 a 16 × 16 sprite is drawn over the
+picture with its top-left at plane pixel (sx, sy): 64 bytes at `sprite` (inside the arena, else error 3), 16 rows
+of a u16 mask and a u16 ink, big-endian, bit 15 the left pixel; where the mask is 1 the panel shows 15 for ink 1,
+0 for ink 0 (at scale 2 each sprite pixel is 2 × 2). The sprite's rows are drawn too. A pointer move is a record
+of unchanged planes with the old place as the redraw rectangle (a few bytes, no frame).
+**Wide planes** (0.5.66+): with pixel coding w may be up to 2048 (transition coding keeps w ≤ 640): a canvas wider
+than the panel, of which the rectangle at (x, y) shows the part on the panel (x negative pans it).
 
 **Scale 2** (flag bit 2): plane pixel (c, r) is panel pixels (x + 2c … x + 2c + 1, y + 2r … y + 2r + 1); the
 rectangle is 2w × 2h, clipped as `DRAW`. With pixel coding at half size, natural video takes ~1.5 KB a frame at 4
