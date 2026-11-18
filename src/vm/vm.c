@@ -13,7 +13,7 @@ enum op {
 	OP_SLEEP_UNTIL = 0x40, OP_WAIT_EVENT = 0x41, OP_RAISE = 0x42, OP_NOTIFY = 0x43,
 	OP_SYS_READ = 0x44, OP_SYS_WRITE = 0x45,
 	OP_FILL = 0x50, OP_BLIT = 0x51, OP_GLYPHS = 0x52, OP_DRAW = 0x53, OP_LINE = 0x54, OP_VIDEO = 0x55,
-	OP_ASSET_LOAD = 0x56
+	OP_ASSET_LOAD = 0x56, OP_VIDEOX = 0x57
 };
 
 /* where an instruction comes from */
@@ -144,6 +144,7 @@ static int shape(uint8_t op, struct shape *s)
 		s->k = 8;
 		return 1;
 	case OP_VIDEO:
+	case OP_VIDEOX:
 		s->k = 10;
 		return 1;
 	case OP_ASSET_LOAD:
@@ -781,10 +782,126 @@ static int video(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	o.by = (int32_t)y0;
 	o.bw = (int32_t)(x1 - x0);
 	o.bh = (int32_t)(y1 - y0);
+	if (vm->host->boost) {
+		vm->host->boost(vm->host->ctx, 1);
+	}
 	vm_video_decode(vm->arena, v, &vm->video, video_span, &o);
 	if (o.state == 1) {
 		vm->host->panel_end(vm->host->ctx);
 		vm->stats.draws++;
+	}
+	if (vm->host->boost) {
+		vm->host->boost(vm->host->ctx, 0);
+	}
+	return 0;
+}
+
+/* VIDEOX (§3.8): the planes' changed spans are gathered per row (vm->vx0/vx1), then each such row is drawn
+ * once, its pixels composed from every plane through the level map */
+struct videox_out {
+	struct vm *vm;
+	uint32_t w;
+};
+
+static void videox_span(void *c, uint32_t r, uint32_t x0, uint32_t x1, const uint8_t *row)
+{
+	struct vm *vm = ((struct videox_out *)c)->vm;
+
+	(void)row;
+	if (x0 == x1) {
+		vm->host->now(vm->host->ctx); /* every 16 rows of each plane: the platform's liveness */
+		return;
+	}
+	if (x0 < vm->vx0[r]) {
+		vm->vx0[r] = (uint16_t)x0;
+	}
+	if (x1 > vm->vx1[r]) {
+		vm->vx1[r] = (uint16_t)x1;
+	}
+}
+
+static void videox_mark(void *c, uint32_t r)
+{
+	struct videox_out *o = (struct videox_out *)c;
+
+	o->vm->vx0[r] = 0;
+	o->vm->vx1[r] = (uint16_t)o->w;
+}
+
+static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
+{
+	const struct vm_host *h = vm->host;
+	struct vm_videox x;
+	struct videox_out o;
+	int64_t ox = s32(v[4]), oy = s32(v[5]), bx0, by0, bx1, by1;
+	uint32_t w = v[2], hh = v[3];
+	int state, err = vm_videox_check(vm->arena, v, &x, detail);
+
+	if (err) {
+		return err;
+	}
+	if (vm->safe) {
+		return VM_E_SAFE;
+	}
+	o.vm = vm;
+	o.w = w;
+	if (h->boost) {
+		h->boost(h->ctx, 1);
+	}
+	for (uint32_t y = 0; y < hh; y++) {
+		vm->vx0[y] = 0xFFFF;
+		vm->vx1[y] = 0;
+	}
+	if (x.flags & 1) {
+		vm_videox_move(vm->arena, v, &x, videox_mark, &o);
+	}
+	for (uint32_t p = 0; p < x.planes; p++) {
+		uint32_t pv[10];
+
+		vm_videox_plane(v, &x, p, pv);
+		vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
+	}
+	bx0 = ox < 0 ? 0 : ox;
+	by0 = oy < 0 ? 0 : oy;
+	bx1 = ox + w > VM_PANEL_W ? VM_PANEL_W : ox + w;
+	by1 = oy + hh > VM_PANEL_H ? VM_PANEL_H : oy + hh;
+	state = bx0 < bx1 && by0 < by1 ? 0 : -1;
+	for (uint32_t r = 0; r < hh && state >= 0; r++) {
+		int64_t y = oy + r, a, b;
+		uint32_t x0 = (x.flags & 2) ? 0 : vm->vx0[r], x1 = (x.flags & 2) ? w : vm->vx1[r];
+
+		if (!(r & 15)) {
+			h->now(h->ctx);
+		}
+		if (x0 >= x1 || y < 0 || y >= VM_PANEL_H) {
+			continue;
+		}
+		a = ox + x0;
+		b = ox + x1;
+		a = a < 0 ? 0 : a;
+		b = b > VM_PANEL_W ? VM_PANEL_W : b;
+		if (a >= b) {
+			continue;
+		}
+		if (!((b - a) & 1) && a > bx0) {
+			a--; /* an odd width: one panel window per row, as VIDEO */
+		}
+		if (state == 0) {
+			state = h->panel_begin(h->ctx, (int32_t)bx0, (int32_t)by0, (int32_t)(bx1 - bx0), (int32_t)(by1 - by0)) == 0 ? 1 : -1;
+			if (state < 0) {
+				break;
+			}
+		}
+		vm_videox_compose(vm->arena, v, &x, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
+		indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+		(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+	}
+	if (state == 1) {
+		h->panel_end(h->ctx);
+		vm->stats.draws++;
+	}
+	if (h->boost) {
+		h->boost(h->ctx, 0);
 	}
 	return 0;
 }
@@ -956,6 +1073,9 @@ static int exec(struct vm *vm, struct vm_thread *t, int where, const struct ins 
 		break;
 	case OP_VIDEO:
 		err = video(vm, v, detail);
+		break;
+	case OP_VIDEOX:
+		err = videox(vm, v, detail);
 		break;
 	case OP_ASSET_LOAD:
 		err = asset_load(vm, v, detail);

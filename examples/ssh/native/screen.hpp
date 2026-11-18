@@ -130,6 +130,8 @@ Rect Base(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &, 
 
 // The base's tones in blocks of n: what the glasses get.
 void Finish(const std::vector<uint8_t> &base, int pw, Rect c, const ScreenOptions &, int n, std::vector<uint8_t> *out);
+// 16 greys: a row that barely changed keeps its pixels that changed by one level (noise); see screen.cpp.
+void Steady(std::vector<uint8_t> *frame, const std::vector<uint8_t> &prev, int w, int h);
 
 // The whole way at once, for a preview without the glasses (auto detail as every pixel).
 void Picture(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &, int pw, int ph,
@@ -201,12 +203,16 @@ private:
   void DropPath(bool keep_panels = false);
   void BlackSides(); // the columns one eye sees, black on each arm
   bool StartVideo();
+  bool StartVideoX(int planes);                        // the grey fast path (g1v0 0.5.62+), fewer planes if short
+  bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move); // frame_ as a VIDEOX record (a scroll first): false
+                                                                     // when larger than max_bytes
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
   Fx::Region Region() const;
   void Count(int bytes, int detail);
   void SendPointer(bool force); // the cursor to the arms when it moved (mutex_ held)
-  int FrameVideo(const ScreenOptions &, Rect c, bool still); // Frame's two paths (mutex_ held)
+  int FrameVideo(const ScreenOptions &, Rect c, bool still); // Frame's paths (mutex_ held)
+  int FrameVideoX(const ScreenOptions &, Rect c, bool still);
   int FrameGray(const ScreenOptions &, Rect c);
   void Compose(); // the overlay into frame_ (mutex_ held)
   std::vector<uint8_t> over_;
@@ -223,7 +229,8 @@ private:
   bool started_ = false;
   int dx_ = 0, dy_ = 0;
   int x_ = 0, y_ = 0, w_ = 0, h_ = 0;
-  int levels_ = 0; // the path in use: 16 gray, 2 video, 0 none
+  int levels_ = 0; // the path in use: 16 gray, 2 video, 1 VIDEOX (greys as planes), 0 none
+  int want_levels_ = 0; // the levels the options asked for (a rebooted arm starts that path again)
   scouter_kit::gray::Bitmap *pic_ = nullptr;
   std::vector<uint8_t> luma_, rot_, base_, last_base_, frame_, prev_, lo_, hi_;
   int prev_detail_ = 0; // the detail prev_ went at (steady compares like with like)
@@ -259,6 +266,14 @@ private:
     int ptr_shown = -1; // -1: not told yet
     std::unique_ptr<scouter_kit::g1::VideoEncoder> enc;
     std::vector<uint8_t> pix;
+    // VIDEOX: planes (2-4), the level map's address, the planes' encoder, a frame value's (0-255) plane index
+    int planes = 0, want_planes = 0;
+    uint32_t levels_at = 0, room = 0; // room: the arena bytes for one record
+    uint32_t plane_tab = 0, state_tab = 0; // VIDEOX's tables of the planes' and states' addresses
+    std::vector<int64_t> parts; // the planes' and states' own allocations (freed with base)
+    std::unique_ptr<scouter_kit::g1::PlaneVideoEncoder> penc;
+    std::array<uint8_t, 256> index{};
+    int moves = 0; // records that carried a scroll
     uint32_t k = 0;
     int64_t lead = 30000; // µs from now to the frame's due time (VideoReady)
     int sent = 0;         // the last record's bytes with its header

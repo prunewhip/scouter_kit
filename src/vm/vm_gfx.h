@@ -76,6 +76,29 @@ int vm_video_check(const uint8_t *arena, const uint32_t *v, uint32_t *detail);
 void vm_video_decode(uint8_t *arena, const uint32_t *v, struct vm_video *s, vm_span_fn *span, void *ctx);
 void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t level, uint8_t *out);
 
+/* VIDEOX planes, stride, w, h, x, y, levels, src, n, states (§3.8): VIDEO over 1-4 bit planes (greys) with an
+ * optional row move (scrolling). planes and states are tables of P u32 arena addresses: plane p is the 1-bpp
+ * bitmap at planes[p] (w x h, stride bytes a row), its VIDEO state at states[p]; each may be anywhere in the
+ * arena. A pixel's level is levels[Σ bit_p << p], the level map. The record: u8 flags (bit 0 a move follows,
+ * bit 1 redraw), u8 planes (1-4), the move if any (u16 y0, u16 rows, s16 dy), then per plane a u24 length and
+ * that many bytes of an ordinary VIDEO record (§3.7). vm_videox_check checks everything first (errors 3, 4, 5;
+ * nothing changes) and fills a layout (the tables read); vm_videox_move applies the move to every plane and
+ * calls mark for each row whose content it changed; vm_videox_plane gives plane p's VIDEO operands;
+ * vm_videox_compose makes pixels x0..x1-1 of row y as 4 bpp from the planes, like vm_video_expand. */
+#define VM_VIDEOX_PLANES 4
+struct vm_videox {
+	uint32_t planes, flags, y0, rows;
+	int32_t dy;
+	uint32_t at[VM_VIDEOX_PLANES], len[VM_VIDEOX_PLANES];   /* each plane's record */
+	uint32_t plane[VM_VIDEOX_PLANES], state[VM_VIDEOX_PLANES]; /* from the tables */
+};
+typedef void vm_mark_fn(void *ctx, uint32_t y);
+int vm_videox_check(const uint8_t *arena, const uint32_t *v, struct vm_videox *x, uint32_t *detail);
+void vm_videox_move(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx);
+void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv);
+void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t y, uint32_t x0,
+		       uint32_t x1, uint8_t *out);
+
 #ifdef __cplusplus
 }
 #endif

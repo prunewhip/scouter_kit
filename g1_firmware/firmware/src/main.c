@@ -147,10 +147,39 @@ static struct mgmt_callback smp_reset_cb = {
 	.event_id = MGMT_EVT_OP_OS_MGMT_RESET,
 };
 
+/* Image upload (id 1) and erase (id 5) of the image group (1): only in the case. The arm's MCUboot checks
+ * images with MCUboot's public sample key, so whoever may upload may install any code; out of the case a
+ * bonded, encrypted host could otherwise do it from a pocket. Reading the image list stays allowed everywhere
+ * (hosts check the version with it); in the case every update and restore works as before. The command hook
+ * carries the group and id but not the operation, so the test/confirm write of id 0 (state) stays: it can
+ * only mark an image that was uploaded in the case. */
+#define SMP_GROUP_IMAGE 1
+#define SMP_IMAGE_UPLOAD 1
+#define SMP_IMAGE_ERASE 5
+
+static bool smp_needs_case(const struct mgmt_evt_op_cmd_arg *a)
+{
+	return IS_ENABLED(CONFIG_G1_UPDATE_IN_CASE_ONLY) && a->group == SMP_GROUP_IMAGE &&
+	       (a->id == SMP_IMAGE_UPLOAD || a->id == SMP_IMAGE_ERASE);
+}
+
 static enum mgmt_cb_return smp_rx_hook(uint32_t event, enum mgmt_cb_return prev_status, int32_t *rc,
 				       uint16_t *group, bool *abort_more, void *data, size_t data_size)
 {
+	const struct mgmt_evt_op_cmd_arg *a = data;
+
 	if (!proto_writes_allowed()) {
+		*rc = MGMT_ERR_EACCESSDENIED;
+		*abort_more = true;
+		return MGMT_CB_ERROR_RC;
+	}
+	if (data_size >= sizeof(*a) && smp_needs_case(a) && !g1_in_case()) {
+		static int64_t logged;
+
+		if (k_uptime_get() - logged > 5000) {   /* one line per upload attempt, not per chunk */
+			logged = k_uptime_get();
+			LOG_WRN("SMP image %s refused: not in the case", a->id == SMP_IMAGE_UPLOAD ? "upload" : "erase");
+		}
 		*rc = MGMT_ERR_EACCESSDENIED;
 		*abort_more = true;
 		return MGMT_CB_ERROR_RC;

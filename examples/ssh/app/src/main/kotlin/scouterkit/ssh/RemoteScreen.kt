@@ -53,10 +53,14 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
         val w = settings.remoteWidth.coerceIn(320, 1920)
         val h = w * 10 / 16
         val fps = settings.screenFps.coerceIn(1, 30)
+        // The glasses' picture (native PictureSize: the binocular area at this depth): a server that honours VOX_SIZE
+        // draws its screen at exactly this size, pixel for pixel (sharp text, scrolls sent as row moves).
+        val pictureW = maxOf(2, (640 - minOf(kotlin.math.abs(settings.dx), 600)) and 1.inv())
+        val pictureH = maxOf(2, 480 - minOf(kotlin.math.abs(settings.dy), 400))
         val why = try {
             // A command over SSH gets no login shell: ~/.local/bin (where a user installs it) is not on its PATH.
             val s = Bootstrap(Vault(context)).stream(server.host, server.port, server.user,
-                "PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\" vox-screen $w $h $fps")
+                "VOX_FORMAT=png VOX_SIZE=${pictureW}x$pictureH PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\" vox-screen $w $h $fps")
             stream = s
             if (released) {
                 s.close()
@@ -86,42 +90,59 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
         }
     }
 
-    // JPEGs one after another: FF D8 ... FF D9 (the coded data stuffs every FF byte, so FF D9 ends an image).
+    // Images one after another: JPEGs (FF D8 ... FF D9; the coded data stuffs every FF byte, so FF D9 ends one) or,
+    // from a vox-screen that honours VOX_FORMAT=png, lossless grey PNGs (the 8-byte signature ... the IEND chunk),
+    // sent only when the screen changed. A server that ignores VOX_FORMAT keeps sending JPEGs: both are read.
     private fun parse(input: InputStream) {
         val image = ByteArrayOutputStream(256 * 1024)
         val chunk = ByteArray(64 * 1024)
-        var inside = false
-        var prev = -1
+        var kind = 0 // 0 between images, 1 inside a JPEG, 2 inside a PNG
+        var tail = 0L // the last 8 bytes, for markers that span reads
         while (!released) {
             val n = input.read(chunk)
             if (n < 0) return
             var from = 0
             for (i in 0 until n) {
-                val b = chunk[i].toInt() and 0xFF
-                if (!inside) {
-                    if (prev == 0xFF && b == 0xD8) {
-                        inside = true
+                val b = chunk[i].toLong() and 0xFF
+                tail = (tail shl 8) or b
+                when (kind) {
+                    0 -> if ((tail and 0xFFFF) == 0xFFD8L) {
+                        kind = 1
                         image.reset()
                         image.write(0xFF)
                         from = i
+                    } else if (tail == PNG_SIGNATURE) {
+                        kind = 2
+                        image.reset()
+                        image.write(PNG_HEAD, 0, 7)
+                        from = i
                     }
-                } else if (prev == 0xFF && b == 0xD9) {
-                    image.write(chunk, from, i - from + 1)
-                    latest.set(image.toByteArray())
-                    images++
-                    wake.release()
-                    inside = false
+                    1 -> if ((tail and 0xFFFF) == 0xFFD9L) {
+                        image.write(chunk, from, i - from + 1)
+                        done(image)
+                        kind = 0
+                    }
+                    else -> if (tail == PNG_IEND) {
+                        image.write(chunk, from, i - from + 1)
+                        done(image)
+                        kind = 0
+                    }
                 }
-                prev = b
             }
-            if (inside) {
+            if (kind != 0) {
                 image.write(chunk, from, n - from)
-                if (image.size() > 16 * 1024 * 1024) { // not a JPEG stream
-                    inside = false
+                if (image.size() > 16 * 1024 * 1024) { // not an image stream
+                    kind = 0
                     image.reset()
                 }
             }
         }
+    }
+
+    private fun done(image: ByteArrayOutputStream) {
+        latest.set(image.toByteArray())
+        images++
+        wake.release()
     }
 
     private fun send() {
@@ -204,5 +225,11 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
             wake.tryAcquire(if (due && state == Native.SCREEN_BUSY) 12L else period, TimeUnit.MILLISECONDS)
         }
         bitmap?.recycle()
+    }
+
+    companion object {
+        private const val PNG_SIGNATURE = -0x76afb1b8f2f5e5f6L // 89 50 4E 47 0D 0A 1A 0A
+        private const val PNG_IEND = 0x49454E44AE426082L // IEND and its CRC
+        private val PNG_HEAD = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A)
     }
 }

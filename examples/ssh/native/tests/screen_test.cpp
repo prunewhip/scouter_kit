@@ -3,6 +3,7 @@
 // display after Stop.
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <thread>
 #include <vector>
@@ -434,6 +435,70 @@ int main() {
     uint32_t on = 0;
     CHECK(g1::left.Prop(g1::PROP_PANEL, &on) && on == 1);
     kept.Stop(true);
+  }
+  // Greys on g1v0 0.5.62+ (the arms report it from their next session): the VIDEOX path, 16 greys as 4 planes. A ramp
+  // of 16 bands shows 16 levels on both eyes; a page scrolled up 40 rows goes as a row move (far fewer bytes) and
+  // the eyes then show the page 40 rows further on.
+  {
+    g1::emulator::SetFirmware(5, 62);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 62; }, 10000));
+    ssh::ScreenMirror gm;
+    CHECK(gm.Start(100, 9, &error));
+    ssh::ScreenOptions go;
+    go.fit = ssh::ScreenOptions::kFill;
+    go.invert = 0;
+    go.levels = 16;
+    go.detail = 1;
+    int gs = 540 * 4;
+    std::vector<uint8_t> ramp(size_t(gs) * 471);
+    for (int y = 0; y < 471; y++)
+      for (int x = 0; x < 540; x++) {
+        uint8_t v = uint8_t(std::min(255, (x * 16 / 540) * 17));
+        for (int c = 0; c < 3; c++) ramp[size_t(y) * size_t(gs) + size_t(x) * 4 + size_t(c)] = v;
+        ramp[size_t(y) * size_t(gs) + size_t(x) * 4 + 3] = 255;
+      }
+    CHECK(WaitFor([&] { return gm.Frame(ramp.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    CHECK(gm.stats().path == 1);
+    CHECK(WaitFor([] { return Lit(0, 600, 200, 630, 260) > 1700; }, 5000));
+    {
+      const uint8_t *p = g1::emulator::Panel(0);
+      bool seen[16] = {};
+      for (int x = 100; x < 640; x++) seen[p[size_t(240) * 640 + size_t(x)] & 15] = true;
+      int levels = 0;
+      for (bool b : seen) levels += b;
+      CHECK(levels == 16);
+      const uint8_t *q = g1::emulator::Panel(1);
+      int diff = 0; // the right eye shows the same 100 to the left and 9 lower
+      for (int x = 100; x < 640; x++) diff += p[size_t(240) * 640 + size_t(x)] != q[size_t(249) * 640 + size_t(x - 100)];
+      CHECK(diff == 0);
+    }
+    // a page of grey "text" lines, then the same page 40 rows further on
+    std::vector<uint8_t> page(size_t(gs) * 600);
+    for (int y = 0; y < 600; y++)
+      for (int x = 0; x < 540; x++) {
+        bool ink = y % 18 >= 4 && y % 18 < 14 && ((x / 7 + y / 18) % 5 < 3) && ((x + y) % 6 < 4);
+        uint8_t v = ink ? uint8_t(255 - (y / 18 % 8) * 17) : 0;
+        for (int c = 0; c < 3; c++) page[size_t(y) * size_t(gs) + size_t(x) * 4 + size_t(c)] = v;
+        page[size_t(y) * size_t(gs) + size_t(x) * 4 + 3] = 255;
+      }
+    CHECK(WaitFor([&] { return gm.Frame(page.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    int first = gm.stats().bytes;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // the arms draw it (due time + decode)
+    std::vector<uint8_t> before(g1::emulator::Panel(0), g1::emulator::Panel(0) + 640 * 480);
+    CHECK(WaitFor([&] { return gm.Frame(page.data() + size_t(40) * size_t(gs), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    int scrolled = gm.stats().bytes;
+    std::printf("greys: first page %d bytes, scrolled 40 rows %d bytes\n", first, scrolled);
+    CHECK(scrolled * 3 < first);
+    CHECK(WaitFor([&] {
+      const uint8_t *p = g1::emulator::Panel(0);
+      for (int y = 0; y < 431; y++)
+        if (std::memcmp(p + size_t(y) * 640 + 100, before.data() + size_t(y + 40) * 640 + 100, 540)) return false;
+      return true;
+    }, 5000));
+    gm.Stop();
+    g1::emulator::SetFirmware(5, 0);
   }
   fx->Stop();
   g1::Deinit();

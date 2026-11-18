@@ -14,3 +14,14 @@ add_test(NAME screen COMMAND screen_test)
 add_executable(fx_test fx_test.cpp)
 target_link_libraries(fx_test PRIVATE ssh_core mosh)
 add_test(NAME fx COMMAND fx_test)
+# The glasses VM core (src/vm) and VIDEOX (g1v0 0.5.62+): the core's own suite, the library's encoder against the
+# core, and a short fuzz of the new decoder's checks
+add_executable(vm_test ${SCOUTER_KIT}/tests/vm_test.c ${SCOUTER_KIT}/tests/vm_v4_ref.c ${SCOUTER_KIT}/src/vm/vm.c
+  ${SCOUTER_KIT}/src/vm/vm_gfx.c)
+target_include_directories(vm_test PRIVATE ${SCOUTER_KIT}/src/vm)
+add_test(NAME vm COMMAND vm_test)
+add_executable(videox_test ${SCOUTER_KIT}/tests/videox_test.cpp)
+target_link_libraries(videox_test PRIVATE scouter_kit Threads::Threads)
+add_test(NAME videox COMMAND videox_test)
+add_executable(videox_fuzz ${SCOUTER_KIT}/tests/videox_fuzz.c ${SCOUTER_KIT}/src/vm/vm_gfx.c)
+add_test(NAME videox_fuzz COMMAND videox_fuzz 50000)

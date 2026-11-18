@@ -60,6 +60,10 @@ void g1_reboot(enum clean_kind kind, bool clear_counter, bool force_safe);
 bool g1_install_pending(void);
 void g1_prepare_reboot(void);
 
+/* board.c: the app core at 128 MHz while any user wants it (VIDEO/VIDEOX decoding, the microphone's
+ * encoder on test builds), else 64 MHz as stock; calls come in on/off pairs per user */
+void g1_clock_boost(bool on);
+
 /* board.c */
 struct g1_settings {
 	uint8_t esb_channel, esb_master, esb_slave;

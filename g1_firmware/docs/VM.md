@@ -93,6 +93,7 @@ in programs.
 | 0x54 | `LINE` | 7 | | 5 + 2e | H | §3.6 |
 | 0x55 | `VIDEO` | 10 | | 6 + 2e | H | §3.7 |
 | 0x56 | `ASSET_LOAD` | id, dst, off, n | | 3 + 2e | H | bytes off…off + n − 1 of the stored asset whose ID is at id to dst (§2.4) |
+| 0x57 | `VIDEOX` | 10 | | 6 + 2e | H | §3.8 (g1v0 0.5.62+) |
 
 Every other opcode is invalid (error 2). 0x00 is never an instruction, so running into zeroed memory
 stops at once. Host code (the bytes of a packet) uses the instructions marked H; stored code reached from
@@ -330,6 +331,41 @@ a0 = −1 and colour = 0 at the start, until the row ends:
 The library's `VideoEncoder` makes the records (`scouter_kit_g1.hpp`); at 480 × 360 the user's Bad Apple
 clip takes 261 bytes per frame on average at 30 frames/s, 6.4 times less than row runs
 (`docs/fps-codec.md`, development tree).
+
+### 3.8 VIDEOX planes, stride, w, h, x, y, levels, src, n, states (g1v0 0.5.62+)
+`VIDEO` over 1–4 bit planes, for greys, with an optional row move, for scrolling. `planes` and `states` are the
+addresses of two tables of P u32 arena addresses: plane p (0 … P − 1) is the 1-bpp bitmap of w × h pixels at
+planes[p] (rows stride bytes apart), its `VIDEO` state at states[p]; each may be anywhere in the arena, so the
+planes of a large picture fit a fragmented arena. A pixel's index is Σ bit_p·2^p and the panel shows
+levels[index], the byte at levels + index (the level map: 2^P bytes, each ≤ 15; a Gray-coded map lets neighbouring
+greys differ in one plane). The record of n bytes at src:
+
+| Offset | Size | What |
+|---|---|---|
+| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole); other bits error 4 |
+| 1 | u8 | P, the number of planes, 1…4 (else error 4) |
+| 2 | 6 | if flags bit 0: u16 y0, u16 rows, s16 dy |
+| | | then for each plane in order: u24 length L ≥ 1, then L bytes, an ordinary `VIDEO` record (§3.7) for that plane |
+
+The lengths must end exactly at n (error 4, detail the offset). Checked before anything changes, in this order:
+w, h and stride as `VIDEO` (error 5); n ≥ 2 and the record inside the arena; the first two bytes; the two tables
+(4·P bytes each) and the level map (16 bytes) inside the arena (error 3); every plane (up to planes[p] + (h −
+1)·stride + ceil(w/8)) and every state (`VIDEO_STATE` bytes) inside the arena, none overlapping another, and none
+overlapping the record, the level map or a table (error 3, detail the address); every level ≤ 15 (error 5, detail
+the level); the move: y0 + rows ≤ h and 0 < |dy| < rows (error 4); each plane's record as `VIDEO` checks its own
+(§3.7). Then:
+1. The move, if any: within rows y0 … y0 + rows − 1 of every plane, each row y takes the row y − dy (rows left
+   behind keep their pixels), so a page scrolled by dy needs only its new rows coded. The rows whose content the
+   move changed are drawn.
+2. Each plane's record is decoded into its bitmap with its state, exactly as `VIDEO` would.
+3. Every row that a move or any plane changed is drawn once, from its first to its last changed pixel (widened
+   as `VIDEO`), its pixels composed from all the planes through the level map; then the panel is latched once.
+As `VIDEO`: nothing visible changed, no power-on and no latch; error 7 in safe mode; the microphone indicator stays;
+it counts as a `DRAW` for §6.6; `now` is called every 16 rows of every plane. Its time is about P times `VIDEO`'s
+for the same pixels (bound: about 1 s per plane at 64 MHz; g1v0 0.5.62 runs `VIDEO` and `VIDEOX` at 128 MHz).
+The library's `PlaneVideoEncoder` makes the records and `FindMove` finds a scroll; one 640 × 480 page of grey
+text at 16 levels takes ~7.5 KB, the same page scrolled 37 rows ~4.4 KB (`tests/videox_records.cpp`); in Vox's
+mirror a 540 × 471 page scrolled 40 rows takes 811 bytes instead of 8465.
 
 ## 4. Fonts
 

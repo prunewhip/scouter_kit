@@ -22,6 +22,8 @@ namespace {
 constexpr uint32_t kCode = 2048;       // the VIDEO path's stored code (table, pool, the decode and the cursor)
 constexpr uint32_t kPtrWords = 16;     // the cursor's words: X, Y, On (the host's), then its own
 constexpr uint32_t kRecordMax = 65536; // the largest record sent; a larger change waits for a smaller one
+constexpr uint32_t kCodeX = 512;        // the VIDEOX path's stored code (table, pool, two calls)
+constexpr uint32_t kRecordMaxX = 49152; // VIDEOX's largest record (its planes take most of the arena)
 constexpr uint32_t kHeader = 12;       // due time, frame number, record size
 constexpr int kQueued = 4;             // commands not yet sent on an arm's link: more, and a frame is skipped
 
@@ -453,6 +455,21 @@ void PictureSize(int dx, int dy, int *pw, int *ph) {
 
 ScreenMirror::~ScreenMirror() { Stop(); }
 
+// 16 greys, steady: in a row that barely changed (at most 1 pixel in 16 by more than one level), a pixel changed by
+// one level keeps its old one: a camera's or a video's noise costs nothing. A row with real change (new text, a
+// scroll, another screen) is taken exactly, so nothing of the last screen stays behind.
+void Steady(std::vector<uint8_t> *frame, const std::vector<uint8_t> &prev, int w, int h) {
+  for (int y = 0; y < h; y++) {
+    uint8_t *f = frame->data() + size_t(y) * size_t(w);
+    const uint8_t *p = prev.data() + size_t(y) * size_t(w);
+    int big = 0;
+    for (int x = 0; x < w; x++) big += std::abs(int(f[x]) - int(p[x])) > 17;
+    if (big * 16 > w) continue;
+    for (int x = 0; x < w; x++)
+      if (std::abs(int(f[x]) - int(p[x])) <= 17) f[x] = p[x];
+  }
+}
+
 // frame_ at detail n. Black and white, steady: a pixel keeps what it showed unless it is clearly past the threshold
 // (16 levels either way), against the last frame sent at the same detail.
 void ScreenMirror::Make(const ScreenOptions &o, Rect c, int n) {
@@ -557,8 +574,9 @@ void ScreenMirror::DropPath(bool keep_panels) {
     sk::gray::Clear();
     sk::Flush();
   }
-  if (levels_ == 2) {
+  if (levels_ == 2 || levels_ == 1) {
     if (video_.base >= 0) g1::Free(g1::Address(video_.base));
+    for (int64_t a : video_.parts) g1::Free(g1::Address(a));
     video_ = Video{};
     if (!keep_panels) {
       Panels(false);
@@ -569,10 +587,40 @@ void ScreenMirror::DropPath(bool keep_panels) {
   prev_.clear();
 }
 
+// Both arms that are present run g1v0 0.5.62 or later (VIDEOX, VM.md §3.8).
+static bool HasVideoX() {
+  bool any = false;
+  for (g1::Arm *a : {&g1::left, &g1::right}) {
+    auto st = a->GetState();
+    if (!st.present) continue;
+    if (!st.connected) return false;
+    if (st.firmware_major * 10000 + st.firmware_minor * 100 + st.firmware_patch < 562) return false;
+    any = true;
+  }
+  return any;
+}
+
 bool ScreenMirror::Path(int levels) {
-  int want = levels == 2 ? 2 : 16;
-  if (want == levels_) return true;
+  want_levels_ = levels;
+  int planes = levels == 4 ? 2 : levels == 8 ? 3 : 4;
+  // Greys go as VIDEOX planes where the firmware has it (a fraction of the bytes), else as 4-bit uploads.
+  int want = levels == 2 ? 2 : HasVideoX() ? 1 : 16;
+  if (want == levels_ && (want != 1 || planes == video_.want_planes)) return true;
   DropPath();
+  if (want == 1) {
+    if (StartVideoX(planes)) {
+      levels_ = 1;
+      error_.clear();
+      LOG("screen: VIDEOX path, %d planes (%d greys), record room %u, %d x %d at (%d, %d)", video_.planes,
+          1 << video_.planes, video_.room, w_, h_, x_, y_);
+      return true;
+    }
+    LOG("screen: %s; greys as uploads", error_.c_str());
+    if (video_.base >= 0) g1::Free(g1::Address(video_.base));
+    for (int64_t a : video_.parts) g1::Free(g1::Address(a));
+    video_ = Video{};
+    want = 16;
+  }
   if (want == 16) {
     pic_ = &sk::gray::CreateBitmap(w_, h_);
     if (!pic_->contents.data) {
@@ -751,6 +799,147 @@ bool ScreenMirror::StartVideo() {
   return true;
 }
 
+// The grey fast path (g1v0 0.5.62+, VM.md §3.8): the picture as 2-4 bit planes, each a VIDEO stream, with a level
+// map; per arm, stored code that sleeps until the frame's due time and runs VIDEOX at the eye's place. Levels are
+// Gray-coded (neighbouring greys differ in one plane), so a gradual change touches fewer planes. Scrolls go as row
+// moves (PlaneVideoEncoder::FindMove). The cursor is drawn into the picture (the arms' arrow needs one plane).
+bool ScreenMirror::StartVideoX(int planes) {
+  Video &v = video_;
+  v.stride = uint32_t(((w_ + 7) / 8 + 3) & ~3);
+  v.want_planes = planes;
+  // Resolution first: all the planes asked for (16 greys: 4) with a smaller record room before fewer planes; the
+  // terminal's kept fonts give way (Spare) before either. Each plane and the states are allocations of their own
+  // (VIDEOX takes their addresses from tables), so a fragmented arena still holds 16 greys.
+  auto release = [&] {
+    if (v.base >= 0) g1::Free(g1::Address(v.base));
+    for (int64_t a : v.parts) g1::Free(g1::Address(a));
+    v.base = -1;
+    v.parts.clear();
+  };
+  auto take = [&](int p, uint32_t room) {
+    v.base = g1::Alloc(kCodeX + 32 + 16 + kHeader + room + 4);
+    if (v.base < 0) return false;
+    for (int k = 0; k < p; k++) {
+      int64_t a = g1::Alloc(v.stride * uint32_t(h_));
+      if (a < 0) return release(), false;
+      v.parts.push_back(a);
+    }
+    int64_t st = g1::Alloc(uint32_t(p) * g1::kVideoState);
+    if (st < 0) return release(), false;
+    v.parts.push_back(st);
+    v.size = kCodeX + 32 + 16 + kHeader + room + 4 + uint32_t(p) * (v.stride * uint32_t(h_) + g1::kVideoState);
+    v.planes = p;
+    v.room = room;
+    return true;
+  };
+  bool got = take(planes, kRecordMaxX);
+  if (!got) Spare();
+  for (int p = planes; p >= 2 && !got; p--)
+    for (uint32_t room : {kRecordMaxX, kRecordMaxX / 2, kRecordMaxX / 4})
+      if ((got = take(p, room))) break;
+  if (!got) {
+    error_ = "no room on the arms for the grey fast path";
+    return false;
+  }
+  if (v.planes < planes || v.room < kRecordMaxX)
+    LOG("screen: VIDEOX with %d of %d planes, room %u (arena free %d of %d)", v.planes, planes, v.room,
+        sk::free_memory, sk::total_memory);
+  v.code = uint32_t(v.base);
+  v.plane_tab = v.code + kCodeX;
+  v.state_tab = v.plane_tab + 16;
+  v.levels_at = v.state_tab + 16;
+  v.buf = v.levels_at + 16;
+  v.bitmap = uint32_t(v.parts[0]);
+  v.state = uint32_t(v.parts[size_t(v.planes)]);
+  std::vector<uint8_t> tabs(32, 0);
+  for (int k = 0; k < v.planes; k++) {
+    Put32(tabs, size_t(4 * k), uint32_t(v.parts[size_t(k)]));
+    Put32(tabs, size_t(16 + 4 * k), v.state + uint32_t(k) * g1::kVideoState);
+  }
+  const int n = (1 << v.planes) - 1; // steps between black and full
+  std::vector<uint8_t> map(16, 0);
+  for (int k = 0; k <= n; k++) map[size_t(k ^ (k >> 1))] = uint8_t((k * 15 + n / 2) / n);
+  for (int val = 0; val < 256; val++) {
+    int k = (val * n + 127) / 255;
+    v.index[size_t(val)] = uint8_t(k ^ (k >> 1));
+  }
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    int px = i == 0 ? x_ - std::max(0, -dx_) : x_ - std::max(0, dx_);
+    int py = i == 0 ? y_ + std::max(0, -dy_) : y_ + std::max(0, dy_);
+    g1::Program p(v.code, 32);
+    g1::Address at = p.Here();
+    p.SleepUntil(g1::ArenaWord(v.buf / 4));
+    p.VideoX(p.Const(v.plane_tab), p.Const(v.stride), p.Const(uint32_t(w_)), p.Const(uint32_t(h_)), p.Const(uint32_t(px)),
+             p.Const(uint32_t(py)), p.Const(v.levels_at), p.Const(v.buf + kHeader), g1::ArenaWord(v.buf / 4 + 2),
+             p.Const(v.state_tab));
+    p.Ret();
+    g1::Address hidden = p.Here(); // the planes change, the panel does not (a transition reveals later)
+    p.SleepUntil(g1::ArenaWord(v.buf / 4));
+    p.VideoX(p.Const(v.plane_tab), p.Const(v.stride), p.Const(uint32_t(w_)), p.Const(uint32_t(h_)), p.Const(640),
+             p.Const(uint32_t(py)), p.Const(v.levels_at), p.Const(v.buf + kHeader), g1::ArenaWord(v.buf / 4 + 2),
+             p.Const(v.state_tab));
+    p.Ret();
+    std::string why;
+    if (!p.Valid(&why)) {
+      error_ = "the VIDEOX code: " + why;
+      return false;
+    }
+    if (p.Here() > v.code + kCodeX) {
+      error_ = "the VIDEOX code is larger than its room";
+      return false;
+    }
+    for (int k = 0; k < v.planes; k++)
+      arm.WriteArena(uint32_t(v.parts[size_t(k)]), std::vector<uint8_t>(size_t(v.stride) * size_t(h_), 0));
+    arm.WriteArena(v.plane_tab, tabs);
+    arm.WriteArena(v.levels_at, map);
+    if (!arm.Load(p)) {
+      error_ = "the VIDEOX code did not load (a firmware before 0.5.62?)";
+      return false;
+    }
+    v.call[size_t(i)] = at;
+    v.hidden[size_t(i)] = hidden;
+    v.epochs[size_t(i)] = arm.GetState().epoch_changes;
+  }
+  v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
+  v.pix.assign(size_t(w_) * h_, 0);
+  v.k = 0;
+  v.moves = 0;
+  v.redraw = true;
+  return true;
+}
+
+// frame_ as a VIDEOX record to both arms, drawn at the same due time, with a row move when the picture scrolled;
+// false (nothing sent, the encoder as it was) when larger than max_bytes.
+bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m) {
+  Video &v = video_;
+  for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
+  std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw, m, std::min<size_t>(max_bytes, v.room));
+  if (rec.empty()) return false;
+  if (m.rows) {
+    v.moves++;
+    LOG("screen: scroll %+d rows (band %d..%d)", m.dy, m.y0, m.y0 + m.rows - 1);
+  }
+  int64_t lead = std::min<int64_t>(v.lead + int64_t(rec.size()) * 1000000 / 40000, 1000000);
+  reveal_style_ = 0; // transitions reveal 1-bpp bitmaps: greys come in directly
+  std::vector<uint8_t> msg(kHeader + rec.size());
+  Put32(msg, 4, v.k);
+  Put32(msg, 8, uint32_t(rec.size()));
+  std::memcpy(msg.data() + kHeader, rec.data(), rec.size());
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    Put32(msg, 0, arm.DeviceTime(lead));
+    arm.WriteArena(v.buf, msg);
+    arm.Call(v.call[size_t(i)]);
+  }
+  v.redraw = false;
+  v.k++;
+  v.sent = int(msg.size());
+  return true;
+}
+
 // Whether a record may go now: both arms connected with little queued; a rebooted arm (its bitmap and decoder
 // state lost) starts the path again.
 int ScreenMirror::VideoReady() {
@@ -767,7 +956,7 @@ int ScreenMirror::VideoReady() {
     if (st.epoch_changes != v.epochs[size_t(i)]) {
       LOG("screen: arm %d rebooted, the VIDEO path starts again", i);
       DropPath();
-      return Path(2) ? kBusy : kSame;
+      return Path(want_levels_ ? want_levels_ : 2) ? kBusy : kSame;
     }
     lead = std::max<int64_t>(lead, st.interval_us + st.clock_error_us + 10000);
   }
@@ -1132,17 +1321,17 @@ int ScreenMirror::Frame(const uint8_t *rgba, int w, int h, int stride, const Scr
   bool still = base_ == last_base_; // the same screen as last time: nothing moved
   if (!still) last_base_ = base_;
 
-  if (levels_ == 2) {
+  if (levels_ == 2 || levels_ == 1) {
     int ready = VideoReady();
     if (ready != kShown) return ready;
-    int r = FrameVideo(o, c, still);
+    int r = levels_ == 2 ? FrameVideo(o, c, still) : FrameVideoX(o, c, still);
     if ((r == kShown || r == kLater) && !first_logged_) {
       first_logged_ = true;
       LOG("screen: first picture sent %lld ms after the start (%d bytes)", (long long)((g1::NowUs() - start_us_) / 1000),
           video_.sent);
     }
     // The cursor after the picture it goes over (the first one, a redraw).
-    if (r != kBusy && (ptr_dirty_ || video_.ptr_shown < 0 || (ptr_redo_us_ && g1::NowUs() >= ptr_redo_us_)))
+    if (levels_ == 2 && r != kBusy && (ptr_dirty_ || video_.ptr_shown < 0 || (ptr_redo_us_ && g1::NowUs() >= ptr_redo_us_)))
       SendPointer(false);
     return r;
   }
@@ -1179,15 +1368,49 @@ int ScreenMirror::FrameVideo(const ScreenOptions &o, Rect c, bool still) {
   return kBusy;
 }
 
+// A frame on the grey fast path (VIDEOX), the link ready (mutex_ held): as FrameVideo, with 16 levels kept steady
+// (a pixel changes only by more than one level) so noise does not cost planes.
+int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
+  bool redraw = video_.redraw;
+  Video &v = video_;
+  g1::RowMove move;
+  // The scroll is found on the exact picture; "steady" (a pixel changed by one level keeps its old one: noise from a
+  // camera or video) applies only when nothing scrolled, since it would break the shifted rows' match.
+  auto make = [&](int n) {
+    Make(o, c, n);
+    Compose();
+    move = {};
+    if (redraw || prev_.size() != frame_.size()) return;
+    if (n == 1) {
+      for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
+      move = v.penc->FindMove(v.pix);
+    }
+    if (!move.rows && o.steady && v.planes == 4 && prev_detail_ == n) Steady(&frame_, prev_, w_, h_);
+  };
+  // The detail asked for (auto: every pixel when that fits the budget, every pixel whatever the size when nothing
+  // moved), coarser only when a record would not fit the arms' room: a picture always goes.
+  int first = o.detail >= 1 ? std::clamp(o.detail, 1, 4) : 1, last = 4;
+  size_t room = video_.room, budget = still || o.detail >= 1 ? room : std::min<size_t>(room, size_t(std::clamp(o.budget, 1, 48)) * 1024);
+  for (int n = first; n <= last; n++) {
+    make(n);
+    if (frame_ == prev_ && !redraw) return n == 1 ? kSame : kLater;
+    if (SendVideoX(n == last ? room : budget, move)) {
+      prev_ = frame_;
+      prev_detail_ = n;
+      Count(video_.sent, n);
+      return n == 1 ? kShown : kLater;
+    }
+  }
+  return kBusy;
+}
+
 // A frame of greys (mutex_ held): the library uploads the changed pixels (4 bits each); a transition's reveal is
 // left out.
 int ScreenMirror::FrameGray(const ScreenOptions &o, Rect c) {
   reveal_style_ = 0;
   int n = std::clamp(o.detail, 1, 4);
   Finish(base_, w_, c, o, n, &frame_);
-  if (o.steady && o.levels != 4 && o.levels != 8 && prev_.size() == frame_.size())
-    for (size_t i = 0; i < frame_.size(); i++)
-      if (std::abs(int(frame_[i]) - int(prev_[i])) <= 17) frame_[i] = prev_[i];
+  if (o.steady && o.levels != 4 && o.levels != 8 && prev_.size() == frame_.size()) Steady(&frame_, prev_, w_, h_);
   Compose();
   if (frame_ == prev_) return kSame;
   int changed = 0;

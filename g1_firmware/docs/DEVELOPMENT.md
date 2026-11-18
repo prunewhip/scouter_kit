@@ -196,6 +196,33 @@ and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, 
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
 
+### What 0.5.62 adds (the radio while drawing, VIDEOX, 128 MHz decoding, updates only in the case)
+
+- **The executor runs below Bluetooth's RX thread** (priority 9; `CONFIG_BT_RX_PRIO` is 8, a `BUILD_ASSERT` keeps
+  it so). VM.md §5.4 already asked for it, but at the same priority 8, with no time slicing, a long `DRAW` or
+  `VIDEO` kept the RX thread from running until it ended: the host's packets waited in the controller (ACL flow
+  control) and the link fell from ~105 to ~44 packets/s while drawing. Now packets arrive into the window while the
+  panel is being written.
+- **`VIDEOX`** (0x57, VM.md §3.8): `VIDEO` over 1–4 bit planes with a level map (4 or 16 greys at the cost of 2 or 4
+  black-and-white streams instead of raw 4-bpp uploads) and an optional row move (a scrolled page costs its new
+  rows). The planes and states are given by tables of addresses, so 16 greys of a large picture fit a fragmented
+  arena (one contiguous 128 KB block was often not there). The VM core's `VIDEO` decoder is reused unchanged; `VIDEO` itself is byte-identical. Tests: `vm_test`
+  (`test_videox`: one plane equals `VIDEO`; after any record, with or without a move, the panel shows the planes
+  through the map; a move draws exactly the rows it changed; every error before anything changes),
+  `tests/videox_test.cpp` (the library's `PlaneVideoEncoder` against the core, 480 frames with moves),
+  `tests/videox_fuzz.c` (300 000 random records under ASan/UBSan, no write outside the arena), emulator test
+  `videox` (in the standard set). `struct vm` +1.9 KB (each row's span).
+- **128 MHz while `VIDEO`/`VIDEOX` run** (`CONFIG_G1_FAST_DECODE`, default y): the VM calls the optional
+  `vm_host.boost` around them; `g1_clock_boost` (`src/board.c`) counts its users (the microphone's test-build
+  128 MHz is one) and switches HFCLK's divider with `SystemCoreClockUpdate` under `irq_lock`. Busy waits follow
+  `SystemCoreClock` on the app core (nrfx_coredep), SPIM4 has its own 32 MHz clock.
+- **SMP image upload and erase only in the case** (`CONFIG_G1_UPDATE_IN_CASE_ONLY`, default y; off on the DK):
+  MCUboot on the arms trusts MCUboot's public sample key, so whoever may upload may install any code. Out of the case
+  a bonded, encrypted host gets `EACCESSDENIED` for image group ids 1 and 5; the image list stays readable. The
+  emulator cannot encrypt, so this is checked on the arms (an upload from a bonded host out of the case).
+- Emulator tests `update_from`, `update_from_right`: G1_FROM (the arms' image) → this version → NEXT over SMP,
+  without the 0.4.10 start of `chain`.
+
 ### What 0.5.60 adds (no case hold: the display policy is the program's)
 
 - **No case hold** (the user, 2026-11-05: display policy belongs in programs). In the case the panel works as

@@ -35,6 +35,22 @@ config G1_REQUIRE_SECURITY
 	bool "Out of the case, require an encrypted, bonded link for every write (CMD, CTRL, SMP)"
 	default y
 
+config G1_FAST_DECODE
+	bool "Run the app core at 128 MHz while VIDEO/VIDEOX decode and draw"
+	default y
+	help
+	  The decoders are CPU-bound; at 128 MHz a busy frame decodes in about half the time. The clock
+	  returns to 64 MHz (stock) when the instruction ends.
+
+config G1_UPDATE_IN_CASE_ONLY
+	bool "Accept SMP image uploads and erases only in the case"
+	default y
+	help
+	  MCUboot on the arms checks images with MCUboot's public sample key, so an upload can install
+	  any code. With this on, an image upload or erase over SMP is refused unless IN_CASE is 1 (VBUS,
+	  the case's field or message); updates and restores, which always run in the open case, are
+	  unchanged. Off on the DK (no case).
+
 config G1_PAIRING_WINDOW_S
 	int "Seconds after boot during which a new bond may be created out of the case"
 	default 0

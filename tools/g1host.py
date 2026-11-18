@@ -725,7 +725,7 @@ OPS = {
     "SLEEP_UNTIL": (0x40, 1, 0), "WAIT_EVENT": (0x41, 2, 0), "RAISE": (0x42, 1, 0), "NOTIFY": (0x43, 2, 0),
     "SYS_READ": (0x44, 2, 0), "SYS_WRITE": (0x45, 2, 0),
     "FILL": (0x50, 7, 0), "BLIT": (0x51, 12, 0), "GLYPHS": (0x52, 9, 0), "DRAW": (0x53, 8, 0), "LINE": (0x54, 7, 0),
-    "VIDEO": (0x55, 10, 0), "ASSET_LOAD": (0x56, 4, 0),
+    "VIDEO": (0x55, 10, 0), "ASSET_LOAD": (0x56, 4, 0), "VIDEOX": (0x57, 10, 0),
 }
 OP_NAMES = {v[0]: k for k, v in OPS.items()} | {0x01: "WRITE", 0x02: "WRITE_RLE"}
 

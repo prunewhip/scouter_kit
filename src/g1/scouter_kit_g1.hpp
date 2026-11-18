@@ -177,6 +177,9 @@ public:
             ArenaWord y1, ArenaWord level);
   void Video(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
              ArenaWord level, ArenaWord src, ArenaWord n, ArenaWord state);
+  // VIDEOX (VM.md §3.8, g1v0 0.5.62+): planes from bitmap, levels = the level map's address.
+  void VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
+              ArenaWord levels, ArenaWord src, ArenaWord n, ArenaWord state);
   // Bytes off ... off + n - 1 of the stored asset whose 16-byte ID is at
   // address id, to dst (VM.md §2.4).
   void AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n);
@@ -243,12 +246,51 @@ class VideoEncoder {
   int Width() const { return w_; }
   int Height() const { return h_; }
   int Stride() const { return nb_; } // the least bytes per row of the bitmap
+  // VIDEOX's row move (VM.md §3.8) applied to the frame the arm holds: rows
+  // y0...y0+rows-1 move by dy (the rows left behind keep their pixels).
+  // False, and nothing changes, unless 0 <= y0, y0 + rows <= height and
+  // 0 < |dy| < rows.
+  bool Move(int y0, int rows, int dy);
 
  private:
   int w_, h_, nb_;
   bool started_ = false;
   std::vector<uint8_t> prev_;
   std::vector<uint16_t> p_;
+};
+
+// VIDEOX (VM.md §3.8, g1v0 0.5.62+): greys as 1-4 bit planes, each an
+// ordinary VIDEO stream, with an optional row move for scrolling. A frame is
+// an index per pixel (0...2^planes - 1); the arm shows levels[index], the
+// 16-byte level map the caller puts in the arena. Each plane (h x stride
+// bytes) and its state (kVideoState) may be anywhere in the arena: VIDEOX
+// takes tables of their addresses. Records go to the arm in order, starting
+// from zeroed planes.
+struct RowMove {
+  int y0 = 0, rows = 0, dy = 0; // rows == 0: none
+};
+class PlaneVideoEncoder {
+ public:
+  PlaneVideoEncoder(int width, int height, int planes); // 1...640 x 1...480, 1...4 planes
+  // index: width x height bytes, row by row (bits above the planes ignored).
+  // move: applied first (on the arm and here); FindMove gives a good one.
+  // Empty, and the encoder unchanged, for a bad size or move, or a record
+  // over max_bytes.
+  std::vector<uint8_t> Encode(std::span<const uint8_t> index, bool redraw = false, RowMove move = {},
+                              size_t max_bytes = SIZE_MAX);
+  // The vertical shift that turns most of the last encoded frame into this
+  // one (scrolling), as a move; rows == 0 when none covers at least
+  // min_rows rows.
+  RowMove FindMove(std::span<const uint8_t> index, int min_rows = 8) const;
+  int Width() const { return w_; }
+  int Height() const { return h_; }
+  int Planes() const { return n_; }
+  int Stride() const { return (w_ + 7) / 8; } // the least bytes per row of each plane
+
+ private:
+  int w_, h_, n_;
+  std::vector<VideoEncoder> enc_;
+  std::vector<uint8_t> last_; // the last index frame, masked to the planes
 };
 
 // Arena memory, the same on both arms and shared with the fonts and bitmaps
@@ -629,6 +671,9 @@ void NewHost(bool keep_sessions);
 // The arm answers like a firmware without the asset store (false) or with it
 // again (true); what it stored stays.
 void SetAssetStore(int arm, bool available);
+// The firmware version 0.minor.patch the arms report in HELLO from the next
+// session on (0.5.0 at first); the VM core itself is always the current one.
+void SetFirmware(int minor, int patch);
 } // namespace emulator
 #endif
 

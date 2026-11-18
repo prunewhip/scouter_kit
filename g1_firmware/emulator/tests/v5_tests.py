@@ -378,6 +378,50 @@ def chain_body(name, left):
     return finish(e, res)
 
 
+def update_from_body(name, left):
+    """The arms' own path: G1_FROM (the image they run) -> SMP G1_VERSION -> HELLO, grid, panel read-back -> SMP
+    G1_NEXT -> HELLO. Proves the new image installs over the arms' one and can itself be updated (never stuck)."""
+    role = "L" if left else "R"
+    res = {"test": name, "role": role}
+    start = image(FROM)
+    e = emu(name + "-a", start, (common.LEFT_ARM if left else "") + SEED + common.CASE_SETUP)
+    try:
+        arm = e.arm
+        arm.setup()
+        h = arm.hello()
+        check_hello(h, FROM, role)
+        res["images_from"] = g.smp_images(arm.smp)
+        e = install(e, CUR, res, "cur", start, left)
+        arm = e.arm
+        h = arm.hello()
+        res["hello_cur"] = {k: h[k] for k in ("proto", "version", "role", "panel_ok", "safe_level", "epoch")}
+        check_hello(h, VER, role)
+        res["images_cur"] = g.smp_images(arm.smp)
+        assert res["images_cur"][0]["version"] == VER, res["images_cur"]
+        fr = g.grid_frame(arm, "LEFT" if left else "RIGHT")
+        idx = arm.draw(fr, g.PANEL_W // 2, 0, 0, g.PANEL_W, g.PANEL_H)
+        res["grid_draw_cur"] = arm.wait_draw(idx)
+        res["grid_read_cur"] = arm.panel_read()
+        assert res["grid_read_cur"]["match"], res["grid_read_cur"]
+        e = install(e, CUR_NEXT, res, "next", start, left)
+        arm = e.arm
+        h = arm.hello()
+        res["hello_next"] = {k: h[k] for k in ("proto", "version", "role", "panel_ok", "safe_level", "epoch")}
+        check_hello(h, NEXT, role)
+        res["pass"] = True
+    except Exception as ex:
+        res.update(error=f"{type(ex).__name__}: {ex}", trace=traceback.format_exc()[-1500:], **{"pass": False})
+    return finish(e, res)
+
+
+def test_update_from(name):
+    return update_from_body(name, True)
+
+
+def test_update_from_right(name):
+    return update_from_body(name, False)
+
+
 def test_chain(name):
     """0.4.10 (left arm) -> the v5 client refuses its HELLO -> SMP 0.5.0 (as on the arms) -> HELLO, grid,
     drawtest, ARENA_CRC -> SMP G1_VERSION -> HELLO, IMU, grid, drawtest -> SMP G1_NEXT."""
@@ -2925,12 +2969,41 @@ def video_body(e, res):
     assert out["same_boot"] and status and all(x == 0 for x in status), out
     assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
 
+def videox_body(e, res):
+    """VIDEOX (VM.md §3.8, 0.5.62+): 16 greys as 4 planes with two row moves, five 640 x 480 records back to back
+    (tools/draw_bench.py): the arm stays up, VM_STATUS is answered while they run, and the panel and the arena end as
+    the mirror's (the mirror is the same VM core)."""
+    import draw_bench
+    arm = e.arm
+    out = res.setdefault("videox", {})
+    recs = draw_bench.videox_records(e.run)
+    out["record_bytes"] = [len(r) for r in recs]
+    boots, epoch = arm.info["boot_count"], arm.epoch
+    last = draw_bench.videox_send(arm, recs)
+    status = []
+    arm.run_until(lambda: draw_bench.VIDEOX_MARK in arm.fences, 60, "the first VIDEOX")
+    while last not in arm.fences and len(status) < 400:
+        status.append(arm.ctrl("VM_STATUS", timeout=5.0, tries=1)["status"])
+    arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOX")
+    out["videox_ms"] = draw_bench.videox_ms(arm, len(recs))
+    out["vm_status_answered"] = len(status)
+    h = arm.hello()
+    out["same_boot"] = h["boot_count"] == boots and arm.epoch == epoch
+    out["panel"] = arm.panel_read(0, 480)
+    out["arena"] = arm.arena_crc()
+    assert out["same_boot"] and status and all(x == 0 for x in status), out
+    assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
+
+
 def test_panel_read(name):
     return run(name, CUR_MIC, panel_read_body)
 
 
 def test_video(name):
     return run(name, CUR_MIC, video_body)
+
+def test_videox(name):
+    return run(name, CUR_MIC, videox_body)
 
 def test_peer(name):
     return run(name, CUR_MIC, peer_body)
@@ -3317,7 +3390,7 @@ def test_assets(name):
     return run(name, CUR, assets_logged)
 
 
-TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "chain_right": test_chain_right,
+TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "update_from": test_update_from, "update_from_right": test_update_from_right, "chain_right": test_chain_right,
          "power": test_power, "unattended": test_unattended, "examples": test_examples, "vm": test_vm, "mic": test_mic,
          "mic_capture": test_mic_capture, "mic_lease": test_mic_lease, "mic_popup": test_mic_popup, "imu_base": test_imu_base, "imu_base_left": test_imu_base_left,
          "mic_tool": test_mic_tool, "mic_tool_draw": test_mic_tool_draw, "draw_bench": test_draw_bench, "panel_standby": test_panel_standby, "imu_base_default_left": test_imu_base_default_left,
@@ -3326,7 +3399,7 @@ TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "cha
          "bad_packets": test_bad_packets, "no_panel": test_no_panel, "starve": test_starve,
          "sessions": test_sessions, "imu": test_imu, "diag": test_diag, "pair_link": test_pair_link,
          "peer": test_peer, "pair_stream": test_pair_stream,
-         "panel_read": test_panel_read, "video": test_video, "panel_guard": test_panel_guard,
+         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "panel_guard": test_panel_guard,
          "assets": test_assets}
 for _t in ("crash", "hang", "thread_hang", "safe_mode", "lost_packet", "reset_mid_frame", "security", "pmic_watchdog",
            "i2c_errors", "no_pmic"):

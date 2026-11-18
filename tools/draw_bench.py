@@ -130,6 +130,49 @@ def video_send(arm, recs):
     return VIDEO_MARK + 2 * len(recs) - 1
 
 
+VIDEOX_MARK = 0x7300
+
+
+def videox_records(out_dir):
+    """the VIDEOX records of ../tests/videox_records.cpp (g1v0 0.5.62+): one 640 x 480 stream of 4 planes with two
+    row moves"""
+    sk = Path(__file__).resolve().parent.parent
+    exe = Path(out_dir) / "videox_records"
+    subprocess.run(["g++", "-std=c++20", "-O2", "-DSCOUTER_G1_EMULATOR", str(sk / "tests/videox_records.cpp"),
+                    str(sk / "src/base/scouter_kit.cpp"), str(sk / "src/vm/vm.c"), str(sk / "src/vm/vm_gfx.c"),
+                    "-o", str(exe), "-lpthread"], check=True)
+    r = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+    return [bytes.fromhex(x) for x in r.stdout.split()]
+
+
+def videox_send(arm, recs, planes=4):
+    """the records as VIDEOXs (640 x 480 at (0, 0), levels 0..15 as the index), each between NOTIFYs VIDEOX_MARK + 2i
+    and + 2i + 1; returns the last mark"""
+    bm, st, lv = arm.alloc(planes * 80 * 480), arm.alloc(planes * 1596 + 4), arm.alloc(16)
+    pt, stt = arm.alloc(16), arm.alloc(16)   # VIDEOX's tables: each plane's and each state's address
+    bufs = [arm.alloc(len(r) + 3) for r in recs]
+    arm.write_arena_rle(bm, bytes(planes * 80 * 480))
+    arm.write_arena(lv, bytes(range(16)))
+    arm.write_arena(pt, struct.pack("<4I", *[4 * bm + p * 80 * 480 for p in range(4)]))
+    arm.write_arena(stt, struct.pack("<4I", *[4 * st + p * 1596 for p in range(4)]))
+    for b, r in zip(bufs, recs):
+        arm.write_arena(b, r)
+    arm.wait_idle(60)
+    k = arm.k
+    for i, (b, r) in enumerate(zip(bufs, recs)):
+        arm.add(g.Code().ins("NOTIFY", k(VIDEOX_MARK + 2 * i), k(0)).ins(
+            "VIDEOX", k(4 * pt), k(80), k(640), k(480), k(0), k(0), k(4 * lv), k(4 * b), k(len(r)), k(4 * stt)).ins(
+            "NOTIFY", k(VIDEOX_MARK + 2 * i + 1), k(0)))
+    arm.flush()
+    return VIDEOX_MARK + 2 * len(recs) - 1
+
+
+def videox_ms(arm, n):
+    """the arm's time of each VIDEOX sent by videox_send, ms"""
+    f = arm.fences
+    return [round((f[VIDEOX_MARK + 2 * i + 1]["t_dev"] - f[VIDEOX_MARK + 2 * i]["t_dev"]) / 1000, 1) for i in range(n)]
+
+
 def video_ms(arm, n):
     """the arm's time of each VIDEO sent by video_send, ms"""
     f = arm.fences

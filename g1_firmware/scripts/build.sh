@@ -16,7 +16,7 @@ N=${2:-$(echo "$V" | awk -F. '{print $1 "." $2 "." $3 + 1}')}
 v=$(echo "$V" | tr -d .)
 n=$(echo "$N" | tr -d .)
 SRC=$FW/firmware
-DK="-DEXTRA_DTC_OVERLAY_FILE=dk.overlay -Dmcuboot_EXTRA_DTC_OVERLAY_FILE=$FW/g1min/dk_flash.overlay -DPM_STATIC_YML_FILE=$SRC/pm_static_dk.yml -DCONFIG_G1_PAIRING_WINDOW_S=120 -DCONFIG_G1_NO_PANEL=y"
+DK="-DEXTRA_DTC_OVERLAY_FILE=dk.overlay -Dmcuboot_EXTRA_DTC_OVERLAY_FILE=$FW/g1min/dk_flash.overlay -DPM_STATIC_YML_FILE=$SRC/pm_static_dk.yml -DCONFIG_G1_PAIRING_WINDOW_S=120 -DCONFIG_G1_NO_PANEL=y -DCONFIG_G1_UPDATE_IN_CASE_ONLY=n"
 [ -f "$WORK/firmware/1.6.6/net_core_app_update.bin" ] || { echo "run scripts/fetch_stock.sh 1.6.6 first"; exit 1; }
 mkdir -p "$OUT/logs"
 b() {

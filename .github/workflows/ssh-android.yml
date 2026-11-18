@@ -72,7 +72,7 @@ jobs:
         run: |
           cmake -S native -B /tmp/host -G Ninja -DTHIRD_PARTY_DIR="$PWD/native/third_party/out" > /dev/null
           cmake --build /tmp/host
-          ctest --test-dir /tmp/host --output-on-failure -R '^(screen|terminal|keys|fx)$'
+          ctest --test-dir /tmp/host --output-on-failure -R '^(screen|terminal|keys|fx|vm|videox|videox_fuzz)$'
 
       - name: mosh client test (informational)
         continue-on-error: true

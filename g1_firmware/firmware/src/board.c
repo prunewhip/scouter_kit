@@ -4,6 +4,7 @@
  * +0x55/+0x56, luminance base +0x78. */
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/irq.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/flash.h>
@@ -11,6 +12,7 @@
 #include <zephyr/init.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_uarte.h>
+#include <hal/nrf_clock.h>
 #include <soc.h>
 #include "g1.h"
 
@@ -176,4 +178,19 @@ int board_init(void)
 	read_settings();
 	LOG_INF("role %s", role ? "left (slave)" : "right (master)");
 	return 0;
+}
+
+static int clock_users;
+
+void g1_clock_boost(bool on)
+{
+	unsigned int key = irq_lock();   /* the divider and SystemCoreClock change together for every ISR */
+	int was = clock_users;
+
+	clock_users += on ? 1 : (clock_users > 0 ? -1 : 0);
+	if ((was == 0) != (clock_users == 0)) {
+		nrf_clock_hfclk_div_set(NRF_CLOCK_S, clock_users ? NRF_CLOCK_HFCLK_DIV_1 : NRF_CLOCK_HFCLK_DIV_2);
+		SystemCoreClockUpdate();
+	}
+	irq_unlock(key);
 }

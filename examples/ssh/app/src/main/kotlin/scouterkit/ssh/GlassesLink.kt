@@ -46,6 +46,8 @@ class GlassesLink(
         var stallCheck: Runnable? = null // the write watchdog while a write is in flight
         var fails = 0         // connection attempts that ended before the link was up, in a row
         var since = 0L        // when this arm started connecting (0: up, or not trying)
+        var lastWrite = 0L    // when the last packet went out
+        var fast = false      // Android asked for CONNECTION_PRIORITY_HIGH (short intervals) on this link
     }
 
     private val arms = arrayOf(Arm(0), Arm(1))
@@ -144,6 +146,7 @@ class GlassesLink(
 
     private fun close(a: Arm, reconnect: Boolean) {
         a.wanted = reconnect
+        a.fast = false
         a.setup?.let { handler.removeCallbacks(it) }
         a.setup = null
         a.stallCheck?.let { handler.removeCallbacks(it) }
@@ -198,11 +201,33 @@ class GlassesLink(
         a.writing = gatt.writeCharacteristic(c)
         if (a.writing) {
             a.writeAt = android.os.SystemClock.uptimeMillis()
+            a.lastWrite = a.writeAt
+            if (!a.fast) linkSpeed(a, gatt, true)
             watchWrites(a)
         } else {
             synchronized(a) { a.queue.addFirst(channel to data) }
             handler.postDelayed({ pump(a) }, 5)
         }
+    }
+
+    // Short connection intervals while packets flow (Android's CONNECTION_PRIORITY_HIGH: 11.25-15 ms, and the arm
+    // asks for 7.5 ms itself), the balanced ones (30-50 ms) after IDLE_LINK_MS without a write: the glasses' radio
+    // takes about 2 packets per connection event, so the interval sets the link's speed, and idle links cost
+    // battery on both ends.
+    private fun linkSpeed(a: Arm, g: BluetoothGatt, fast: Boolean) {
+        val ok = runCatching {
+            g.requestConnectionPriority(if (fast) BluetoothGatt.CONNECTION_PRIORITY_HIGH else BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+        }.getOrDefault(false)
+        if (!ok) return // busy: the next write (or idle check) asks again
+        a.fast = fast
+        Log.i(TAG, "arm ${a.index}: ${if (fast) "fast" else "balanced"} link asked")
+        if (fast) handler.postDelayed(idleCheck(a, g), IDLE_LINK_MS)
+    }
+
+    private fun idleCheck(a: Arm, g: BluetoothGatt): Runnable = Runnable {
+        if (a.gatt !== g || !a.fast) return@Runnable
+        val idle = android.os.SystemClock.uptimeMillis() - a.lastWrite
+        if (idle >= IDLE_LINK_MS) linkSpeed(a, g, false) else handler.postDelayed(idleCheck(a, g), IDLE_LINK_MS - idle + 50)
     }
 
     // One check per arm while writes are in flight: pump() notices a write whose callback is overdue.
@@ -232,6 +257,7 @@ class GlassesLink(
             }
             a.setup?.let { handler.removeCallbacks(it) }
             a.setup = null
+            a.fast = false
             g.close()
             a.gatt = null
             down(a)
@@ -308,6 +334,7 @@ class GlassesLink(
         val SECURITY = setOf(5, 6, 0x3D, 15, 137)
         const val SETUP_MS = 12000L // connected to subscribed, at most
         const val WRITE_STALL_MS = 3000L // a write's callback, at most
+        const val IDLE_LINK_MS = 5000L // writes stopped this long: the balanced link again
         // The waits before each direct connection again (then autoConnect).
         val DIRECT_WAITS = longArrayOf(300, 1000, 2000, 4000)
         val SERVICE: UUID = UUID.fromString("f3da4d59-277a-4fc9-a1ed-41c9c22d4400")

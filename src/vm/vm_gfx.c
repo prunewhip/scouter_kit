@@ -982,3 +982,181 @@ void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t leve
 		*out = (uint8_t)((hi ? level << 4 : 0) | (lo ? level : 0));
 	}
 }
+
+/* VIDEOX (§3.8) */
+static int overlap(int64_t a0, int64_t a1, int64_t b0, int64_t b1)
+{
+	return a0 < b1 && b0 < a1;
+}
+
+int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, uint32_t *detail)
+{
+	uint32_t pt = v[0], stride = v[1], w = v[2], h = v[3], lv = v[6], src = v[7], n = v[8], stt = v[9];
+	uint32_t i, p, pos, nw = 0;
+	int64_t rend = (int64_t)src + n, wr[2 * VM_VIDEOX_PLANES][2], rd[4][2];
+
+	if (w == 0 || w > VM_PANEL_W || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
+		*detail = w == 0 || w > VM_PANEL_W ? w : h == 0 || h > VM_PANEL_H ? h : stride;
+		return VM_E_ARG;
+	}
+	if (n < 2 || rend > ARENA) {
+		*detail = src;
+		return n < 2 ? VM_E_FORMAT : VM_E_ARENA;
+	}
+	x->flags = a[src];
+	x->planes = a[src + 1];
+	if (x->flags > 3 || x->planes == 0 || x->planes > VM_VIDEOX_PLANES) {
+		*detail = x->flags > 3 ? x->flags : x->planes;
+		return VM_E_FORMAT;
+	}
+	if ((int64_t)pt + 4 * x->planes > ARENA || (int64_t)stt + 4 * x->planes > ARENA || (int64_t)lv + 16 > ARENA) {
+		*detail = (int64_t)pt + 4 * x->planes > ARENA ? pt : (int64_t)stt + 4 * x->planes > ARENA ? stt : lv;
+		return VM_E_ARENA;
+	}
+	/* written: every plane and state; read only: the record, the level map and the two tables */
+	for (p = 0; p < x->planes; p++) {
+		x->plane[p] = get32(a + pt + 4 * p);
+		x->state[p] = get32(a + stt + 4 * p);
+		wr[nw][0] = x->plane[p];
+		wr[nw++][1] = x->plane[p] + (int64_t)(h - 1) * stride + (w + 7) / 8;
+		wr[nw][0] = x->state[p];
+		wr[nw++][1] = (int64_t)x->state[p] + VM_VIDEO_STATE;
+	}
+	for (i = 0; i < nw; i++) {
+		if (wr[i][1] > ARENA) {
+			*detail = (uint32_t)wr[i][0];
+			return VM_E_ARENA;
+		}
+	}
+	rd[0][0] = src, rd[0][1] = rend;
+	rd[1][0] = lv, rd[1][1] = (int64_t)lv + 16;
+	rd[2][0] = pt, rd[2][1] = (int64_t)pt + 4 * x->planes;
+	rd[3][0] = stt, rd[3][1] = (int64_t)stt + 4 * x->planes;
+	for (i = 0; i < nw; i++) {
+		for (uint32_t k = i + 1; k < nw; k++) {
+			if (overlap(wr[i][0], wr[i][1], wr[k][0], wr[k][1])) {
+				*detail = (uint32_t)wr[k][0];
+				return VM_E_ARENA;
+			}
+		}
+		for (uint32_t k = 0; k < 4; k++) {
+			if (overlap(wr[i][0], wr[i][1], rd[k][0], rd[k][1])) {
+				*detail = (uint32_t)rd[k][0];
+				return VM_E_ARENA;
+			}
+		}
+	}
+	for (i = 0; i < (1u << x->planes); i++) {
+		if (a[lv + i] > 15) {
+			*detail = a[lv + i];
+			return VM_E_ARG;
+		}
+	}
+	pos = src + 2;
+	x->y0 = x->rows = 0;
+	x->dy = 0;
+	if (x->flags & 1) {
+		if ((int64_t)pos + 6 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->y0 = get16(a + pos);
+		x->rows = get16(a + pos + 2);
+		x->dy = s16(a + pos + 4);
+		pos += 6;
+		if ((uint64_t)x->y0 + x->rows > h || x->dy == 0 || (uint32_t)(x->dy < 0 ? -x->dy : x->dy) >= x->rows) {
+			*detail = x->y0 + x->rows > h ? x->y0 : (uint32_t)x->dy;
+			return VM_E_FORMAT;
+		}
+	}
+	for (p = 0; p < x->planes; p++) {
+		uint32_t pv[10];
+		int err;
+
+		if ((int64_t)pos + 3 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->len[p] = (uint32_t)a[pos] | (uint32_t)a[pos + 1] << 8 | (uint32_t)a[pos + 2] << 16;
+		x->at[p] = pos + 3;
+		pos += 3 + x->len[p];
+		if (x->len[p] == 0 || pos > rend) {
+			*detail = x->at[p];
+			return VM_E_FORMAT;
+		}
+		vm_videox_plane(v, x, p, pv);
+		err = vm_video_check(a, pv, detail);   /* the plane's record flags */
+		if (err) {
+			return err;
+		}
+	}
+	if (pos != rend) {
+		*detail = pos;
+		return VM_E_FORMAT;
+	}
+	return 0;
+}
+
+void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv)
+{
+	pv[0] = x->plane[p];
+	pv[1] = v[1];
+	pv[2] = v[2];
+	pv[3] = v[3];
+	pv[4] = v[4];
+	pv[5] = v[5];
+	pv[6] = 15;
+	pv[7] = x->at[p];
+	pv[8] = x->len[p];
+	pv[9] = x->state[p];
+}
+
+/* rows y0..y0+rows-1 of every plane move by dy (the rows left behind keep their pixels); a row is marked when
+ * any plane's bytes there changed */
+void vm_videox_move(uint8_t *a, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx)
+{
+	uint32_t stride = v[1], nb = (v[2] + 7) / 8;
+	int32_t step = x->dy > 0 ? -1 : 1, d = x->dy;
+	int32_t first = d > 0 ? (int32_t)(x->y0 + x->rows) - 1 : (int32_t)x->y0;
+	int32_t last = d > 0 ? (int32_t)x->y0 + d : (int32_t)(x->y0 + x->rows) - 1 + d;
+
+	for (int32_t y = first; step < 0 ? y >= last : y <= last; y += step) {
+		int diff = 0;
+
+		for (uint32_t p = 0; p < x->planes; p++) {
+			uint8_t *dst = a + x->plane[p] + (uint32_t)y * stride;
+			const uint8_t *s = a + x->plane[p] + (uint32_t)(y - d) * stride;
+
+			if (memcmp(dst, s, nb)) {
+				memmove(dst, s, nb);
+				diff = 1;
+			}
+		}
+		if (diff) {
+			mark(ctx, (uint32_t)y);
+		}
+	}
+}
+
+void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, uint32_t y, uint32_t x0,
+		       uint32_t x1, uint8_t *out)
+{
+	const uint8_t *lv = a + v[6];
+	const uint8_t *row[VM_VIDEOX_PLANES];
+	uint32_t planes = xl->planes;
+
+	for (uint32_t p = 0; p < planes; p++) {
+		row[p] = a + xl->plane[p] + y * v[1];
+	}
+	for (uint32_t x = x0; x < x1; x += 2, out++) {
+		uint32_t i0 = 0, i1 = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			i0 |= get1(row[p], (int32_t)x) << p;
+			if (x + 1 < x1) {
+				i1 |= get1(row[p], (int32_t)x + 1) << p;
+			}
+		}
+		*out = (uint8_t)(lv[i0] << 4 | (x + 1 < x1 ? lv[i1] : 0));
+	}
+}

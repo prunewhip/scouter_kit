@@ -166,6 +166,7 @@ enum Op : uint8_t {
   OP_DRAW = 0x53,
   OP_LINE = 0x54,
   OP_VIDEO = 0x55,
+  OP_VIDEOX = 0x57,
   OP_ASSET_LOAD = 0x56,
 };
 
@@ -242,7 +243,8 @@ int Operands(uint8_t op) {
   case OP_BLIT: return 12;
   case OP_GLYPHS: return 9;
   case OP_DRAW: return 8;
-  case OP_VIDEO: return 10;
+  case OP_VIDEO:
+  case OP_VIDEOX: return 10;
   case OP_ASSET_LOAD: return 4;
   default:
     if (op >= OP_ADD && op <= OP_SAR) return 3;
@@ -262,7 +264,7 @@ const char *OpName(uint8_t op) {
       {OP_NOTIFY, "NOTIFY"}, {OP_SYS_READ, "SYS_READ"},   {OP_SYS_WRITE, "SYS_WRITE"},
       {OP_FILL, "FILL"},     {OP_BLIT, "BLIT"},           {OP_GLYPHS, "GLYPHS"},
       {OP_DRAW, "DRAW"},     {OP_LINE, "LINE"},           {OP_VIDEO, "VIDEO"},
-      {OP_ASSET_LOAD, "ASSET_LOAD"}};
+      {OP_VIDEOX, "VIDEOX"}, {OP_ASSET_LOAD, "ASSET_LOAD"}};
   auto it = names.find(op);
   if (it != names.end()) return it->second;
   if (op >= OP_ADD && op <= OP_SAR) return "arithmetic";
@@ -562,7 +564,8 @@ void Program::Op(uint8_t opcode, std::initializer_list<ArenaWord> operands, Labe
     return;
   }
   std::vector<ArenaWord> ops(operands);
-  if (policy_start_ >= 0 && (opcode == OP_DRAW || opcode == OP_VIDEO)) ops[4] = PolicyX(ops[4]); // dst_x, x
+  if (policy_start_ >= 0 && (opcode == OP_DRAW || opcode == OP_VIDEO || opcode == OP_VIDEOX))
+    ops[4] = PolicyX(ops[4]); // dst_x, x
   std::vector<uint8_t> head;
   PutIns(head, opcode, ops.data(), k, 0);
   if (!HasTarget(opcode)) {
@@ -675,6 +678,11 @@ void Program::Video(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h
   Op(OP_VIDEO, {bitmap, stride, w, h, x, y, level, src, n, state});
 }
 
+void Program::VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
+                     ArenaWord levels, ArenaWord src, ArenaWord n, ArenaWord state) {
+  Op(OP_VIDEOX, {bitmap, stride, w, h, x, y, levels, src, n, state});
+}
+
 void Program::AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n) {
   Op(OP_ASSET_LOAD, {id, dst, off, n});
 }
@@ -781,6 +789,105 @@ uint32_t Transitions(const uint8_t *row, uint32_t w, uint16_t *t) {
 VideoEncoder::VideoEncoder(int width, int height)
     : w_(width), h_(height), nb_(width > 0 ? (width + 7) / 8 : 0), p_(kVProbs, 2048) {
   if (w_ >= 1 && w_ <= kPanelW && h_ >= 1 && h_ <= kPanelH) prev_.assign(size_t(nb_) * size_t(h_), 0);
+}
+
+bool VideoEncoder::Move(int y0, int rows, int dy) {
+  if (prev_.empty() || y0 < 0 || rows < 2 || y0 + rows > h_ || dy == 0 || std::abs(dy) >= rows) return false;
+  const size_t nb = size_t(nb_);
+  if (dy > 0)
+    for (int y = y0 + rows - 1; y >= y0 + dy; y--)
+      std::memcpy(prev_.data() + size_t(y) * nb, prev_.data() + size_t(y - dy) * nb, nb);
+  else
+    for (int y = y0; y <= y0 + rows - 1 + dy; y++)
+      std::memcpy(prev_.data() + size_t(y) * nb, prev_.data() + size_t(y - dy) * nb, nb);
+  return true;
+}
+
+PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes) : w_(width), h_(height), n_(planes) {
+  if (w_ < 1 || w_ > kPanelW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
+    n_ = 0;
+    return;
+  }
+  for (int p = 0; p < n_; p++) enc_.emplace_back(w_, h_);
+  last_.assign(size_t(w_) * size_t(h_), 0);
+}
+
+std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, bool redraw, RowMove move,
+                                               size_t max_bytes) {
+  if (n_ == 0) return {};
+  const size_t px = size_t(w_) * size_t(h_);
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  std::vector<uint8_t> out = {uint8_t((move.rows ? 1 : 0) | (redraw ? 2 : 0)), uint8_t(n_)};
+  if (move.rows) {
+    if (move.y0 < 0 || move.rows < 2 || move.y0 + move.rows > h_ || move.dy == 0 || std::abs(move.dy) >= move.rows)
+      return {};
+    for (int v : {move.y0, move.rows, move.dy & 0xFFFF}) {
+      out.push_back(uint8_t(v));
+      out.push_back(uint8_t(v >> 8));
+    }
+  }
+  std::vector<VideoEncoder> enc = enc_; // committed only when the whole record fits
+  std::vector<uint8_t> plane(px);
+  for (int p = 0; p < n_; p++) {
+    if (move.rows) enc[size_t(p)].Move(move.y0, move.rows, move.dy);
+    for (size_t i = 0; i < px; i++) plane[i] = i < index.size() ? uint8_t(index[i] >> p & 1) : 0;
+    size_t left = max_bytes > out.size() + 3 ? max_bytes - out.size() - 3 : 0;
+    std::vector<uint8_t> r = enc[size_t(p)].Encode(plane, redraw, left);
+    if (r.empty() || r.size() > 0xFFFFFF) return {};
+    out.push_back(uint8_t(r.size()));
+    out.push_back(uint8_t(r.size() >> 8));
+    out.push_back(uint8_t(r.size() >> 16));
+    out.insert(out.end(), r.begin(), r.end());
+  }
+  if (out.size() > max_bytes) return {};
+  enc_ = std::move(enc);
+  for (size_t i = 0; i < px; i++) last_[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
+  return out;
+}
+
+RowMove PlaneVideoEncoder::FindMove(std::span<const uint8_t> index, int min_rows) const {
+  RowMove best;
+  if (n_ == 0 || index.size() < size_t(w_) * size_t(h_)) return best;
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  auto hash = [&](const uint8_t *row, bool masked) {
+    uint64_t v = 1469598103934665603ull;
+    for (int x = 0; x < w_; x++) v = (v ^ (masked ? row[x] & mask : row[x])) * 1099511628211ull;
+    return v;
+  };
+  std::vector<uint64_t> a(static_cast<size_t>(h_)), b(static_cast<size_t>(h_));
+  for (int y = 0; y < h_; y++) {
+    a[size_t(y)] = hash(last_.data() + size_t(y) * size_t(w_), false);
+    b[size_t(y)] = hash(index.data() + size_t(y) * size_t(w_), true);
+  }
+  // votes per shift from rows whose content appears elsewhere (blank or repeated rows say nothing)
+  std::vector<int> votes(static_cast<size_t>(2 * h_ + 1), 0);
+  for (int y = 0; y < h_; y++) {
+    if (a[size_t(y)] == b[size_t(y)]) continue;
+    for (int d = 1; d < h_; d++) {
+      if (y - d >= 0 && b[size_t(y)] == a[size_t(y - d)]) votes[size_t(h_ + d)]++;
+      if (y + d < h_ && b[size_t(y)] == a[size_t(y + d)]) votes[size_t(h_ - d)]++;
+    }
+  }
+  int dy = 0, most = 0;
+  for (int d = -h_ + 1; d < h_; d++)
+    if (d && votes[size_t(h_ + d)] > most) most = votes[size_t(h_ + d)], dy = d;
+  if (!dy) return best;
+  // the longest run of destination rows y with new[y] == old[y - dy]
+  int run = 0, run0 = 0, len = 0, y0 = 0;
+  for (int y = std::max(0, dy); y < std::min(h_, h_ + dy); y++) {
+    if (b[size_t(y)] == a[size_t(y - dy)]) {
+      if (!run) run0 = y;
+      if (++run > len) len = run, y0 = run0;
+    } else {
+      run = 0;
+    }
+  }
+  if (len < min_rows) return best;
+  int lo = std::min(y0, y0 - dy), hi = std::max(y0 + len, y0 + len - dy);
+  best.y0 = lo;
+  best.rows = hi - lo;
+  best.dy = dy;
+  return best;
 }
 
 std::vector<uint8_t> VideoEncoder::Encode(std::span<const uint8_t> pixels, bool redraw, size_t max_bytes) {
@@ -3649,6 +3756,12 @@ public:
     arms_[arm].store = available;
   }
 
+  void SetFirmware(int minor, int patch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fw_minor_ = uint8_t(minor);
+    fw_patch_ = uint8_t(patch);
+  }
+
   void DropLink(int arm, int ms) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -3998,7 +4111,7 @@ private:
   }
 
   void HelloBody(Arm &a, std::vector<uint8_t> &m) {
-    m.insert(m.end(), {5, 0, 5, 0});
+    m.insert(m.end(), {5, 0, fw_minor_, fw_patch_});
     m.push_back(a.index == 0 ? 1 : 0);
     m.push_back(uint8_t(0x02 | 0x04 | (a.panel_on ? 0x08 : 0) | 0x40 | (a.sensor[VM_P_IN_CASE] == 1 ? 0x80 : 0)));
     m.push_back(HasMic(a) ? 0x04 : 0);
@@ -4353,6 +4466,7 @@ private:
   std::string adapter_;
   Events *events_ = nullptr;
   bool present_[2] = {false, false};
+  uint8_t fw_minor_ = 5, fw_patch_ = 0; // HELLO's version: 0.5.0 unless a test sets another (SetFirmware)
   Arm arms_[2];
   std::vector<uint8_t> snapshot_[2];
   std::mutex mutex_;
@@ -6053,6 +6167,10 @@ void SetMicSignal(int arm, double hz, double peak) {
 }
 
 void HoldMicRenewals(bool hold) { g_hold_renewals = hold; }
+
+void SetFirmware(int minor, int patch) {
+  if (g_emulator) g_emulator->SetFirmware(minor, patch);
+}
 
 void SetAssetStore(int arm, bool available) {
   if (g_emulator && (arm == 0 || arm == 1)) g_emulator->SetAssetStore(arm, available);
