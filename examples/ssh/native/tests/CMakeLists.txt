@@ -25,3 +25,5 @@ target_link_libraries(videox_test PRIVATE scouter_kit Threads::Threads)
 add_test(NAME videox COMMAND videox_test)
 add_executable(videox_fuzz ${SCOUTER_KIT}/tests/videox_fuzz.c ${SCOUTER_KIT}/src/vm/vm_gfx.c)
 add_test(NAME videox_fuzz COMMAND videox_fuzz 50000)
+# strict C11 (as the VM core's own builds): with GNU extensions glibc declares getw, which vm_test defines
+set_target_properties(vm_test videox_fuzz PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
