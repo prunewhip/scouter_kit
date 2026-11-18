@@ -803,6 +803,26 @@ bool VideoEncoder::Move(int y0, int rows, int dy) {
   return true;
 }
 
+bool VideoEncoder::MoveRect(int x, int y, int w, int h, int dx, int dy) {
+  if (prev_.empty() || w < 1 || h < 1 || x < 0 || y < 0 || x + w > w_ || y + h > h_ || x + dx < 0 || y + dy < 0 ||
+      x + dx + w > w_ || y + dy + h > h_)
+    return false;
+  const size_t nb = size_t(nb_);
+  std::vector<uint8_t> tmp(size_t(w) * size_t(h));
+  for (int r = 0; r < h; r++)
+    for (int c = 0; c < w; c++) {
+      int sx = x + c;
+      tmp[size_t(r) * size_t(w) + size_t(c)] = prev_[size_t(y + r) * nb + size_t(sx) / 8] >> (7 - sx % 8) & 1;
+    }
+  for (int r = 0; r < h; r++)
+    for (int c = 0; c < w; c++) {
+      int tx = x + dx + c;
+      uint8_t &b = prev_[size_t(y + dy + r) * nb + size_t(tx) / 8];
+      b = uint8_t((b & ~(0x80 >> (tx % 8))) | (tmp[size_t(r) * size_t(w) + size_t(c)] << (7 - tx % 8)));
+    }
+  return true;
+}
+
 PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes, Coding coding)
     : w_(width), h_(height), n_(planes), coding_(coding) {
   if (w_ < 1 || w_ > kPanelW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
@@ -848,16 +868,61 @@ std::vector<uint8_t> PlaneVideoEncoder::PixelPlane(const std::vector<uint8_t> &c
 }
 
 std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, bool redraw, RowMove move,
-                                               size_t max_bytes, bool scale2) {
+                                               size_t max_bytes, bool scale2, BlockMove block, const Sprite &sprite) {
   if (n_ == 0) return {};
   const size_t px = size_t(w_) * size_t(h_);
   const uint8_t mask = uint8_t((1u << n_) - 1);
+  if (block.w && (block.w < 1 || block.h < 1 || block.x < 0 || block.y < 0 || block.x + block.w > w_ ||
+                  block.y + block.h > h_ || block.x + block.dx < 0 || block.y + block.dy < 0 ||
+                  block.x + block.dx + block.w > w_ || block.y + block.dy + block.h > h_))
+    return {};
   std::vector<uint8_t> out = {uint8_t((move.rows ? 1 : 0) | (redraw ? 2 : 0) | (scale2 ? 4 : 0) |
-                                      (coding_ == kPixels ? 8 : 0)),
+                                      (coding_ == kPixels ? 8 : 0) | (block.w ? 16 : 0) | (sprite.on ? 32 : 0)),
                               uint8_t(n_)};
+  // the extension fields after the row move (written below, after it)
+  std::vector<uint8_t> ext;
+  auto p16 = [&](int v) {
+    ext.push_back(uint8_t(v));
+    ext.push_back(uint8_t(unsigned(v) >> 8));
+  };
+  if (block.w) {
+    for (int v : {block.x, block.y, block.w, block.h, block.dx & 0xFFFF, block.dy & 0xFFFF}) p16(v);
+  }
+  if (sprite.on) {
+    for (int v : {sprite.rx, sprite.ry, sprite.rw, sprite.rh, sprite.x & 0xFFFF, sprite.y & 0xFFFF}) p16(v);
+    for (int k = 0; k < 4; k++) ext.push_back(uint8_t(sprite.address >> (8 * k)));
+  }
+  // the frame the arm will hold before decoding: the row move, then the block move
+  std::vector<uint8_t> base = last_;
+  auto shift = [&](std::vector<uint8_t> &img) {
+    if (move.rows) {
+      std::vector<uint8_t> t = img;
+      for (int y = move.y0; y < move.y0 + move.rows; y++) {
+        int sy = y - move.dy;
+        if (sy >= move.y0 && sy < move.y0 + move.rows)
+          std::copy_n(t.begin() + std::ptrdiff_t(sy) * w_, w_, img.begin() + std::ptrdiff_t(y) * w_);
+      }
+    }
+    if (block.w) {
+      std::vector<uint8_t> t = img;
+      for (int r = 0; r < block.h; r++)
+        for (int c = 0; c < block.w; c++)
+          img[size_t(block.y + block.dy + r) * size_t(w_) + size_t(block.x + block.dx + c)] =
+              t[size_t(block.y + r) * size_t(w_) + size_t(block.x + c)];
+    }
+  };
   if (coding_ == kPixels) {
-    if (move.rows) return {}; // pixel coding has no row move: the previous frame is its context already
-    std::vector<uint8_t> cur(px), prev = last_;
+    if (move.rows) {
+      if (move.y0 < 0 || move.rows < 2 || move.y0 + move.rows > h_ || move.dy == 0 || std::abs(move.dy) >= move.rows)
+        return {};
+      for (int v : {move.y0, move.rows, move.dy & 0xFFFF}) {
+        out.push_back(uint8_t(v));
+        out.push_back(uint8_t(v >> 8));
+      }
+    }
+    out.insert(out.end(), ext.begin(), ext.end());
+    shift(base);
+    std::vector<uint8_t> cur(px), prev = base;
     for (size_t i = 0; i < px; i++) cur[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
     auto pp = pp_;
     std::vector<std::vector<uint8_t>> recs(static_cast<size_t>(n_));
@@ -883,10 +948,12 @@ std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, b
       out.push_back(uint8_t(v >> 8));
     }
   }
+  out.insert(out.end(), ext.begin(), ext.end());
   std::vector<VideoEncoder> enc = enc_; // committed only when the whole record fits
   std::vector<uint8_t> plane(px);
   for (int p = 0; p < n_; p++) {
     if (move.rows) enc[size_t(p)].Move(move.y0, move.rows, move.dy);
+    if (block.w) enc[size_t(p)].MoveRect(block.x, block.y, block.w, block.h, block.dx, block.dy);
     for (size_t i = 0; i < px; i++) plane[i] = i < index.size() ? uint8_t(index[i] >> p & 1) : 0;
     size_t left = max_bytes > out.size() + 3 ? max_bytes - out.size() - 3 : 0;
     std::vector<uint8_t> r = enc[size_t(p)].Encode(plane, redraw, left);
@@ -900,6 +967,100 @@ std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, b
   enc_ = std::move(enc);
   for (size_t i = 0; i < px; i++) last_[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
   return out;
+}
+
+BlockMove PlaneVideoEncoder::FindBlockMove(std::span<const uint8_t> index, int min_tiles) const {
+  BlockMove best;
+  const int T = 16, w = w_, h = h_;
+  if (n_ == 0 || index.size() < size_t(w) * size_t(h) || w < 2 * T || h < 2 * T) return best;
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  auto now = [&](int x, int y) { return uint8_t(index[size_t(y) * size_t(w) + size_t(x)] & mask); };
+  auto old = [&](int x, int y) { return last_[size_t(y) * size_t(w) + size_t(x)]; };
+  // the changed area: tiles of this frame there are looked up
+  int cx0 = w, cy0 = h, cx1 = 0, cy1 = 0;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      if (now(x, y) != old(x, y)) cx0 = std::min(cx0, x), cx1 = std::max(cx1, x + 1), cy0 = std::min(cy0, y), cy1 = std::max(cy1, y + 1);
+  if (cx1 <= cx0) return best;
+  // 2-D rolling hash of every T x T window of the last frame (rows, then columns)
+  const uint64_t B1 = 1000003, B2 = 998244353;
+  uint64_t p1 = 1, p2 = 1;
+  for (int i = 0; i < T; i++) p1 *= B1, p2 *= B2;
+  const int ww = w - T + 1, hh = h - T + 1;
+  std::vector<uint64_t> rowh(size_t(h) * size_t(ww));
+  for (int y = 0; y < h; y++) {
+    uint64_t v = 0;
+    for (int x = 0; x < w; x++) {
+      v = v * B1 + old(x, y) + 1;
+      if (x >= T) v -= (uint64_t(old(x - T, y)) + 1) * p1;
+      if (x >= T - 1) rowh[size_t(y) * size_t(ww) + size_t(x - T + 1)] = v;
+    }
+  }
+  std::vector<std::pair<uint64_t, uint32_t>> win;
+  win.reserve(size_t(ww) * size_t(hh));
+  for (int x = 0; x < ww; x++) {
+    uint64_t v = 0;
+    for (int y = 0; y < h; y++) {
+      v = v * B2 + rowh[size_t(y) * size_t(ww) + size_t(x)];
+      if (y >= T) v -= rowh[size_t(y - T) * size_t(ww) + size_t(x)] * p2;
+      if (y >= T - 1) win.push_back({v, uint32_t((y - T + 1) << 16 | x)});
+    }
+  }
+  std::sort(win.begin(), win.end());
+  auto tile_hash = [&](int x0, int y0) {
+    uint64_t v = 0;
+    for (int y = y0; y < y0 + T; y++) {
+      uint64_t r = 0;
+      for (int x = x0; x < x0 + T; x++) r = r * B1 + now(x, y) + 1;
+      v = v * B2 + r;
+    }
+    return v;
+  };
+  // votes for displacements from distinctive changed tiles (more than one level in them)
+  std::map<std::pair<int, int>, int> votes;
+  for (int y0 = cy0 / T * T; y0 + T <= std::min(h, cy1 + T - 1); y0 += T)
+    for (int x0 = cx0 / T * T; x0 + T <= std::min(w, cx1 + T - 1); x0 += T) {
+      uint8_t first = now(x0, y0);
+      bool flat = true;
+      for (int y = y0; y < y0 + T && flat; y++)
+        for (int x = x0; x < x0 + T && flat; x++) flat = now(x, y) == first;
+      if (flat) continue;
+      uint64_t hv = tile_hash(x0, y0);
+      auto it = std::lower_bound(win.begin(), win.end(), std::make_pair(hv, uint32_t(0)));
+      for (int k = 0; it != win.end() && it->first == hv && k < 4; ++it, k++) {
+        int ox = int(it->second & 0xFFFF), oy = int(it->second >> 16);
+        if (ox != x0 || oy != y0) votes[{x0 - ox, y0 - oy}]++;
+      }
+    }
+  std::pair<int, int> d{0, 0};
+  int most = 0;
+  for (auto &[k, n] : votes)
+    if (n > most) most = n, d = k;
+  if (most < min_tiles) return best;
+  // the tiles that moved by d (checked exactly), their bounding box as the destination rectangle
+  int x0 = w, y0 = h, x1 = 0, y1 = 0, n = 0;
+  for (int ty = 0; ty + T <= h; ty += T)
+    for (int tx = 0; tx + T <= w; tx += T) {
+      int sx = tx - d.first, sy = ty - d.second;
+      if (sx < 0 || sy < 0 || sx + T > w || sy + T > h) continue;
+      bool eq = true, changed = false;
+      for (int y = 0; y < T && eq; y++)
+        for (int x = 0; x < T && eq; x++) {
+          eq = now(tx + x, ty + y) == old(sx + x, sy + y);
+          changed |= now(tx + x, ty + y) != old(tx + x, ty + y);
+        }
+      if (!eq || !changed) continue;
+      x0 = std::min(x0, tx), y0 = std::min(y0, ty), x1 = std::max(x1, tx + T), y1 = std::max(y1, ty + T), n++;
+    }
+  if (n < min_tiles) return best;
+  best.x = x0 - d.first;
+  best.y = y0 - d.second;
+  best.w = x1 - x0;
+  best.h = y1 - y0;
+  best.dx = d.first;
+  best.dy = d.second;
+  if (best.x < 0 || best.y < 0 || best.x + best.w > w || best.y + best.h > h) best = BlockMove{};
+  return best;
 }
 
 RowMove PlaneVideoEncoder::FindMove(std::span<const uint8_t> index, int min_rows) const {

@@ -855,6 +855,9 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	if (x.flags & 1) {
 		vm_videox_move(vm->arena, v, &x, videox_mark, &o);
 	}
+	if (x.flags & VM_VX_BLOCK) {
+		vm_videox_block(vm->arena, v, &x, videox_span, &o);
+	}
 	/* from the top plane down: pixel coding reads the planes above (transition coding does not care) */
 	for (uint32_t p = x.planes; p-- > 0;) {
 		uint32_t pv[10];
@@ -864,6 +867,22 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 		} else {
 			vm_videox_plane(v, &x, p, pv);
 			vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
+		}
+	}
+	if (x.flags & VM_VX_SPRITE) {
+		/* the redraw rectangle and the sprite's rows are drawn whatever the planes did */
+		uint32_t r0 = x.ry, r1 = x.ry + x.rh > hh ? hh : x.ry + x.rh, c1 = x.rx + x.rw > w ? w : x.rx + x.rw;
+
+		for (uint32_t r = r0; x.rw && r < r1 && x.rx < c1; r++) {
+			videox_span(&o, r, x.rx, c1, NULL);
+		}
+		if (x.sx != -32768) {
+			int32_t s0 = x.sy < 0 ? 0 : x.sy, s1 = x.sy + 16 > (int32_t)hh ? (int32_t)hh : x.sy + 16;
+			int32_t c0 = x.sx < 0 ? 0 : x.sx, cx = x.sx + 16 > (int32_t)w ? (int32_t)w : x.sx + 16;
+
+			for (int32_t r = s0; r < s1 && c0 < cx; r++) {
+				videox_span(&o, (uint32_t)r, (uint32_t)c0, (uint32_t)cx, NULL);
+			}
 		}
 	}
 	vm_videox_pairs(vm->arena, v, vm->vxpair);
@@ -919,6 +938,18 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 				}
 				if ((b - a) & 1) {
 					vm->row[(b - a) / 2] &= 0xF0; /* a 0 nibble after an odd last pixel (vm_host.panel_row) */
+				}
+			}
+			if ((x.flags & VM_VX_SPRITE) && x.sx != -32768 && (int32_t)r >= x.sy && (int32_t)r < x.sy + 16) {
+				int64_t p0 = ox + sc * x.sx, p1 = p0 + sc * 16;
+
+				for (int64_t px = p0 > a ? p0 : a; px < (p1 < b ? p1 : b); px++) {
+					int lvl = vm_videox_sprite_at(vm->arena, &x, (int32_t)((px - ox) / sc), (int32_t)r);
+					int64_t i = px - a;
+
+					if (lvl >= 0) {
+						vm->row[i / 2] = (uint8_t)(i & 1 ? (vm->row[i / 2] & 0xF0) | lvl : (vm->row[i / 2] & 0x0F) | lvl << 4);
+					}
 				}
 			}
 			indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);

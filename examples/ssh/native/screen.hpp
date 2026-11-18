@@ -233,6 +233,10 @@ private:
   int levels_ = 0; // the path in use: 16 gray, 2 video, 1 VIDEOX (greys as planes), 0 none
   int want_levels_ = 0; // the levels the options asked for (a rebooted arm starts that path again)
   std::vector<uint8_t> exact_; // auto greys: the last full-detail picture, to tell motion from stillness
+  size_t Tune();                // the moving frames' budget, self-tuned to the link (mutex_ held)
+  size_t tuned_budget_ = 4096;
+  int calm_frames_ = 0;
+  bool link_busy_ = false;
   int moving_frames_ = 0;      // frames in a row with most rows changed
   int64_t moving_until_us_ = 0;
   scouter_kit::gray::Bitmap *pic_ = nullptr;

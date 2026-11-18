@@ -49,9 +49,21 @@ int main(int argc, char **argv)
 			for (uint32_t i = 0; i < len; i++) a[v[7] + i] = (uint8_t)rnd();
 			if (len >= 2 && rndn(4)) {   /* a well-formed header most of the time */
 				uint32_t pos = v[7] + 2, left;
-				a[v[7]] = (uint8_t)rndn(16);   /* move, redraw, scale 2, pixel coding */
+				a[v[7]] = (uint8_t)rndn(64);   /* move, redraw, scale 2, pixel coding, block move, sprite */
 				a[v[7] + 1] = (uint8_t)planes;
 				if (a[v[7]] & 1) pos += 6;
+				if ((a[v[7]] & 16) && pos + 12 <= v[7] + len && rndn(2)) {   /* a valid block, often */
+					uint32_t W = v[2] ? v[2] : 1, H = v[3] ? v[3] : 1, bw = 1 + rndn(W), bh = 1 + rndn(H);
+					uint32_t bx = rndn(W - bw + 1), by = rndn(H - bh + 1), tx = rndn(W - bw + 1), ty = rndn(H - bh + 1);
+					uint16_t f6[6] = {(uint16_t)bx, (uint16_t)by, (uint16_t)bw, (uint16_t)bh, (uint16_t)(tx - bx), (uint16_t)(ty - by)};
+					memcpy(a + pos, f6, 12);
+				}
+				if (a[v[7]] & 16) pos += 12;
+				if ((a[v[7]] & 32) && pos + 16 <= v[7] + len && rndn(2)) {   /* a sprite inside the arena, often */
+					uint32_t sp = 0x3FF80 + rndn(0x40);
+					memcpy(a + pos + 12, &sp, 4);
+				}
+				if (a[v[7]] & 32) pos += 16;
 				for (int p = 0; p < planes && pos + 3 <= v[7] + len; p++) {
 					left = v[7] + len - pos - 3;
 					uint32_t l = p == planes - 1 && rndn(2) ? left : 1 + rndn(left ? left : 1);
@@ -67,6 +79,8 @@ int main(int argc, char **argv)
 			continue;
 		}
 		if (x.flags & 1) vm_videox_move(a, v, &x, mark, NULL);
+		if (x.flags & VM_VX_BLOCK) vm_videox_block(a, v, &x, span, NULL);
+		for (int k = 0; k < 8; k++) (void)vm_videox_sprite_at(a, &x, (int32_t)rndn(700) - 30, (int32_t)rndn(520) - 20);
 		for (uint32_t p = x.planes; p-- > 0;) {
 			uint32_t pv[10];
 			if (x.flags & VM_VX_PIXELS) {

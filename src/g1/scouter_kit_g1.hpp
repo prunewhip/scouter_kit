@@ -251,6 +251,10 @@ class VideoEncoder {
   // False, and nothing changes, unless 0 <= y0, y0 + rows <= height and
   // 0 < |dy| < rows.
   bool Move(int y0, int rows, int dy);
+  // VIDEOX's block move (0.5.66+): the rectangle (x, y, w, h) moves by (dx, dy)
+  // in the frame the arm holds. False, nothing changed, unless both rectangles
+  // lie inside the frame.
+  bool MoveRect(int x, int y, int w, int h, int dx, int dy);
 
  private:
   int w_, h_, nb_;
@@ -269,6 +273,16 @@ class VideoEncoder {
 struct RowMove {
   int y0 = 0, rows = 0, dy = 0; // rows == 0: none
 };
+// VIDEOX's block move and sprite (g1v0 0.5.66+).
+struct BlockMove {
+  int x = 0, y = 0, w = 0, h = 0, dx = 0, dy = 0; // w == 0: none
+};
+struct Sprite {
+  bool on = false;            // false: no redraw rectangle and no sprite
+  int rx = 0, ry = 0, rw = 0, rh = 0; // drawn whatever changed (where the sprite was)
+  int x = -32768, y = 0;      // the sprite's place (-32768: none)
+  uint32_t address = 0;       // its 64 bytes: 16 rows of u16 mask, u16 ink, big-endian
+};
 class PlaneVideoEncoder {
  public:
   // kTransitions: every plane an ordinary VIDEO stream (text, UI, cartoons);
@@ -284,7 +298,13 @@ class PlaneVideoEncoder {
   // over max_bytes.
   // scale2 (0.5.64+): the arm draws the planes at twice their size.
   std::vector<uint8_t> Encode(std::span<const uint8_t> index, bool redraw = false, RowMove move = {},
-                              size_t max_bytes = SIZE_MAX, bool scale2 = false);
+                              size_t max_bytes = SIZE_MAX, bool scale2 = false, BlockMove block = {},
+                              const Sprite &sprite = Sprite{});
+  // A rectangle of the last encoded frame that this one shows moved (a dragged
+  // window, a sideways scroll): 16 x 16 tiles of this frame found anywhere in
+  // the last one, the displacement most of them agree on, the rectangle they
+  // cover. w == 0 when none covers min_tiles tiles.
+  BlockMove FindBlockMove(std::span<const uint8_t> index, int min_tiles = 4) const;
   // The vertical shift that turns most of the last encoded frame into this
   // one (scrolling), as a move; rows == 0 when none covers at least
   // min_rows rows.

@@ -25,7 +25,8 @@ constexpr uint32_t kRecordMax = 65536; // the largest record sent; a larger chan
 constexpr uint32_t kCodeX = 768;        // the VIDEOX path's stored code (table, pool, three calls)
 constexpr uint32_t kRecordMaxX = 49152; // VIDEOX's largest record (its planes take most of the arena)
 constexpr int64_t kMotionHoldUs = 300000; // auto greys: the motion mode lasts this long after the last moving frame
-constexpr size_t kMotionBudget = 4096;    // ... and a moving frame's record stays this small (about 10 fps)
+constexpr size_t kMotionBudget = 4096;    // ... and a moving frame's record starts this small (about 10 fps)
+constexpr size_t kTuneMin = 1536, kTuneMax = 8192; // the self-tuned budget's range
 // The motion stream (0.5.64's pixel coding at half size, scale 2): measured through this mirror on real video it
 // saved only ~9% on camera footage and cost ~1.8x on cartoons against the top-planes trick, so it is off until the
 // encoder picks the smaller coding per frame.
@@ -971,6 +972,9 @@ bool ScreenMirror::StartVideoX(int planes) {
     LOG("screen: motion stream %d x %d, pixel coded, drawn at scale 2", v.mw, v.mh);
   }
   v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
+  tuned_budget_ = kMotionBudget;
+  calm_frames_ = 0;
+  link_busy_ = false;
   v.pix.assign(size_t(w_) * h_, 0);
   v.shown.assign(size_t(w_) * h_, 0);
   v.k = 0;
@@ -1054,6 +1058,7 @@ int ScreenMirror::VideoReady() {
     if (!st.present) continue;
     if (!st.connected || st.queued > kQueued) {
       stats_.busy++;
+      link_busy_ = true; // the link could not keep up: moving frames get smaller (Tune)
       return kBusy;
     }
     if (st.epoch_changes != v.epochs[size_t(i)]) {
@@ -1471,6 +1476,21 @@ int ScreenMirror::FrameVideo(const ScreenOptions &o, Rect c, bool still) {
   return kBusy;
 }
 
+// Self-tuning: a moving frame's budget follows the link. A frame that found the link still busy shrinks it by a
+// fifth (down to kTuneMin), five frames in a row that did not grow it by 256 bytes (up to kTuneMax): moving frames
+// stay as large as the link carries at the frame rate, so nothing waits behind them (the newest frame wins).
+size_t ScreenMirror::Tune() {
+  if (link_busy_) {
+    tuned_budget_ = std::max(kTuneMin, tuned_budget_ * 4 / 5);
+    calm_frames_ = 0;
+  } else if (++calm_frames_ >= 5) {
+    tuned_budget_ = std::min(kTuneMax, tuned_budget_ + 256);
+    calm_frames_ = 0;
+  }
+  link_busy_ = false;
+  return tuned_budget_;
+}
+
 // A frame on the grey fast path (VIDEOX), the link ready (mutex_ held): as FrameVideo, with 16 levels kept steady
 // (a pixel changes only by more than one level) so noise does not cost planes.
 int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
@@ -1509,7 +1529,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       return kBusy;
     }
     if (now < moving_until_us_) {
-      size_t budget = std::min<size_t>(v.room, kMotionBudget);
+      size_t budget = std::min<size_t>(v.room, Tune());
       for (int n = 2; n <= 4; n++) {
         Make(o, c, n);
         Compose();

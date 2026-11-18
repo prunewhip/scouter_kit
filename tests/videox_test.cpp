@@ -37,6 +37,7 @@ static int decode(std::vector<uint8_t> &a, uint32_t bmp, uint32_t stride, int w,
   int err = vm_videox_check(a.data(), v, &x, &detail);
   if (err) return err;
   if (x.flags & 1) vm_videox_move(a.data(), v, &x, noop_mark, nullptr);
+  if (x.flags & VM_VX_BLOCK) vm_videox_block(a.data(), v, &x, noop_span, nullptr);
   for (uint32_t p = x.planes; p-- > 0;) { // top down, as the VM
     uint32_t pv[10];
     if (x.flags & VM_VX_PIXELS) {
@@ -132,6 +133,39 @@ int main() {
       }
     }
     std::printf("pixel coding: %zu bytes vs %zu with transitions on smooth moving grey frames\n", pbytes, tbytes);
+  }
+  // a dragged window (0.5.66+): FindBlockMove finds it, the block move carries it, every frame decodes exactly
+  for (int coding = 0; coding < 2; coding++) {
+    const int w = 320, h = 200, n = 2;
+    auto kind = coding ? scouter_kit::g1::PlaneVideoEncoder::kPixels : scouter_kit::g1::PlaneVideoEncoder::kTransitions;
+    scouter_kit::g1::PlaneVideoEncoder enc(w, h, n, kind), plain(w, h, n, kind);
+    std::vector<uint8_t> a(VM_ARENA_SIZE, 0);
+    uint32_t stride = uint32_t(enc.Stride()), bmp = 0x100, st = bmp + uint32_t(n) * h * stride + 4;
+    uint32_t src = st + uint32_t(n) * scouter_kit::g1::PlaneVideoEncoder::kPixelState + 4, lv = 0x3FF00;
+    for (int i = 0; i < 16; i++) a[lv + uint32_t(i)] = uint8_t(i);
+    std::mt19937 rr(5);
+    std::vector<uint8_t> winpix(size_t(120) * 80);
+    for (auto &q : winpix) q = uint8_t(rr() % 4);
+    size_t with = 0, without = 0;
+    int found = 0;
+    for (int f = 0; f < 8; f++) {
+      int wx = 20 + 17 * f, wy = 30 + 9 * f;
+      std::vector<uint8_t> idx(size_t(w) * h, 1);
+      for (int y = 0; y < 80; y++)
+        for (int x = 0; x < 120; x++) idx[size_t(wy + y) * w + size_t(wx + x)] = winpix[size_t(y) * 120 + size_t(x)];
+      scouter_kit::g1::BlockMove b = f ? enc.FindBlockMove(idx) : scouter_kit::g1::BlockMove{};
+      if (b.w) found++;
+      std::vector<uint8_t> rec = enc.Encode(idx, f == 0, {}, SIZE_MAX, false, b);
+      std::vector<uint8_t> prec = plain.Encode(idx, f == 0);
+      CHECK(!rec.empty());
+      CHECK(decode(a, bmp, stride, w, h, lv, src, rec, st) == 0);
+      CHECK(planes_match(a, bmp, stride, w, h, n, idx));
+      if (f) with += rec.size(), without += prec.size();
+    }
+    std::printf("dragged window (%s): found %d of 7 moves, %zu bytes with block moves vs %zu without\n",
+                coding ? "pixels" : "transitions", found, with, without);
+    CHECK(found >= 6);
+    CHECK(with * 3 < without);
   }
   // bad moves are refused without changing anything
   scouter_kit::g1::PlaneVideoEncoder e(16, 16, 2);

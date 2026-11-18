@@ -50,6 +50,10 @@ class PhoneScreen(
     private var previewAt = 0L
     private var previewDirty = true
     private var previewWanted = false
+    // Not needed (another source on the glasses, or the panels hidden by heads-up or the case) for PAUSE_MS: the
+    // virtual display stops rendering (no surface); the newest image is kept, and it goes again at once when needed.
+    private var unneededSince = 0L
+    private var detached = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -87,11 +91,13 @@ class PhoneScreen(
         handler.postDelayed(tick, 300)
     }
 
-    // The screen at its own resolution (up to 2400 px on the long side): zoom and the band then have every
-    // pixel to work with; the native side averages them down.
+    // The screen at up to 1280 px on the long side (more than twice the glasses' 480 rows: the native side still
+    // averages every glasses pixel from several), up to 2400 px when zoomed in, where every pixel counts. Less to
+    // render and to read: less phone CPU and battery, and less lag.
     private fun captureSize(): Pair<Int, Int> {
         val b = context.getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
-        val scale = minOf(1f, 2400f / maxOf(b.width(), b.height()))
+        val longest = if (settings.screenZoom > 100) 2400f else 1280f
+        val scale = minOf(1f, longest / maxOf(b.width(), b.height()))
         return ((b.width() * scale).toInt() / 2 * 2).coerceAtLeast(2) to ((b.height() * scale).toInt() / 2 * 2).coerceAtLeast(2)
     }
 
@@ -108,8 +114,27 @@ class PhoneScreen(
         val r = ImageReader.newInstance(size.first, size.second, PixelFormat.RGBA_8888, 3)
         reader = r
         display?.resize(size.first, size.second, context.resources.displayMetrics.densityDpi)
-        display?.surface = r.surface
+        if (!detached) display?.surface = r.surface
         old?.close()
+    }
+
+    private fun capture(on: Boolean) {
+        if (on == !detached) return
+        detached = !on
+        display?.surface = if (on) reader?.surface else null
+        Log.i(ScouterService.TAG, "screen: capture ${if (on) "on again" else "paused (the glasses do not show it)"}")
+    }
+
+    private fun unneeded(yes: Boolean) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (!yes) {
+            unneededSince = 0L
+            capture(true)
+        } else if (unneededSince == 0L) {
+            unneededSince = now
+        } else if (now - unneededSince > PAUSE_MS) {
+            capture(false)
+        }
     }
 
     private fun grab() {
@@ -132,10 +157,12 @@ class PhoneScreen(
         if (!mine) {
             state = Native.SCREEN_STOPPED
             due = true // back on the glasses later: this image goes again
+            unneeded(true)
             return
         }
         if (due) {
             state = Native.screenFrame(plane.buffer, image.width, image.height, plane.rowStride, options)
+            unneeded(state == Native.SCREEN_HIDDEN)
             // Again later: the link was busy, a coarser version went, the panels are off (in the case), or the
             // glasses show something else now.
             due = state == Native.SCREEN_BUSY || state == Native.SCREEN_LATER || state == Native.SCREEN_STOPPED ||
@@ -195,5 +222,9 @@ class PhoneScreen(
         display = null
         reader = null
         thread.quitSafely()
+    }
+
+    companion object {
+        const val PAUSE_MS = 2000L
     }
 }

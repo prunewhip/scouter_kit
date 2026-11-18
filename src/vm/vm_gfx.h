@@ -88,16 +88,29 @@ void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t leve
 #define VM_VIDEOX_PLANES 4
 #define VM_VX_SCALE2 4             /* record flag: the planes are drawn at twice their size */
 #define VM_VX_PIXELS 8             /* record flag: every plane is pixel coded (vm_videox_pixels) */
+#define VM_VX_BLOCK 16             /* record flag: a rectangle of every plane moves by (dx, dy) (window drags) */
+#define VM_VX_SPRITE 32            /* record flag: a redraw rectangle and a 16 x 16 sprite (the pointer) */
+#define VM_VIDEOX_MAXW 2048        /* pixel-coded planes may be wider than the panel (a canvas the arm pans) */
 #define VM_VIDEOX_PIX_STATE 4100u  /* a pixel-coded plane's state: 2050 u16 probabilities */
 struct vm_videox {
 	uint32_t planes, flags, y0, rows;
 	int32_t dy;
+	uint32_t bx, by, bw, bh;  /* block move: the source rectangle */
+	int32_t bdx, bdy;         /* ... and its displacement */
+	uint32_t rx, ry, rw, rh;  /* redraw rectangle (rw or rh 0: none) */
+	int32_t sx, sy;           /* sprite position (sx = -32768: none) */
+	uint32_t sprite;          /* sprite: 16 rows of u16 mask, u16 ink (big-endian, bit 15 the left pixel) */
 	uint32_t at[VM_VIDEOX_PLANES], len[VM_VIDEOX_PLANES];   /* each plane's record */
 	uint32_t plane[VM_VIDEOX_PLANES], state[VM_VIDEOX_PLANES]; /* from the tables */
 };
 typedef void vm_mark_fn(void *ctx, uint32_t y);
 int vm_videox_check(const uint8_t *arena, const uint32_t *v, struct vm_videox *x, uint32_t *detail);
 void vm_videox_move(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx);
+/* the block move (VM_VX_BLOCK): every plane's rectangle to its new place (overlap safe); span gets each destination
+ * row's changed part */
+void vm_videox_block(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_span_fn *span, void *ctx);
+/* the sprite's level for plane pixel (px, py): 0..15, or -1 where it is transparent or outside it */
+int vm_videox_sprite_at(const uint8_t *arena, const struct vm_videox *x, int32_t px, int32_t py);
 void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv);
 /* pixel coding (VM_VX_PIXELS): plane p's record decoded in place, spans as vm_video_decode's; planes are decoded
  * from the top one down (the context reads the planes above); compose2: scale 2, one byte (two pixels) a pixel */
