@@ -96,8 +96,10 @@ typedef void vm_mark_fn(void *ctx, uint32_t y);
 int vm_videox_check(const uint8_t *arena, const uint32_t *v, struct vm_videox *x, uint32_t *detail);
 void vm_videox_move(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx);
 void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv);
-void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t y, uint32_t x0,
-		       uint32_t x1, uint8_t *out);
+/* pair: 256 bytes from vm_videox_pairs (two pixels' levels for a byte of two indices), made once per VIDEOX */
+void vm_videox_pairs(const uint8_t *arena, const uint32_t *v, uint8_t *pair);
+void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, const uint8_t *pair,
+		       uint32_t y, uint32_t x0, uint32_t x1, uint8_t *out);
 
 #ifdef __cplusplus
 }

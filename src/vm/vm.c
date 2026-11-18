@@ -861,6 +861,7 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 		vm_videox_plane(v, &x, p, pv);
 		vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
 	}
+	vm_videox_pairs(vm->arena, v, vm->vxpair);
 	bx0 = ox < 0 ? 0 : ox;
 	by0 = oy < 0 ? 0 : oy;
 	bx1 = ox + w > VM_PANEL_W ? VM_PANEL_W : ox + w;
@@ -892,7 +893,7 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 				break;
 			}
 		}
-		vm_videox_compose(vm->arena, v, &x, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
+		vm_videox_compose(vm->arena, v, &x, vm->vxpair, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
 		indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
 		(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
 	}

@@ -1138,17 +1138,55 @@ void vm_videox_move(uint8_t *a, const uint32_t *v, const struct vm_videox *x, vm
 	}
 }
 
-void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, uint32_t y, uint32_t x0,
-		       uint32_t x1, uint8_t *out)
+/* bit i of a byte (pixel 7 - i of 8) to bit 4i of a word: the 8 pixels as 8 nibbles, pixel 0 in the top one */
+#define SP(b) ((uint32_t)((b) & 1) | (uint32_t)((b) >> 1 & 1) << 4 | (uint32_t)((b) >> 2 & 1) << 8 | \
+	       (uint32_t)((b) >> 3 & 1) << 12 | (uint32_t)((b) >> 4 & 1) << 16 | (uint32_t)((b) >> 5 & 1) << 20 | \
+	       (uint32_t)((b) >> 6 & 1) << 24 | (uint32_t)((b) >> 7 & 1) << 28)
+#define SP4(b) SP(b), SP((b) + 1), SP((b) + 2), SP((b) + 3)
+#define SP16(b) SP4(b), SP4((b) + 4), SP4((b) + 8), SP4((b) + 12)
+#define SP64(b) SP16(b), SP16((b) + 16), SP16((b) + 32), SP16((b) + 48)
+static const uint32_t v_spread[256] = {SP64(0), SP64(64), SP64(128), SP64(192)};
+
+void vm_videox_pairs(const uint8_t *a, const uint32_t *v, uint8_t *pair)
+{
+	const uint8_t *lv = a + v[6];
+
+	for (uint32_t i = 0; i < 256; i++) {
+		pair[i] = (uint8_t)((lv[i >> 4] & 15) << 4 | (lv[i & 15] & 15));
+	}
+}
+
+/* 8 pixels from x of a 1-bpp row (x + 8 <= the row's pixels) */
+static inline uint32_t get8(const uint8_t *row, uint32_t x)
+{
+	uint32_t i = x >> 3, s = x & 7;
+
+	return s ? (uint32_t)(row[i] << s | row[i + 1] >> (8 - s)) & 0xFF : row[i];
+}
+
+void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, const uint8_t *pair,
+		       uint32_t y, uint32_t x0, uint32_t x1, uint8_t *out)
 {
 	const uint8_t *lv = a + v[6];
 	const uint8_t *row[VM_VIDEOX_PLANES];
-	uint32_t planes = xl->planes;
+	uint32_t planes = xl->planes, x = x0;
 
 	for (uint32_t p = 0; p < planes; p++) {
 		row[p] = a + xl->plane[p] + y * v[1];
 	}
-	for (uint32_t x = x0; x < x1; x += 2, out++) {
+	/* 8 pixels at a time: each plane's 8 bits spread to nibbles, the 4 index pairs through the pair table */
+	for (; x + 8 <= x1; x += 8, out += 4) {
+		uint32_t idx = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			idx |= v_spread[get8(row[p], x)] << p;
+		}
+		out[0] = pair[idx >> 24];
+		out[1] = pair[idx >> 16 & 0xFF];
+		out[2] = pair[idx >> 8 & 0xFF];
+		out[3] = pair[idx & 0xFF];
+	}
+	for (; x < x1; x += 2, out++) {
 		uint32_t i0 = 0, i1 = 0;
 
 		for (uint32_t p = 0; p < planes; p++) {
@@ -1157,6 +1195,6 @@ void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_vide
 				i1 |= get1(row[p], (int32_t)x + 1) << p;
 			}
 		}
-		*out = (uint8_t)(lv[i0] << 4 | (x + 1 < x1 ? lv[i1] : 0));
+		*out = (uint8_t)((lv[i0] & 15) << 4 | (x + 1 < x1 ? lv[i1] & 15 : 0));
 	}
 }

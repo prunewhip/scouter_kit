@@ -74,7 +74,7 @@ int main(int argc, char **argv)
 		}
 		for (uint32_t y = 0; y < v[3]; y++) {
 			uint32_t x0 = rndn(v[2]), x1 = x0 + 1 + rndn(v[2] - x0);
-			vm_videox_compose(a, v, &x, y, x0, x1, out);
+			{ uint8_t pair[256]; vm_videox_pairs(a, v, pair); vm_videox_compose(a, v, &x, pair, y, x0, x1, out); }
 		}
 		ok++;
 	}
