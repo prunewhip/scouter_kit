@@ -24,6 +24,8 @@ constexpr uint32_t kPtrWords = 16;     // the cursor's words: X, Y, On (the host
 constexpr uint32_t kRecordMax = 65536; // the largest record sent; a larger change waits for a smaller one
 constexpr uint32_t kCodeX = 512;        // the VIDEOX path's stored code (table, pool, two calls)
 constexpr uint32_t kRecordMaxX = 49152; // VIDEOX's largest record (its planes take most of the arena)
+constexpr int64_t kMotionHoldUs = 300000; // auto greys: the motion mode lasts this long after the last moving frame
+constexpr size_t kMotionBudget = 4096;    // ... and a moving frame's record stays this small (about 10 fps)
 constexpr uint32_t kHeader = 12;       // due time, frame number, record size
 constexpr int kQueued = 4;             // commands not yet sent on an arm's link: more, and a frame is skipped
 
@@ -904,6 +906,7 @@ bool ScreenMirror::StartVideoX(int planes) {
   }
   v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
   v.pix.assign(size_t(w_) * h_, 0);
+  v.shown.assign(size_t(w_) * h_, 0);
   v.k = 0;
   v.moves = 0;
   v.redraw = true;
@@ -912,9 +915,10 @@ bool ScreenMirror::StartVideoX(int planes) {
 
 // frame_ as a VIDEOX record to both arms, drawn at the same due time, with a row move when the picture scrolled;
 // false (nothing sent, the encoder as it was) when larger than max_bytes.
-bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m) {
+bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready) {
   Video &v = video_;
-  for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
+  if (!pix_ready)
+    for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
   std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw, m, std::min<size_t>(max_bytes, v.room));
   if (rec.empty()) return false;
   if (m.rows) {
@@ -937,6 +941,7 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m) {
   v.redraw = false;
   v.k++;
   v.sent = int(msg.size());
+  v.shown = v.pix;
   return true;
 }
 
@@ -1374,6 +1379,41 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   bool redraw = video_.redraw;
   Video &v = video_;
   g1::RowMove move;
+  // Auto (detail 0) at 16 greys: while most of the picture keeps changing (video, games), the top two planes at
+  // half detail and the low two left as the arms hold them (each pixel within 3 of its 16 levels: about a
+  // quarter of the bytes); 300 ms after the motion stops the exact picture follows (the refinement, below).
+  if (o.detail == 0 && v.planes == 4 && !redraw && prev_.size() == size_t(w_) * size_t(h_)) {
+    Make(o, c, 1);
+    Compose();
+    int64_t now = g1::NowUs();
+    if (exact_.size() == frame_.size()) {
+      int rows = 0;
+      for (int y = 0; y < h_; y++)
+        rows += std::memcmp(frame_.data() + size_t(y) * size_t(w_), exact_.data() + size_t(y) * size_t(w_), size_t(w_)) != 0;
+      if (rows * 10 > h_ * 4) {
+        if (++moving_frames_ >= 2) moving_until_us_ = now + kMotionHoldUs;
+      } else {
+        moving_frames_ = 0;
+      }
+    }
+    exact_ = frame_;
+    if (now < moving_until_us_) {
+      size_t budget = std::min<size_t>(v.room, kMotionBudget);
+      for (int n = 2; n <= 4; n++) {
+        Make(o, c, n);
+        Compose();
+        if (frame_ == prev_ && prev_detail_ == n) return kLater; // nothing new: the refinement comes when it holds
+        for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = uint8_t((v.index[frame_[i]] & 0xC) | (v.shown[i] & 0x3));
+        if (SendVideoX(n == 4 ? v.room : budget, {}, true)) {
+          prev_ = frame_;
+          prev_detail_ = n;
+          Count(video_.sent, n);
+          return kLater; // the exact picture follows once it holds still
+        }
+      }
+      return kBusy;
+    }
+  }
   // The scroll is found on the exact picture; "steady" (a pixel changed by one level keeps its old one: noise from a
   // camera or video) applies only when nothing scrolled, since it would break the shifted rows' match.
   auto make = [&](int n) {

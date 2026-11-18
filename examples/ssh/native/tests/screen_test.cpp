@@ -3,6 +3,7 @@
 // display after Stop.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <thread>
@@ -469,10 +470,13 @@ int main() {
       int levels = 0;
       for (bool b : seen) levels += b;
       CHECK(levels == 16);
-      const uint8_t *q = g1::emulator::Panel(1);
-      int diff = 0; // the right eye shows the same 100 to the left and 9 lower
-      for (int x = 100; x < 640; x++) diff += p[size_t(240) * 640 + size_t(x)] != q[size_t(249) * 640 + size_t(x - 100)];
-      CHECK(diff == 0);
+      // the right eye shows the same 100 to the left and 9 lower (once it has drawn it)
+      CHECK(WaitFor([] {
+        const uint8_t *l = g1::emulator::Panel(0), *r = g1::emulator::Panel(1);
+        for (int x = 100; x < 640; x++)
+          if (l[size_t(240) * 640 + size_t(x)] != r[size_t(249) * 640 + size_t(x - 100)]) return false;
+        return true;
+      }, 5000));
     }
     // a page of grey "text" lines, then the same page 40 rows further on
     std::vector<uint8_t> page(size_t(gs) * 600);
@@ -497,6 +501,41 @@ int main() {
         if (std::memcmp(p + size_t(y) * 640 + 100, before.data() + size_t(y + 40) * 640 + 100, 540)) return false;
       return true;
     }, 5000));
+    // Auto (detail 0): video-like frames (most rows change) go as the top two planes at half detail, small; once
+    // the picture holds still the exact 16-grey picture follows at full detail.
+    go.detail = 0;
+    int moving = 0, moving_bytes = 0;
+    // video-like: smooth grey shapes that move every frame (most rows change)
+    auto video = [&](int f) {
+      std::vector<uint8_t> p(size_t(gs) * 471);
+      for (int y = 0; y < 471; y++)
+        for (int x = 0; x < 540; x++) {
+          double a = std::sin((x + 9 * f) / 23.0) * std::cos((y - 6 * f) / 17.0);
+          uint8_t g = uint8_t(std::clamp(128.0 + 110.0 * a, 0.0, 255.0));
+          uint8_t *px = &p[size_t(y) * size_t(gs) + size_t(x) * 4];
+          px[0] = px[1] = px[2] = g;
+          px[3] = 255;
+        }
+      return p;
+    };
+    for (int f = 0; f < 8; f++) {
+      auto vid = video(f);
+      int r = 0;
+      CHECK(WaitFor([&] { r = gm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+      if (gm.stats().detail >= 2) {
+        moving++;
+        if (f >= 2) moving_bytes = std::max(moving_bytes, gm.stats().bytes); // the motion mode from the third
+      }
+    }
+    std::printf("greys auto: %d of 8 moving frames coarse, largest %d bytes\n", moving, moving_bytes);
+    CHECK(moving >= 5);
+    auto held = video(7);
+    CHECK(WaitFor([&] {
+      int r = gm.Frame(held.data(), 540, 471, gs, go);
+      return r == ssh::ScreenMirror::kShown && gm.stats().detail == 1;
+    }, 5000));
+    std::printf("greys auto: still picture %d bytes at full detail\n", gm.stats().bytes);
+    CHECK(gm.stats().bytes > moving_bytes);
     gm.Stop();
     g1::emulator::SetFirmware(5, 0);
   }

@@ -204,8 +204,8 @@ private:
   void BlackSides(); // the columns one eye sees, black on each arm
   bool StartVideo();
   bool StartVideoX(int planes);                        // the grey fast path (g1v0 0.5.62+), fewer planes if short
-  bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move); // frame_ as a VIDEOX record (a scroll first): false
-                                                                     // when larger than max_bytes
+  // frame_ (or video_.pix, pix_ready) as a VIDEOX record, a scroll first: false when larger than max_bytes
+  bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move, bool pix_ready = false);
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
   Fx::Region Region() const;
@@ -231,6 +231,9 @@ private:
   int x_ = 0, y_ = 0, w_ = 0, h_ = 0;
   int levels_ = 0; // the path in use: 16 gray, 2 video, 1 VIDEOX (greys as planes), 0 none
   int want_levels_ = 0; // the levels the options asked for (a rebooted arm starts that path again)
+  std::vector<uint8_t> exact_; // auto greys: the last full-detail picture, to tell motion from stillness
+  int moving_frames_ = 0;      // frames in a row with most rows changed
+  int64_t moving_until_us_ = 0;
   scouter_kit::gray::Bitmap *pic_ = nullptr;
   std::vector<uint8_t> luma_, rot_, base_, last_base_, frame_, prev_, lo_, hi_;
   int prev_detail_ = 0; // the detail prev_ went at (steady compares like with like)
@@ -274,6 +277,7 @@ private:
     std::unique_ptr<scouter_kit::g1::PlaneVideoEncoder> penc;
     std::array<uint8_t, 256> index{};
     int moves = 0; // records that carried a scroll
+    std::vector<uint8_t> shown; // the plane index each pixel has on the arms (the last record sent)
     uint32_t k = 0;
     int64_t lead = 30000; // µs from now to the frame's due time (VideoReady)
     int sent = 0;         // the last record's bytes with its header
