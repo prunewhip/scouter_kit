@@ -51,6 +51,7 @@ object Dashboard {
     const val NOTES = "notes"
     const val MEDIA = "media"
     const val BATTERY = "battery"
+    const val CLAUDE = "claude" // Claude's plan usage: the 5-hour and the week's percent (claude-usage, read by the service)
     const val PHONE = "phone"
     const val WEATHER = "weather"
     const val CALENDAR = "calendar"
@@ -59,25 +60,25 @@ object Dashboard {
     const val SPORTS = "sports"
     val WIDGETS = listOf(CLOCK to "Clock and date", NOTES to "Notifications", MEDIA to "Now playing",
         WEATHER to "Weather", CALENDAR to "Calendar", TIMER to "Timer", SPORTS to "Game score", TUNES to "Tunes bar",
-        BATTERY to "Glasses' batteries", PHONE to "Phone's battery")
+        BATTERY to "Glasses' batteries", PHONE to "Phone's battery", CLAUDE to "Claude usage (5 h, week)")
     val FLEX = setOf(NOTES, MEDIA, CALENDAR, TUNES)
 
     class Widget(val type: String, val weight: Int = 1)
     class Layout(val tabs: Boolean, val widgets: List<Widget>)
 
     fun layout(settings: Settings, style: String = settings.dashStyle): Layout = when (style) {
-        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(BATTERY)))
-        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(BATTERY)))
-        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(BATTERY)))
+        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(CLAUDE), Widget(BATTERY)))
+        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(CLAUDE), Widget(BATTERY)))
+        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(CLAUDE), Widget(BATTERY)))
         "tunes" -> Layout(false, listOf(Widget(MEDIA), Widget(TUNES, 2), Widget(CLOCK)))
-        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(BATTERY)))
+        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(CLAUDE), Widget(BATTERY)))
         "focus" -> Layout(false, listOf(Widget(CLOCK), Widget(NOTES, 2)))
-        "minimal" -> Layout(false, listOf(Widget(CLOCK), Widget(BATTERY)))
+        "minimal" -> Layout(false, listOf(Widget(CLOCK), Widget(CLAUDE), Widget(BATTERY)))
         "custom" -> custom(settings)
         // Only the tab bar (over a screen on the glasses: the phone's, a server's).
         "tabsonly" -> Layout(true, emptyList())
         // The phone's battery is the top row of BATTERY (PHONE over L and R) in every layout with batteries.
-        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(BATTERY)))
+        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(CLAUDE), Widget(BATTERY)))
     }
 
     // The user's own layout (Settings.dashLayout): {"tabs": true, "widgets": [{"type": "clock", "weight": 1}, ...]}.
@@ -88,7 +89,7 @@ object Dashboard {
             val w = a.getJSONObject(i)
             Widget(w.getString("type"), w.optInt("weight", 1).coerceIn(1, 3))
         }.filter { it.type in WIDGETS.map { p -> p.first } })
-    }.getOrDefault(Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(BATTERY))))
+    }.getOrDefault(Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(CLAUDE), Widget(BATTERY))))
 
     fun saveCustom(settings: Settings, l: Layout) {
         val a = org.json.JSONArray()
@@ -260,6 +261,7 @@ object Dashboard {
             else when (wd.type) {
                 CLOCK -> clock(context, c, r)
                 BATTERY -> batteries(context, c, r, line, fill)
+                CLAUDE -> claudeUsage(c, r, line, fill)
                 PHONE -> phoneBattery(context, c, r, line, fill)
                 NOTES -> notes(c, r, hits, hover, mark, fill, settings)
                 MEDIA -> media(c, r, hits, hover, mark, fill, line)
@@ -372,6 +374,11 @@ object Dashboard {
             val ap = paint(rowH * 0.17f, 9, MEDIUM, 0.08f)
             val small = paint(rowH * 0.17f, 10, CONDENSED, 0.2f)
             maxOf(big.measureText(clock) + (if (ampm.isNotEmpty()) ap.measureText(ampm) + 5f else 0f), small.measureText(date))
+        }
+        CLAUDE -> {
+            val pct = paint(rowH * 0.2f, 13, MEDIUM)
+            val letter = paint(rowH * 0.17f, 8, CONDENSED)
+            pct.measureText("100%") + maxOf(4f + 30f + 4f + letter.measureText("WK"), letter.measureText("CLAUDE") + 8f)
         }
         BATTERY -> {
             val pct = paint(rowH * 0.2f, 13, MEDIUM)
@@ -637,6 +644,36 @@ object Dashboard {
             bar(c, RectF(bx, cy - bh / 2, bx + bw, cy + bh / 2), level, line, fill)
             val charging = b.getOrElse(i + 2) { 0 } == 1
             c.drawText(if (level >= 0) "$level%" + if (charging) "+" else "" else "–", r.right, cy + pct.textSize * 0.36f, pct)
+        }
+    }
+
+    // Claude's plan usage, beside the batteries and drawn like them: CLAUDE, a hairline, then the 5-hour window's and
+    // the week's percent, each with a bar (80 % and up bright: close to the limit).
+    private fun claudeUsage(c: Canvas, r: RectF, line: Paint, fill: Paint) {
+        val rowH = r.height()
+        val bw = 30f
+        val bh = maxOf(6f, rowH * 0.12f)
+        val letter = paint(rowH * 0.17f, 8, CONDENSED)
+        val u = Session.claudeUsage
+        val top = r.top + rowH * 0.2f
+        c.drawText("CLAUDE", r.left, top + letter.textSize * 0.35f, paint(rowH * 0.17f, 8, CONDENSED, 0.15f))
+        line.color = grey(3)
+        c.drawLine(r.left, r.top + rowH * 0.36f, r.right, r.top + rowH * 0.36f, line)
+        for ((i, name) in listOf("5H", "WK").withIndex()) {
+            val cy = r.top + rowH * (if (i == 0) 0.53f else 0.85f)
+            val v = u.getOrElse(i) { -1 }
+            c.drawText(name, r.left, cy + letter.textSize * 0.35f, letter)
+            val bx = r.left + letter.measureText("WK") + 4f
+            val box = RectF(bx, cy - bh / 2, bx + bw, cy + bh / 2)
+            line.color = grey(6)
+            c.drawRoundRect(box, 2f, 2f, line)
+            if (v >= 0) {
+                fill.color = grey(if (v >= 80) 15 else 11)
+                c.drawRect(box.left + 1.5f, box.top + 1.5f, box.left + 1.5f + (box.width() - 3f) * v.coerceIn(0, 100) / 100f,
+                    box.bottom - 1.5f, fill)
+            }
+            val pct = paint(rowH * 0.2f, if (v >= 80) 15 else 13, MEDIUM).apply { textAlign = Paint.Align.RIGHT }
+            c.drawText(if (v >= 0) "$v%" else "–", r.right, cy + pct.textSize * 0.36f, pct)
         }
     }
 

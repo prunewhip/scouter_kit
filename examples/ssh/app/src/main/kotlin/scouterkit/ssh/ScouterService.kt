@@ -47,6 +47,7 @@ object Session {
     @Volatile var showing = "" // what the glasses show now: Settings.TERMINAL or SCREEN ("" no session)
     @Volatile var blank = false // the display is off (nothing shows; the TouchBar still works)
     @Volatile var battery: IntArray = intArrayOf(-1, -1, -1, -1) // left %, right %, left charging, right charging
+    @Volatile var claudeUsage: IntArray = intArrayOf(-1, -1) // Claude's plan: the 5-hour and the week's percent (-1 unknown)
     @Volatile var gesture = "" // the last TouchBar gesture and what it did
     @Volatile var voice = "" // voice: what the band says (or last said)
     @Volatile var listening = false
@@ -284,6 +285,22 @@ class ScouterService : Service() {
         }
     }
 
+    // Claude's plan usage for the dashboard: /usr/local/bin/claude-usage on the phone's own server (the 5-hour and the
+    // week's percent, as Claude Code's /usage; it caches 2 min), every 3 min on the case thread (a blocking SSH read).
+    private val claudeUsageTicker = object : Runnable {
+        override fun run() {
+            if (ended) return
+            runCatching {
+                val s = settings.servers().firstOrNull { it.local } ?: return@runCatching
+                val out = Bootstrap(Vault(this@ScouterService)).runShared(s.host, s.port, s.user, "/usr/local/bin/claude-usage 2>/dev/null")
+                val j = org.json.JSONObject(out.trim().lines().last { it.trimStart().startsWith("{") })
+                if (!j.has("error")) Session.claudeUsage = intArrayOf(j.optInt("five", -1), j.optInt("week", -1))
+                else Log.i(TAG, "claude usage: ${j.optString("error")}")
+            }
+            caseHandler.postDelayed(this, 180_000)
+        }
+    }
+
     // Each arm's battery, every 30 s while the glasses are up.
     private val batteryTicker = object : Runnable {
         override fun run() {
@@ -452,6 +469,7 @@ class ScouterService : Service() {
         work.postDelayed(brightTicker, 8000)
         work.postDelayed(linkTicker, 10000)
         caseHandler.postDelayed(caseTicker, 8000)
+        caseHandler.postDelayed(claudeUsageTicker, 12_000)
         Ready.healSoon(this, "service start")
         registerReceiver(lock, IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) })
         getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
@@ -652,6 +670,7 @@ class ScouterService : Service() {
         work.removeCallbacks(brightTicker)
         work.removeCallbacks(linkTicker)
         caseHandler.removeCallbacks(caseTicker)
+        caseHandler.removeCallbacks(claudeUsageTicker)
         caseThread.quitSafely()
         runCatching { unregisterReceiver(lock) }
         runCatching { unregisterReceiver(bonds) }
