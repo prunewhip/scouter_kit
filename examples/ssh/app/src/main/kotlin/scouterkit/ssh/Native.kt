@@ -158,6 +158,9 @@ object Native {
     @JvmStatic external fun linkStats(): IntArray
     // Per arm (left, right): battery mA (positive: discharging), mV, percent
     @JvmStatic external fun powerStats(): IntArray
+    // Per arm (left, right), 6 each: connected, IN_CASE, CHARGE (0 no, 1 charging, 2 complete), BATT_MA, BATT_PCT,
+    // CASE_LID (1 closed); -1 unknown. Blocks while the arms answer.
+    @JvmStatic external fun caseStats(): IntArray
     // The display off (nothing shows; the TouchBar still reports) or on again.
     @JvmStatic external fun blank(on: Boolean)
     // Left %, right %, left charging, right charging (-1 unknown); blocks while the arms answer.

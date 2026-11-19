@@ -207,6 +207,82 @@ class ScouterService : Service() {
             work.postDelayed(this, 10000)
         }
     }
+    // The arms in the charging case: really charging? (CaseCheck: one buzz "Charging ✓", or three and "seat it
+    // again"). On its own thread (each look is a few Bluetooth reads): every 5 s for the first minute in the case,
+    // then 15 s; 10 s out of it.
+    private val caseThread = HandlerThread("case-check").apply { start() }
+    private val caseHandler = Handler(caseThread.looper)
+    private val caseCheck = CaseCheck()
+    private var caseLast = ""
+    private var caseSince = 0L
+    private val caseTicker = object : Runnable {
+        override fun run() {
+            if (ended) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            val s = runCatching { Native.caseStats() }.getOrNull()
+            if (s != null && s.size >= 12) {
+                fun arm(i: Int) = CaseCheck.Arm(s[i] == 1, s[i + 1], s[i + 2], s[i + 3], s[i + 4], s[i + 5])
+                val l = arm(0)
+                val r = arm(6)
+                val wasIn = caseCheck.inCase
+                val events = caseCheck.step(now, l, r)
+                if (caseCheck.inCase && !wasIn) caseSince = now
+                val line = if (caseCheck.inCase) "L ${caseCheck.states[0]} in ${l.inCase} charge ${l.charge} ${l.ma} mA ${l.pct}% " +
+                    "lid ${l.lid}, R ${caseCheck.states[1]} in ${r.inCase} charge ${r.charge} ${r.ma} mA ${r.pct}% lid ${r.lid}" else "out"
+                if (line != caseLast) {
+                    caseLast = line
+                    Log.i(TAG, "case: $line")
+                }
+                for (e in events) work.post { caseEvent(e) }
+            }
+            val young = caseCheck.inCase && now - caseSince < 60_000
+            caseHandler.postDelayed(this, if (young) 5000L else if (caseCheck.inCase) 15000L else 10000L)
+        }
+    }
+
+    private fun caseEvent(e: CaseCheck.Event) {
+        fun pct(p: Int) = if (p >= 0) "$p%" else "?"
+        fun st(s: CaseCheck.State, p: Int) = when (s) {
+            CaseCheck.State.FULL -> "full"
+            CaseCheck.State.CHARGING -> "✓ ${pct(p)}"
+            else -> "?"
+        }
+        val (title, text, buzz) = when (e) {
+            is CaseCheck.Event.Seated -> Triple("Glasses charging ✓", "Left ${st(e.left, e.leftPct)} · Right ${st(e.right, e.rightPct)}",
+                longArrayOf(0, 120))
+            is CaseCheck.Event.Problem -> Triple("${CaseCheck.name(e.arm)} arm isn't charging",
+                if (e.state == CaseCheck.State.NO_CONTACT) "It doesn't reach the case's charger (the other arm does): lift the glasses out and seat them again"
+                else "It's in the case but gets no charge (${pct(e.pct)}): lift the glasses out and seat them again",
+                longArrayOf(0, 300, 150, 300, 150, 300))
+            is CaseCheck.Event.Fixed -> Triple("${CaseCheck.name(e.arm)} arm charging ✓", "It's charging now (${pct(e.pct)})", longArrayOf(0, 120))
+        }
+        Log.i(TAG, "case: $title: $text")
+        runCatching {
+            getSystemService(android.os.VibratorManager::class.java).defaultVibrator
+                .vibrate(android.os.VibrationEffect.createWaveform(buzz, -1))
+        }
+        runCatching {
+            val manager = getSystemService(NotificationManager::class.java)
+            if (manager.getNotificationChannel(CASE_CHANNEL) == null)
+                manager.createNotificationChannel(NotificationChannel(CASE_CHANNEL, "Glasses charging", NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(false) // the buzz is ours: one = charging, three = not
+                    setSound(null, null)
+                })
+            val b = android.app.Notification.Builder(this, CASE_CHANNEL)
+                .setSmallIcon(android.R.drawable.ic_lock_idle_charging)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(android.app.Notification.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+            if (e !is CaseCheck.Event.Problem) b.setTimeoutAfter(30_000)
+            manager.notify(CASE_ID + if (e is CaseCheck.Event.Seated) 0 else 1 + when (e) {
+                is CaseCheck.Event.Problem -> e.arm
+                is CaseCheck.Event.Fixed -> e.arm
+                else -> 0
+            }, b.build())
+        }
+    }
+
     // Each arm's battery, every 30 s while the glasses are up.
     private val batteryTicker = object : Runnable {
         override fun run() {
@@ -374,6 +450,7 @@ class ScouterService : Service() {
         work.postDelayed(batteryTicker, 5000)
         work.postDelayed(brightTicker, 8000)
         work.postDelayed(linkTicker, 10000)
+        caseHandler.postDelayed(caseTicker, 8000)
         Ready.healSoon(this, "service start")
         registerReceiver(lock, IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) })
         getSystemService(android.net.ConnectivityManager::class.java).registerDefaultNetworkCallback(network)
@@ -573,6 +650,8 @@ class ScouterService : Service() {
         work.removeCallbacks(batteryTicker)
         work.removeCallbacks(brightTicker)
         work.removeCallbacks(linkTicker)
+        caseHandler.removeCallbacks(caseTicker)
+        caseThread.quitSafely()
         runCatching { unregisterReceiver(lock) }
         runCatching { unregisterReceiver(bonds) }
         runCatching { unregisterReceiver(adapterState) }
@@ -5309,6 +5388,8 @@ class ScouterService : Service() {
         private val WHISPER_NOISE = setOf("you", "thank you", "thanks for watching", "thank you for watching", "bye",
             "thank you very much", "please subscribe", "subtitles by the amaraorg community", "music")
         const val ALERT_ID = 4000
+        const val CASE_CHANNEL = "glasses_case" // CaseCheck: charging or not, in the case
+        const val CASE_ID = 4100 // + 0 seated, + 1 left, + 2 right
         const val SLIDE_IDLE_MS = 90L // a two-finger swipe ends when its wheels are still this long
         const val SLIDE_SPEED_MS = 80f // its speed at the end: over its last moves this long
         const val CAR_GONE_MS = 20_000L
