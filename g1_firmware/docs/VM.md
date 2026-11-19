@@ -440,9 +440,12 @@ bytes; a real frame decodes in ~10–20 ms).
 
 The library's `TransformVideoEncoder` makes the records and keeps exactly the arm's picture (closed loop; `tests/
 videot_test.cpp` checks it bit for bit). On real camera video at 256 × 240: ~1.9 KB a frame at 29 dB (q 45), ~2.9 KB
-at 32 dB (q 30); Vox's motion mode with 4 grey planes took ~2.6 KB at 19 dB. Vox (0.5.68+) sends moving pictures this
-way at half size, the quantiser following the link's budget, and the exact 16-grey picture by `VIDEOX` once they hold
-still.
+at 32 dB (q 30); Vox's motion mode with 4 grey planes took ~2.6 KB at 19 dB. Its rate-distortion choices (each level
+lowered, a 4 × 4 block dropped or a block skipped when the bits saved outweigh the squared error, λ = 0.25 q²; the
+bitstream is the same) take a further 19–26% fewer bytes at the same PSNR on two camera clips. Vox (0.5.68+) sends
+moving pictures this way at half size, the quantiser following the link's budget, and the exact 16-grey picture by
+`VIDEOX` once they hold still; a video in part of a still picture (a player in a page) goes this way alone, at the
+record's own w, h, x, y, while the rest stays exact 16 greys.
 
 ## 4. Fonts
 

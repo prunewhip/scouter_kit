@@ -87,6 +87,8 @@ static_assert(std::endian::native == std::endian::little,
 
 namespace scouter_kit::g1 {
 
+std::atomic<int> g_link_units{SCOUTER_G1_LINK_MIN}; // the active interval asked for (SetActiveLink)
+
 Arm left, right;
 
 int64_t NowUs() {
@@ -889,12 +891,31 @@ std::vector<uint8_t> TransformVideoEncoder::Encode(std::span<const uint8_t> luma
       luma.size() < size_t(w) * size_t(h))
     return {};
   const bool flat = !started_;
+  const size_t npx = size_t(w) * size_t(h);
   const uint32_t flags = (flat ? 1u : 0u) | (redraw ? 2u : 0u) | (flat ? 4u : 0u);
   const int32_t step = 4 * q;
+  const double lambda = rdo_ * double(q) * double(q);
   std::vector<uint16_t> probs = flat ? std::vector<uint16_t>(vt::kProbs, 2048) : p_;
-  std::vector<uint8_t> out = {uint8_t(flags), uint8_t(q)}, rec(size_t(w) * size_t(h));
+  std::vector<uint8_t> out = {uint8_t(flags), uint8_t(q)}, rec(npx);
   RangeEncoder rc{probs.data(), out};
   vt::Coder co{rc};
+  // bits a decision costs with the model as it stands (the estimate the choices below are made on)
+  static const std::vector<float> kCost = [] {
+    std::vector<float> t(4097);
+    for (int i = 0; i <= 4096; i++) t[size_t(i)] = float(-std::log2(std::max(i, 1) / 4096.0));
+    return t;
+  }();
+  auto cost = [&](uint32_t i, bool b) { return double(kCost[size_t(b ? 4096 - probs[i] : probs[i])]); };
+  auto ucost = [&](uint32_t m, uint32_t v) {
+    double r = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+      r += cost(m + i, v > i);
+      if (v <= i) return r;
+    }
+    uint32_t x = v - 8 + 1, k = 0;
+    while (x >> (k + 1)) k++;
+    return r + 2 * k + 1;
+  };
   std::vector<uint8_t> top(size_t(mw), 0);
   for (int by = 0; by < mh; by++) {
     int pmx = 0, pmy = 0;
@@ -921,21 +942,97 @@ std::vector<uint8_t> TransformVideoEncoder::Encode(std::span<const uint8_t> luma
       bool cb[4] = {}, any = false;
       for (int y = 0; y < 8; y++)
         for (int x = 0; x < 8; x++) pred[y * 8 + x] = flat ? 128 : at(ref_, bx * 8 + x + mx, by * 8 + y + my);
+      double jcoded = 0;
       for (int b = 0; b < 4; b++) {
-        int32_t in[16], c[16];
+        int32_t in[16], c[16], src16[16], pr16[16];
         for (int i = 0; i < 16; i++) {
           int y = (b / 2) * 4 + i / 4, x = (b % 2) * 4 + i % 4;
-          in[i] = cur(bx * 8 + x, by * 8 + y) - pred[y * 8 + x];
+          src16[i] = cur(bx * 8 + x, by * 8 + y);
+          pr16[i] = pred[y * 8 + x];
+          in[i] = src16[i] - pr16[i];
         }
         vt::Wht(in, c);
         for (int i = 0; i < 16; i++) { // the arm multiplies a level by step: rounded with a dead zone of a third
           int32_t m = std::min<int32_t>((std::abs(c[i]) + step / 3) / step, 2047);
           lev[b][i] = c[i] < 0 ? -m : m;
-          cb[b] = cb[b] || m;
         }
+        if (rdo_ > 0) {
+          const uint32_t cbx = vt::kCbp + (b == 0 ? 0 : b == 3 ? 2 : 1);
+          auto jof = [&](const int32_t *l16) { // error + lambda x bits of this 4 x 4 block as l16 codes it
+            int last = -1;
+            for (int i = 0; i < 16; i++)
+              if (l16[vt::kZig[i]]) last = i;
+            double r = cost(cbx, last >= 0), d = 0;
+            int32_t coef[16] = {}, rr[16];
+            uint32_t nnz = 0;
+            for (int i = 0; i <= last; i++) {
+              int32_t l = l16[vt::kZig[i]];
+              r += cost(vt::kNz + 3 * uint32_t(i) + std::min(nnz, 2u), l != 0);
+              if (!l) continue;
+              nnz++;
+              uint32_t m = uint32_t(std::abs(l)), cls = uint32_t(i) / 4;
+              r += 1 + cost(vt::kGt1 + cls, m > 1) + (m > 1 ? ucost(vt::kMag + 8 * cls, m - 2) : 0) +
+                   cost(vt::kEob + uint32_t(i), i == last);
+              coef[vt::kZig[i]] = l * step;
+            }
+            vt::Wht(coef, rr);
+            for (int i = 0; i < 16; i++) {
+              int32_t e = src16[i] - std::clamp(pr16[i] + (last >= 0 ? (rr[i] + 8) >> 4 : 0), 0, 255);
+              d += double(e) * double(e);
+            }
+            return d + lambda * r;
+          };
+          double best = jof(lev[b]);
+          for (int i = 15; i >= 0; i--) { // each level one step toward zero while that pays, last first
+            int32_t &l = lev[b][vt::kZig[i]];
+            while (l) {
+              int32_t keep = l;
+              l -= l > 0 ? 1 : -1;
+              double j = jof(lev[b]);
+              if (j < best) {
+                best = j;
+              } else {
+                l = keep;
+                break;
+              }
+            }
+          }
+          int32_t zero[16] = {};
+          double jz = jof(zero);
+          if (jz <= best) {
+            std::memcpy(lev[b], zero, sizeof zero);
+            best = jz;
+          }
+          jcoded += best;
+        }
+        for (int i = 0; i < 16; i++) cb[b] = cb[b] || lev[b][i];
         any = any || cb[b];
       }
       bool skip = !any && mx == 0 && my == 0;
+      if (rdo_ > 0 && !skip) { // a skipped block keeps the frame's pixels (flat: grey 128): cheaper, if close enough
+        double dskip = 0, rmv = 0;
+        for (int y = 0; y < 8; y++)
+          for (int x = 0; x < 8; x++) {
+            int32_t e = cur(bx * 8 + x, by * 8 + y) - (flat ? 128 : at(ref_, bx * 8 + x, by * 8 + y));
+            dskip += double(e) * double(e);
+          }
+        if (!flat) {
+          int pm[2] = {pmx, pmy}, mv[2] = {mx, my};
+          for (int c = 0; c < 2; c++) {
+            int d = mv[c] - pm[c];
+            rmv += cost(vt::kMvz + 2 * uint32_t(c) + (pm[c] != 0), d != 0);
+            if (d) rmv += cost(vt::kMvs + uint32_t(c), d < 0) + ucost(vt::kMvm + 8 * uint32_t(c), uint32_t(std::abs(d) - 1));
+          }
+        }
+        const uint32_t sk = vt::kSkip + (bx ? lskip : 0) + top[size_t(bx)];
+        if (dskip + lambda * cost(sk, true) <= jcoded + lambda * (cost(sk, false) + rmv)) {
+          skip = true;
+          mx = my = 0;
+          for (int b = 0; b < 4; b++) cb[b] = false;
+          for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) pred[y * 8 + x] = flat ? 128 : at(ref_, bx * 8 + x, by * 8 + y);
+        }
+      }
       co.Bit(vt::kSkip + (bx ? lskip : 0) + top[size_t(bx)], skip);
       if (!skip) {
         if (!flat) {
@@ -3069,7 +3166,10 @@ public:
   // earliest 5 s after connecting).
   void KeepLinkFast(int arm, int64_t now) {
     Link &l = links[arm];
-    bool slow = l.interval_us > SCOUTER_G1_LINK_MAX * 1250 || l.phy == 1;
+    const int want = g_link_units.load();
+    // slower than asked (or another interval than SetActiveLink's, when that is not the default)
+    bool slow = l.interval_us > want * 1250 || (want != SCOUTER_G1_LINK_MIN && l.interval_us && l.interval_us != want * 1250) ||
+                l.phy == 1;
     bool bulk = !l.pending.empty() && !l.unacked.empty();
     if (!l.slow && slow && bulk && now - l.link_asked > 5000000) AskLink(arm, now);
   }
@@ -3078,8 +3178,9 @@ public:
     Link &l = links[arm];
     l.link_asked = now;
     std::vector<uint8_t> link;
-    Put16(link, l.slow ? SCOUTER_G1_IDLE_LINK : SCOUTER_G1_LINK_MIN);
-    Put16(link, l.slow ? SCOUTER_G1_IDLE_LINK : SCOUTER_G1_LINK_MAX);
+    const int want = g_link_units.load();
+    Put16(link, uint16_t(l.slow ? SCOUTER_G1_IDLE_LINK : want == SCOUTER_G1_LINK_MIN ? SCOUTER_G1_LINK_MIN : want));
+    Put16(link, uint16_t(l.slow ? SCOUTER_G1_IDLE_LINK : want == SCOUTER_G1_LINK_MIN ? SCOUTER_G1_LINK_MAX : want));
     Put16(link, 0);
     Put16(link, 400);
     link.push_back(2);
@@ -6001,6 +6102,10 @@ void Arm::Disconnect(int ms) {
   g->core->hold_ms[i] = std::max(ms, 1);
   g->core->transport->Wake();
 }
+
+void SetActiveLink(int units) { g_link_units = std::clamp(units, 6, 24); }
+
+bool RestartArm(int arm) { return arm >= 0 && arm <= 1 && Control(arm, CTRL_REBOOT, {0}).first == 0; }
 
 Arm::State Arm::GetState() {
   State s{};

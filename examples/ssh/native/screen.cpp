@@ -1,6 +1,7 @@
 #include "screen.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +33,7 @@ constexpr size_t kTuneMin = 1536, kTuneMax = 8192; // the self-tuned budget's ra
 // encoder picks the smaller coding per frame.
 constexpr bool kMotionStream = false;
 constexpr uint32_t kHeader = 12;       // due time, frame number, record size
+constexpr uint32_t kHeaderT = 28;      // VIDEOT's: the same, then its w, h and panel x, y
 constexpr int kQueued = 4;             // commands not yet sent on an arm's link: more, and a frame is skipped
 
 std::mutex g_spare_mutex;
@@ -1023,6 +1025,8 @@ bool ScreenMirror::StartVideoX(int planes) {
     if (!arm.GetState().present) continue;
     int px = i == 0 ? x_ - std::max(0, -dx_) : x_ - std::max(0, dx_);
     int py = i == 0 ? y_ + std::max(0, -dy_) : y_ + std::max(0, dy_);
+    v.px[size_t(i)] = px;
+    v.py[size_t(i)] = py;
     g1::Program p(v.code, 48);
     g1::Address at = p.Here();
     p.SleepUntil(g1::ArenaWord(v.buf / 4));
@@ -1045,12 +1049,13 @@ bool ScreenMirror::StartVideoX(int planes) {
                g1::ArenaWord(v.buf / 4 + 2), p.Const(v.mstate_tab));
       p.Ret();
     }
-    g1::Address tcall = 0; // VIDEOT at half size
+    g1::Address tcall = 0; // VIDEOT at half size: the whole picture, or a video's rectangle (in the record's header)
     if (v.tw) {
       tcall = p.Here();
       p.SleepUntil(g1::ArenaWord(v.buf / 4));
-      p.VideoT(p.Const(v.tframe), p.Const(uint32_t(v.tw)), p.Const(uint32_t(v.th)), p.Const(uint32_t(px)),
-               p.Const(uint32_t(py)), p.Const(v.buf + kHeader), g1::ArenaWord(v.buf / 4 + 2), p.Const(v.tstate));
+      p.VideoT(p.Const(v.tframe), g1::ArenaWord(v.buf / 4 + 3), g1::ArenaWord(v.buf / 4 + 4),
+               g1::ArenaWord(v.buf / 4 + 5), g1::ArenaWord(v.buf / 4 + 6), p.Const(v.buf + kHeaderT),
+               g1::ArenaWord(v.buf / 4 + 2), p.Const(v.tstate));
       p.Ret();
     }
     std::string why;
@@ -1095,6 +1100,9 @@ bool ScreenMirror::StartVideoX(int planes) {
     v.tlast.clear();
     v.tq = 40;
     v.tredraw = true;
+    v.rw = 0;
+    heat_.clear();
+    region_until_us_ = 0;
     LOG("screen: moving pictures as transform-coded video %d x %d (drawn at scale 2, dithered)", v.tw, v.th);
   }
   v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
@@ -1118,6 +1126,16 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g
     for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
   int sx = v.spr_x, sy = v.spr_y;
   g1::Sprite sprite = PointerSprite();
+  auto over_video = [&](int x, int y, int w, int h) {
+    return v.rw && x < v.rx + v.rw && x + w > v.rx && y < v.ry + v.rh && y + h > v.ry;
+  };
+  if (sprite.on && sprite.x != -32768 && over_video(sprite.x, sprite.y, 16, 16)) {
+    sprite.x = -32768; // over the video the pointer is not drawn (VIDEOT would draw over it)
+    sprite.y = 0;
+    v.spr_x = -32768;
+    v.spr_y = 0;
+    if (!sprite.rw) sprite.on = false;
+  }
   std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw, m, std::min<size_t>(max_bytes, v.room), false, block, sprite);
   if (rec.empty()) {
     v.spr_x = sx; // not sent: the arms still draw it where they did
@@ -1142,9 +1160,21 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g
     arm.WriteArena(v.buf, msg);
     arm.Call(v.call[size_t(i)]);
   }
+  // the planes' picture is on the panel now: the next VIDEOT record draws every band. With a video rectangle, only
+  // when this record drew in it: a redraw, a move, the pointer's old place, or a row changed on both sides of it.
+  bool touched = !v.rw || v.redraw || m.rows || block.w || (sprite.on && sprite.rw && over_video(sprite.rx, sprite.ry, sprite.rw, sprite.rh));
+  if (!touched && v.shown.size() == v.pix.size())
+    for (int y = std::max(0, v.ry); y < std::min(h_, v.ry + v.rh) && !touched; y++) {
+      const uint8_t *a = v.pix.data() + size_t(y) * size_t(w_), *b = v.shown.data() + size_t(y) * size_t(w_);
+      int x0 = 0, x1 = w_ - 1;
+      while (x0 < w_ && a[x0] == b[x0]) x0++;
+      if (x0 == w_) continue;
+      while (a[x1] == b[x1]) x1--;
+      touched = x0 < v.rx + v.rw && x1 >= v.rx;
+    }
+  if (touched) v.tredraw = true;
   v.redraw = false;
   v.in_motion = false;
-  v.tredraw = true; // the planes' picture is on the panel now: the next VIDEOT record draws every band
   v.k++;
   v.sent = int(msg.size());
   v.shown = v.pix;
@@ -1155,8 +1185,17 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g
 // scale 2; the first after still pictures redraws every row (the panel shows the full stream's picture).
 // The picture (base_, toned as Tone without its levels: the codec keeps 8 bits) at half size as a VIDEOT record to
 // both arms. The quantiser follows the moving frames' budget: up when a record is over it, down while well under.
-bool ScreenMirror::SendVideoT(const ScreenOptions &o, size_t budget) {
+bool ScreenMirror::SendVideoT(const ScreenOptions &o, size_t budget, Rect r) {
   Video &v = video_;
+  const bool whole = r.x == 0 && r.y == 0 && r.w >= w_ && r.h >= h_;
+  const int ew = whole ? v.tw : std::min(v.tw, r.w / 2 & ~7), eh = whole ? v.th : std::min(v.th, r.h / 2 & ~7);
+  if (ew < 8 || eh < 8 || v.room <= kHeaderT - kHeader) return false;
+  if (!v.tenc || v.tenc->Width() != ew || v.tenc->Height() != eh) { // another rectangle: a fresh picture
+    v.tenc = std::make_unique<g1::TransformVideoEncoder>(ew, eh);
+    v.tluma.assign(size_t(ew) * size_t(eh), 0);
+    v.tlast.clear();
+    v.tredraw = true;
+  }
   int a = std::clamp(o.invert, 0, 100);
   double g = std::clamp(o.gamma, 20, 500) / 100.0;
   uint8_t lut[256];
@@ -1164,41 +1203,83 @@ bool ScreenMirror::SendVideoT(const ScreenOptions &o, size_t budget) {
     int f = x + (255 - 2 * x) * a / 100;
     lut[x] = uint8_t(g == 1.0 ? f : int(std::pow(f / 255.0, g) * 255.0 + 0.5));
   }
-  for (int y = 0; y < v.th; y++)
-    for (int x = 0; x < v.tw; x++) {
-      int sx = 2 * x, sy = 2 * y, sum = 0, cnt = 0;
+  for (int y = 0; y < eh; y++)
+    for (int x = 0; x < ew; x++) {
+      int sx = r.x + 2 * x, sy = r.y + 2 * y, sum = 0, cnt = 0;
       for (int k = 0; k < 4; k++) {
         int px = sx + (k & 1), py = sy + (k >> 1);
         if (px < w_ && py < h_) sum += lut[base_[size_t(py) * size_t(w_) + size_t(px)]], cnt++;
       }
-      v.tluma[size_t(y) * size_t(v.tw) + size_t(x)] = uint8_t(cnt ? (sum + cnt / 2) / cnt : 0);
+      v.tluma[size_t(y) * size_t(ew) + size_t(x)] = uint8_t(cnt ? (sum + cnt / 2) / cnt : 0);
     }
   if (!v.tredraw && v.tluma == v.tlast) return false; // nothing new
+  const size_t room = v.room - (kHeaderT - kHeader);
   std::vector<uint8_t> rec;
   for (int tries = 0; tries < 4 && rec.empty(); tries++) {
-    rec = v.tenc->Encode(v.tluma, v.tq, v.tredraw, std::min<size_t>(v.room, std::max<size_t>(budget * 2, 2048)));
+    rec = v.tenc->Encode(v.tluma, v.tq, v.tredraw, std::min<size_t>(room, std::max<size_t>(budget * 2, 2048)));
     if (rec.empty()) v.tq = std::min(63, v.tq + v.tq / 3 + 1);
   }
   if (rec.empty()) return false;
   if (rec.size() > budget) v.tq = std::min(63, v.tq + std::max(1, v.tq / 8));
   else if (rec.size() * 10 < budget * 7 && v.tq > 6) v.tq--;
   int64_t lead = std::min<int64_t>(v.lead + int64_t(rec.size()) * 1000000 / 40000, 1000000);
-  std::vector<uint8_t> msg(kHeader + rec.size());
+  std::vector<uint8_t> msg(kHeaderT + rec.size());
   Put32(msg, 4, v.k);
   Put32(msg, 8, uint32_t(rec.size()));
-  std::memcpy(msg.data() + kHeader, rec.data(), rec.size());
+  Put32(msg, 12, uint32_t(ew));
+  Put32(msg, 16, uint32_t(eh));
+  std::memcpy(msg.data() + kHeaderT, rec.data(), rec.size());
   for (int i = 0; i < 2; i++) {
     g1::Arm &arm = i == 0 ? g1::left : g1::right;
     if (!arm.GetState().present) continue;
     Put32(msg, 0, arm.DeviceTime(lead));
+    Put32(msg, 20, uint32_t(v.px[size_t(i)] + r.x));
+    Put32(msg, 24, uint32_t(v.py[size_t(i)] + r.y));
     arm.WriteArena(v.buf, msg);
     arm.Call(v.callt[size_t(i)]);
   }
   v.tlast = v.tluma;
   v.tredraw = false;
-  v.redraw = true; // the planes' picture is no longer on the panel: its next record draws every row
+  // the whole picture: the planes' picture is no longer on the panel, so their next record draws every row (a
+  // rectangle: the planes keep the rest, and SendVideoX says when they drew over it)
+  if (whole) v.redraw = true;
   v.k++;
   v.sent = int(msg.size());
+  return true;
+}
+
+// The tiles that changed in at least 4 of the last 8 frames that changed anything, as one rectangle: a video when
+// they fill most of it, it is at least 64 x 48 and at most 70% of the picture (more: the whole picture moves).
+bool ScreenMirror::VideoRegion(Rect *out) {
+  const int tx = (w_ + 15) / 16, ty = (h_ + 15) / 16;
+  if (heat_.size() != size_t(tx) * size_t(ty)) heat_.assign(size_t(tx) * size_t(ty), 0);
+  if (exact_.size() != frame_.size() || frame_.size() != size_t(w_) * size_t(h_)) return false;
+  if (frame_ == exact_) { // nothing changed: the history waits for the next change
+  } else {
+    for (int j = 0; j < ty; j++)
+      for (int i = 0; i < tx; i++) {
+        bool ch = false;
+        for (int y = j * 16; y < std::min(h_, j * 16 + 16) && !ch; y++) {
+          size_t o = size_t(y) * size_t(w_) + size_t(i * 16);
+          size_t n = size_t(std::min(w_, i * 16 + 16) - i * 16);
+          ch = std::memcmp(frame_.data() + o, exact_.data() + o, n) != 0;
+        }
+        uint8_t &hb = heat_[size_t(j) * size_t(tx) + size_t(i)];
+        hb = uint8_t(hb << 1 | (ch ? 1 : 0));
+      }
+  }
+  int x0 = tx, y0 = ty, x1 = -1, y1 = -1, hot = 0;
+  for (int j = 0; j < ty; j++)
+    for (int i = 0; i < tx; i++)
+      if (std::popcount(heat_[size_t(j) * size_t(tx) + size_t(i)]) >= 4) {
+        hot++;
+        x0 = std::min(x0, i), y0 = std::min(y0, j), x1 = std::max(x1, i), y1 = std::max(y1, j);
+      }
+  if (!hot) return false;
+  int tiles = (x1 - x0 + 1) * (y1 - y0 + 1);
+  Rect r{x0 * 16, y0 * 16, std::min(w_, (x1 + 1) * 16) - x0 * 16, std::min(h_, (y1 + 1) * 16) - y0 * 16};
+  if (hot * 10 < tiles * 6 || r.w < 64 || r.h < 48 || int64_t(r.w) * r.h * 10 > int64_t(w_) * h_ * 7) return false;
+  *out = r;
   return true;
 }
 
@@ -1365,6 +1446,8 @@ bool ScreenMirror::StartCanvas(int cw) {
 // draws the canvas again at the new place from a record of unchanged planes (its own reset states, so the phone's
 // encoder never sees it). The phone stays the one tracker: each head-turn update it writes ANCH and ACC = 0 to both
 // arms, so the eyes never drift apart, and the turn shows at once instead of a link round trip later.
+std::atomic<bool> ScreenMirror::pan_report{false};
+
 void ScreenMirror::StartPan() {
   Video &v = video_;
   const int P = v.planes;
@@ -1407,7 +1490,8 @@ void ScreenMirror::StartPan() {
     g1::Program p(code, 40);
     auto W = [&](int k) { return g1::ArenaWord(data / 4 + uint32_t(k)); };
     auto C = [&](int64_t x) { return p.Const(uint32_t(x)); };
-    auto ANCH = W(0), ACC = W(1), LT = W(2), DX = W(3), T = W(4), R = W(5), X = W(6), D = W(7);
+    auto ANCH = W(0), ACC = W(1), LT = W(2), DX = W(3), T = W(4), R = W(5), X = W(6), D = W(7), N = W(8);
+    const bool report = pan_report.load();
     auto XW = g1::ArenaWord(v.xword / 4);
     auto start = p.NewLabel(), tick = p.NewLabel(), use = p.NewLabel(), skip = p.NewLabel(), c1 = p.NewLabel(),
          c2 = p.NewLabel(), c3 = p.NewLabel(), done = p.NewLabel();
@@ -1445,6 +1529,14 @@ void ScreenMirror::StartPan() {
     p.BltS(X, C(maxx + 1), c2);
     p.Mov(X, C(maxx));
     p.Bind(c2);
+    if (report) { // every fifth tick (100 ms): the window's x, to compare the eyes (pan_report)
+      auto quiet = p.NewLabel();
+      p.Add(N, N, C(1));
+      p.BltU(N, C(5), quiet);
+      p.Mov(N, C(0));
+      p.Notify(C(kPanReport), X);
+      p.Bind(quiet);
+    }
     p.Sub(X, C(v.px[size_t(i)]), X);     // the panel x of the canvas's left
     p.Beq(X, DX, done);
     p.Mov(DX, X);
@@ -1457,7 +1549,7 @@ void ScreenMirror::StartPan() {
     p.End();
     p.On(g1::TRIGGER_START, start);
     p.On(g1::TRIGGER_TIMER, tick);
-    p.Changes(data, 32);
+    p.Changes(data, 36);
     p.Changes(v.xword, 4);
     p.Changes(dummy, uint32_t(P) * g1::kVideoState);
     std::string why;
@@ -1465,7 +1557,7 @@ void ScreenMirror::StartPan() {
       LOG("screen: the pan program: %s", why.empty() ? "too large" : why.c_str());
       break;
     }
-    std::vector<uint8_t> words(32, 0), xw(4);
+    std::vector<uint8_t> words(36, 0), xw(4);
     int win = std::clamp(v.cwin, 0, maxx);
     Put32(words, 0, uint32_t(win));                         // ANCH: the window shown now
     Put32(words, 12, uint32_t(v.px[size_t(i)] - win));      // DX: where it is drawn now
@@ -1735,6 +1827,11 @@ void ScreenMirror::SendPointer(bool force) {
     int x = 0, y = 0;
     bool on = ptr_on_ && src_w_ > 1 && Locate(ptr_cx_, ptr_cy_, src_w_, src_h_, src_o_, w_, h_, &x, &y);
     if (!force && !ptr_dirty_ && ((on && x - 1 == v.spr_x && y - 1 == v.spr_y) || (!on && v.spr_x == -32768))) return;
+    if (!force && on && v.spr_x == -32768 && v.rw && x - 1 < v.rx + v.rw && x + 15 > v.rx && y - 1 < v.ry + v.rh &&
+        y + 15 > v.ry) {
+      ptr_dirty_ = false; // hidden over the video, and already not drawn
+      return;
+    }
     if (VideoReady() != kShown) return;
     v.pix = v.shown;
     if (SendVideoX(v.room, {}, true)) ptr_dirty_ = false;
@@ -2032,6 +2129,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   bool redraw = video_.redraw;
   Video &v = video_;
   g1::RowMove move;
+  bool region = false; // a video in part of the picture: that part by VIDEOT after the rest (below)
   // Auto (detail 0) at 16 greys: while most of the picture keeps changing (video, games), the top two planes at
   // half detail and the low two left as the arms hold them (each pixel within 3 of its 16 levels: about a
   // quarter of the bytes); 300 ms after the motion stops the exact picture follows (the refinement, below).
@@ -2039,10 +2137,48 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
     Make(o, c, 1);
     Compose();
     int64_t now = g1::NowUs();
+    int rows = 0;
     if (exact_.size() == frame_.size()) {
-      int rows = 0;
       for (int y = 0; y < h_; y++)
         rows += std::memcmp(frame_.data() + size_t(y) * size_t(w_), exact_.data() + size_t(y) * size_t(w_), size_t(w_)) != 0;
+    }
+    // 0.5.68+: a part that keeps changing while the rest holds still (a video in a page) goes by VIDEOT on its own,
+    // so the text around it keeps its 16 greys and full detail
+    Rect vr;
+    const bool seen = v.tw && VideoRegion(&vr);
+    // a new rectangle: the first, or one the video outgrew (one still inside the rectangle in use keeps it)
+    const bool found = seen && (!v.rw || vr.x < v.rx || vr.y < v.ry || vr.x + vr.w > v.rx + v.rw || vr.y + vr.h > v.ry + v.rh);
+    if (found) {
+      const int ew = std::min(v.tw, (vr.w + 15) / 16 * 8), eh = std::min(v.th, (vr.h + 15) / 16 * 8);
+      v.rw = 2 * ew;
+      v.rh = 2 * eh;
+      v.rx = std::clamp(vr.x, 0, std::max(0, w_ - v.rw));
+      v.ry = std::clamp(vr.y, 0, std::max(0, h_ - v.rh));
+      LOG("screen: a video at (%d, %d) %d x %d goes as transform-coded video, the rest at 16 greys", v.rx, v.ry, v.rw, v.rh);
+    }
+    if (v.rw) {
+      bool inside = false;
+      if (exact_.size() == frame_.size()) {
+        const int x0 = std::max(0, v.rx), x1 = std::min(w_, v.rx + v.rw);
+        for (int y = std::max(0, v.ry); y < std::min(h_, v.ry + v.rh) && !inside && x1 > x0; y++)
+          inside = std::memcmp(frame_.data() + size_t(y) * size_t(w_) + size_t(x0),
+                               exact_.data() + size_t(y) * size_t(w_) + size_t(x0), size_t(x1 - x0)) != 0;
+      }
+      if (inside) region_until_us_ = now + kMotionHoldUs;
+      const bool whole_moves = !seen && rows * 10 > h_ * 4 &&
+                               std::count_if(heat_.begin(), heat_.end(), [](uint8_t hb) { return std::popcount(hb) >= 4; }) * 10 >
+                                   int64_t(heat_.size()) * 7;
+      if (now >= region_until_us_ || whole_moves) { // the video stopped (or everything moves): the exact picture
+        LOG("screen: the video at (%d, %d) stopped: the exact picture again", v.rx, v.ry);
+        v.rw = 0;
+        v.redraw = redraw = true;
+      } else {
+        region = true;
+        moving_frames_ = 0;
+        moving_until_us_ = 0;
+      }
+    }
+    if (!region && exact_.size() == frame_.size()) {
       if (rows * 10 > h_ * 4) {
         if (++moving_frames_ >= 2) moving_until_us_ = now + kMotionHoldUs;
       } else {
@@ -2050,15 +2186,15 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
     }
     exact_ = frame_;
-    if (now < moving_until_us_ && v.tw) {
+    if (!region && now < moving_until_us_ && v.tw) {
       size_t budget = std::min<size_t>(v.room, Tune());
-      if (SendVideoT(o, budget)) {
+      if (SendVideoT(o, budget, Rect{0, 0, w_, h_})) {
         Count(video_.sent, 2);
         return kLater; // the exact picture follows once it holds still
       }
       return v.tlast == v.tluma ? kLater : kBusy;
     }
-    if (now < moving_until_us_ && v.mw) {
+    if (!region && now < moving_until_us_ && v.mw) {
       Make(o, c, 2);
       Compose();
       if (v.in_motion && frame_ == prev_ && prev_detail_ == 2) return kLater; // the refinement comes when it holds
@@ -2071,7 +2207,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
       return kBusy;
     }
-    if (now < moving_until_us_) {
+    if (!region && now < moving_until_us_) {
       size_t budget = std::min<size_t>(v.room, Tune());
       LevelMap(true);
       for (int n = 2; n <= 4; n++) {
@@ -2088,6 +2224,9 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
       return kBusy;
     }
+  } else if (v.rw) { // a pinned detail or a redraw: no video rectangle
+    v.rw = 0;
+    v.redraw = redraw = true;
   }
   // The scroll is found on the exact picture; "steady" (a pixel changed by one level keeps its old one: noise from a
   // camera or video) applies only when nothing scrolled, since it would break the shifted rows' match.
@@ -2101,6 +2240,12 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
     Compose();
     move = {};
     block = {};
+    if (region && prev_.size() == frame_.size()) { // the video's rectangle as the planes hold it: VIDEOT draws it
+      const int x0 = std::max(0, v.rx), x1 = std::min(w_, v.rx + v.rw);
+      for (int y = std::max(0, v.ry); y < std::min(h_, v.ry + v.rh) && x1 > x0; y++)
+        std::memcpy(frame_.data() + size_t(y) * size_t(w_) + size_t(x0), prev_.data() + size_t(y) * size_t(w_) + size_t(x0),
+                    size_t(x1 - x0));
+    }
     if (redraw || prev_.size() != frame_.size()) return;
     if (n == 1) {
       for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[frame_[i]];
@@ -2112,19 +2257,26 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   };
   // The detail asked for (auto: every pixel when that fits the budget, every pixel whatever the size when nothing
   // moved), coarser only when a record would not fit the arms' room: a picture always goes.
-  int first = o.detail >= 1 ? std::clamp(o.detail, 1, 4) : 1, last = 4;
-  size_t room = video_.room, budget = still || o.detail >= 1 ? room : std::min<size_t>(room, size_t(std::clamp(o.budget, 1, 48)) * 1024);
-  for (int n = first; n <= last; n++) {
-    make(n);
-    if (frame_ == prev_ && !redraw) return n == 1 ? kSame : kLater;
-    if (SendVideoX(n == last ? room : budget, move, false, block)) {
-      prev_ = frame_;
-      prev_detail_ = n;
-      Count(video_.sent, n);
-      return n == 1 ? kShown : kLater;
+  auto planes = [&]() -> int {
+    int first = o.detail >= 1 ? std::clamp(o.detail, 1, 4) : 1, last = 4;
+    size_t room = video_.room, budget = still || o.detail >= 1 ? room : std::min<size_t>(room, size_t(std::clamp(o.budget, 1, 48)) * 1024);
+    for (int n = first; n <= last; n++) {
+      make(n);
+      if (frame_ == prev_ && !redraw) return n == 1 ? kSame : kLater;
+      if (SendVideoX(n == last ? room : budget, move, false, block)) {
+        prev_ = frame_;
+        prev_detail_ = n;
+        Count(video_.sent, n);
+        return n == 1 ? kShown : kLater;
+      }
     }
-  }
-  return kBusy;
+    return kBusy;
+  };
+  int res = planes();
+  if (!region || res == kBusy) return res;
+  // the video's rectangle after the rest (a record of the rest that drew over it asked for its every band)
+  if (SendVideoT(o, std::min<size_t>(v.room, Tune()), Rect{v.rx, v.ry, v.rw, v.rh})) Count(video_.sent, 2);
+  return kLater; // until the video stops: then the exact picture
 }
 
 // A frame of greys (mutex_ held): the library uploads the changed pixels (4 bits each); a transition's reveal is

@@ -7,6 +7,7 @@
 #include <thread>
 #include <clocale>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -14,6 +15,7 @@
 #include <string>
 
 #include <android/log.h>
+#include <sys/system_properties.h>
 
 #include "android_transport.hpp"
 #include "fx.hpp"
@@ -185,11 +187,38 @@ private:
         while (!stop_ && a.NextEvent(&e, 0)) {
           any = true;
           if (e.type == scouter_kit::g1::EVENT_INPUT && e.trigger == scouter_kit::g1::TRIGGER_TOUCH) Gesture(arm, e.a);
+          if (e.type == scouter_kit::g1::EVENT_NOTIFY && e.a == ssh::ScreenMirror::kPanReport)
+            PanSample(arm, e.host_us, int32_t(e.b));
         }
       }
       if (!any) std::this_thread::sleep_for(std::chrono::milliseconds(40));
     }
   }
+  // The eye-drift measurement (debug.vox.pan 1): both eyes' windows from the arms' own pan, compared; every 2 s the
+  // log says how far apart they were while the head turned and while it held still (what the eyes must fuse).
+  void PanSample(int arm, int64_t at, int32_t x) {
+    Eye &me = eye_[arm], &other = eye_[1 - arm];
+    me.prev = me.at ? me.x : x;
+    me.x = x;
+    me.at = at;
+    if (!other.at || std::llabs(at - other.at) > 200000) return;
+    int apart = std::abs(eye_[0].x - eye_[1].x);
+    bool still = eye_[0].prev == eye_[0].x && eye_[1].prev == eye_[1].x;
+    (still ? max_still_ : max_turning_) = std::max(still ? max_still_ : max_turning_, apart);
+    if (at - logged_ >= 2000000) {
+      LOG("pan eyes: L %d R %d now; over 2 s at most %d px apart turning, %d px still", eye_[0].x, eye_[1].x,
+          max_turning_, max_still_);
+      logged_ = at;
+      max_turning_ = max_still_ = 0;
+    }
+  }
+  struct Eye {
+    int64_t at = 0;
+    int32_t x = 0, prev = 0;
+  };
+  Eye eye_[2];
+  int max_turning_ = 0, max_still_ = 0;
+  int64_t logged_ = 0;
   std::atomic<bool> stop_{false};
   std::thread thread_;
 };
@@ -1451,8 +1480,85 @@ extern "C" {
 // One captured frame: a direct buffer of RGBA_8888 rows `stride` bytes apart (an ImageReader plane). Blocks
 // while the previous frame is not on the display yet. ScreenMirror's kShown, kSame, kHidden, kStopped, kBusy
 // or kLater.
+// The link-rhythm test (adb shell setprop debug.vox.link 9): the active interval asked of the arms, x 1.25 ms (6 =
+// 7.5 ms, the default; 9 = 11.25 ms; 12 = 15 ms). Every 5 s while the mirror sends, each arm's interval and packets a
+// second go to the log ("link L: 7500 us, 141 packets/s"), to see which interval carries the most.
+static void LinkProbe() {
+  static int64_t next_prop = 0, last_us = 0, next_reboot_check = 0;
+  static int units = 6;
+  static uint32_t last_packets[2] = {};
+  int64_t now = scouter_kit::g1::NowUs();
+  if (now >= next_prop) {
+    next_prop = now + 2000000;
+    char buf[PROP_VALUE_MAX] = {};
+    int u = __system_property_get("debug.vox.link", buf) > 0 ? std::atoi(buf) : 6;
+    if (u < 6 || u > 24) u = 6;
+    if (u != units) {
+      units = u;
+      scouter_kit::g1::SetActiveLink(u);
+      LOG("link: asking the arms for %d.%02d ms", u * 125 / 100, u * 125 % 100);
+    }
+    // the eye-drift measurement (adb shell setprop debug.vox.pan 1, then start the panorama)
+    bool pan = __system_property_get("debug.vox.pan", buf) > 0 && buf[0] == '1';
+    if (pan != ssh::ScreenMirror::pan_report.load()) {
+      ssh::ScreenMirror::pan_report = pan;
+      LOG("pan eyes: the measurement %s (from the next panorama start)", pan ? "on" : "off");
+    }
+  }
+  // the reboot test (adb shell setprop debug.vox.reboot R1, then R2, L1...: each new value restarts that arm once):
+  // how long until it is back and its eye shows a picture again
+  static std::string last_reboot;
+  static int reboot_arm = -1;
+  static int64_t reboot_at = 0;
+  static uint32_t reboot_epochs = 0;
+  static bool reboot_back = false;
+  if (now >= next_reboot_check) {
+    next_reboot_check = now + 2000000;
+    char rb[PROP_VALUE_MAX] = {};
+    std::string v = __system_property_get("debug.vox.reboot", rb) > 0 ? rb : "";
+    if (last_reboot.empty()) last_reboot = v.empty() ? "-" : v; // a value set before Vox started does nothing
+    else if (!v.empty() && v != last_reboot) {
+      last_reboot = v;
+      reboot_arm = v[0] == 'R' || v[0] == 'r' ? 1 : 0;
+      reboot_epochs = (reboot_arm ? scouter_kit::g1::right : scouter_kit::g1::left).GetState().epoch_changes;
+      reboot_at = now;
+      reboot_back = false;
+      LOG("reboot test: restarting the %s arm", reboot_arm ? "right" : "left");
+      std::thread([a = reboot_arm] {
+        if (!scouter_kit::g1::RestartArm(a)) LOG("reboot test: the arm did not answer the restart");
+      }).detach();
+    }
+  }
+  if (reboot_arm >= 0) {
+    auto st = (reboot_arm ? scouter_kit::g1::right : scouter_kit::g1::left).GetState();
+    if (!reboot_back && st.connected && st.epoch_changes != reboot_epochs) {
+      reboot_back = true;
+      LOG("reboot test: the %s arm back after %lld ms", reboot_arm ? "right" : "left", (long long)((now - reboot_at) / 1000));
+    }
+    if (reboot_back && st.shown_us > reboot_at) {
+      LOG("reboot test: the %s eye shows a picture again %lld ms after the restart", reboot_arm ? "right" : "left",
+          (long long)((st.shown_us - reboot_at) / 1000));
+      reboot_arm = -1;
+    } else if (now - reboot_at > 60000000) {
+      LOG("reboot test: the %s eye showed nothing in 60 s", reboot_arm ? "right" : "left");
+      reboot_arm = -1;
+    }
+  }
+  if (now - last_us >= 5000000) {
+    for (int i = 0; i < 2; i++) {
+      auto st = (i ? scouter_kit::g1::right : scouter_kit::g1::left).GetState();
+      if (last_us && st.present && st.packets != last_packets[i])
+        LOG("link %s: %d us, %.0f packets/s", i ? "R" : "L", st.interval_us,
+            double(st.packets - last_packets[i]) * 1e6 / double(now - last_us));
+      last_packets[i] = st.packets;
+    }
+    last_us = now;
+  }
+}
+
 JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclass, jobject buffer, jint w, jint h,
                                                                jint stride, jintArray options) {
+  LinkProbe();
   std::shared_ptr<ssh::ScreenMirror> screen = Mirror();
   if (!screen) return ssh::ScreenMirror::kStopped;
   const uint8_t *p = Pixels(env, buffer, w, h, stride);

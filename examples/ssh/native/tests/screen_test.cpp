@@ -579,6 +579,7 @@ int main() {
     // 0.5.68+: moving pictures as transform-coded video (VIDEOT: half size, 8 bits, dithered 16 levels); back to
     // the still picture, every pixel exact again
     g1::emulator::SetFirmware(5, 68);
+    int full_vt_bytes = 0; // the whole picture's largest VIDEOT record (below)
     for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
     CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
                               g1::left.GetState().firmware_patch == 68; }, 10000));
@@ -607,6 +608,7 @@ int main() {
                   "the panel while moving\n", tmoving, tbytes, moving_bytes, levels_seen);
       CHECK(tmoving >= 3);
       CHECK(levels_seen > 4); // more than the 4 greys of the plane motion mode
+      full_vt_bytes = tbytes;
       CHECK(WaitFor([&] {
         int r = tm.Frame(held.data(), 540, 471, gs, go);
         return r == ssh::ScreenMirror::kShown && tm.stats().detail == 1;
@@ -624,6 +626,77 @@ int main() {
       CHECK(WaitFor([&] { return wrong_tm() == 0; }, 4000)); // the exact picture drawn (a full redraw)
       std::printf("greys auto 0.5.68: %d of 254340 pixels differ from the exact picture after the motion\n", wrong_tm());
       tm.Stop();
+    }
+    {
+      // a video in part of a page (a player in a browser): that rectangle by VIDEOT, the text around it stays exact
+      // (16 greys, full detail) while it plays; once it stops, the whole picture exact again
+      const int vx = 150, vy = 100, vw = 200, vh = 150;
+      auto pagevid = [&](int f) {
+        std::vector<uint8_t> p(page.begin(), page.begin() + std::ptrdiff_t(size_t(gs) * 471));
+        auto vid = video(f);
+        for (int y = vy; y < vy + vh; y++)
+          std::memcpy(&p[size_t(y) * size_t(gs) + size_t(vx) * 4], &vid[size_t(y) * size_t(gs) + size_t(vx) * 4], size_t(vw) * 4);
+        return p;
+      };
+      ssh::ScreenMirror rm;
+      CHECK(rm.Start(100, 9, &error));
+      int vframes = 0, vbytes = 0;
+      for (int f = 0; f < 14; f++) {
+        auto pv = pagevid(f);
+        int r = 0;
+        CHECK(WaitFor([&] { r = rm.Frame(pv.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+        if (f >= 6 && rm.stats().detail == 2) {
+          vframes++;
+          vbytes = std::max(vbytes, rm.stats().bytes);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      auto outside_wrong = [&] { // panel pixels outside the video (and a 32-pixel margin) unlike the exact picture
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!rm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) {
+            if (x >= vx - 32 && x < vx + vw + 32 && y >= vy - 32 && y < vy + vh + 32) continue;
+            wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+          }
+        return wrong;
+      };
+      int levels_in = 0;
+      {
+        bool seen[16] = {};
+        const uint8_t *pl = g1::emulator::Panel(0);
+        for (int y = vy + 16; y < vy + vh - 16; y++)
+          for (int x = vx + 16; x < vx + vw - 16; x++) seen[pl[size_t(y) * 640 + size_t(x + 100)] & 15] = true;
+        for (bool b : seen) levels_in += b;
+      }
+      int ow = outside_wrong();
+      std::printf("greys auto 0.5.68, a video in a page: %d of 8 late frames as VIDEOT, largest %d bytes; %d levels in "
+                  "the video, %d pixels outside it unlike the exact picture\n", vframes, vbytes, levels_in, ow);
+      CHECK(vframes >= 6);
+      CHECK(vbytes < full_vt_bytes); // a part of the picture, not all of it
+      CHECK(levels_in > 4);    // dithered video, not 4 grey planes
+      CHECK(ow == 0);          // the text around it exact all along
+      auto still = pagevid(13);
+      CHECK(WaitFor([&] {
+        int r = rm.Frame(still.data(), 540, 471, gs, go);
+        return r == ssh::ScreenMirror::kShown && rm.stats().detail == 1;
+      }, 5000));
+      auto wrong_rm = [&] {
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!rm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+        return wrong;
+      };
+      CHECK(WaitFor([&] { return wrong_rm() == 0; }, 4000));
+      std::printf("greys auto 0.5.68, a video in a page: %d pixels differ from the exact picture after it stopped\n", wrong_rm());
+      rm.Stop();
     }
 
     // 0.5.66+: the pointer as the arms' sprite (a move costs a tiny record, no frame), and a dragged window as a
@@ -693,7 +766,8 @@ int main() {
     // The panorama canvas (0.5.66+): a 1920 x 480 black and white panorama goes to the arms once; each window
     // position (a head turn) is a few bytes, and the panel shows exactly that part of the panorama.
     {
-      ssh::ScreenMirror cm;
+      ssh::ScreenMirror::pan_report = true; // the eye-drift measurement's NOTIFYs (checked after the turn below)
+    ssh::ScreenMirror cm;
       CHECK(cm.Start(100, 9, &error));
       const int PW = 1920, PH = 480;
       std::vector<uint8_t> pano(size_t(PW) * PH * 4);
@@ -766,6 +840,18 @@ int main() {
       // anchor (every head-turn update) puts both at its window again
       CHECK(wl >= 0 && wr >= 0 && std::abs(wl - wr) <= 12);
       CHECK(wl < po.src_x - 180 && wl > po.src_x - 300);
+      { // the arms' reports (every 100 ms) end at the windows each eye shows
+        int rep[2] = {-1, -1}, count[2] = {};
+        for (int a = 0; a < 2; a++) {
+          g1::Event e;
+          while ((a ? g1::right : g1::left).NextEvent(&e, 0))
+            if (e.type == g1::EVENT_NOTIFY && e.a == ssh::ScreenMirror::kPanReport) rep[a] = int(e.b), count[a]++;
+        }
+        std::printf("panorama canvas: eye reports %d + %d, last left %d right %d\n", count[0], count[1], rep[0], rep[1]);
+        CHECK(count[0] >= 3 && count[1] >= 3);
+        CHECK(std::abs(rep[0] - wl) <= 1 && std::abs(rep[1] - wr) <= 1);
+      }
+      ssh::ScreenMirror::pan_report = false;
       std::printf("panorama canvas: head turns %d bytes at most, the arms' own pan %s\n", bytes_after,
                   cm.stats().pan ? "running" : "NOT running");
       CHECK(cm.stats().pan == 1);

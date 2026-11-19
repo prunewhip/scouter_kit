@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -198,6 +199,10 @@ public:
   int Look(const ScreenOptions &);
 
   static constexpr int kShown = 0, kSame = 1, kHidden = 2, kStopped = 3, kBusy = 4, kLater = 5;
+  // The eye-drift measurement: with it on (before the panorama starts), each arm's own pan NOTIFYs (kPanReport,
+  // its window's x) every 100 ms, so both eyes' windows can be compared during real head turns.
+  static constexpr uint32_t kPanReport = 0x50414E00;
+  static std::atomic<bool> pan_report;
 
 private:
   bool Hidden(const ScreenOptions &); // reads the arms' sensors at most once a second, 5 times heads-up (mutex_ held)
@@ -213,7 +218,11 @@ private:
                   scouter_kit::g1::BlockMove block = {});
   scouter_kit::g1::Sprite PointerSprite(); // the sprite fields for the next record (and where it then is)
   void LevelMap(bool coarse);              // the arms' level map: exact (16 greys) or the top two planes only
-  bool SendVideoT(const ScreenOptions &o, size_t budget); // base_ at half size as VIDEOT (moving): false, nothing sent
+  // base_'s part r (the whole picture, or the video rectangle) at half size as VIDEOT: false, nothing sent
+  bool SendVideoT(const ScreenOptions &o, size_t budget, Rect r);
+  // auto greys: the part of the picture that keeps changing while the rest holds still (a video in a page), from
+  // frame_ against exact_; false when there is none (or most of the picture moves)
+  bool VideoRegion(Rect *r);
   bool SendMotion(size_t max_bytes); // frame_ (at detail 2) on the motion stream: false when larger than max_bytes
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
@@ -255,6 +264,8 @@ private:
   bool link_busy_ = false;
   int moving_frames_ = 0;      // frames in a row with most rows changed
   int64_t moving_until_us_ = 0;
+  std::vector<uint8_t> heat_;  // per 16 x 16 tile: changed or not in each of the last 8 frames that changed (bits)
+  int64_t region_until_us_ = 0; // the video rectangle stays until then (its last change + kMotionHoldUs)
   scouter_kit::gray::Bitmap *pic_ = nullptr;
   std::vector<uint8_t> luma_, rot_, base_, last_base_, frame_, prev_, lo_, hi_;
   int prev_detail_ = 0; // the detail prev_ went at (steady compares like with like)
@@ -315,13 +326,16 @@ private:
     std::vector<uint8_t> tluma, tlast;
     int tq = 40;                  // the quantiser, self-tuned to the moving frames' budget
     bool tredraw = true;          // the next VIDEOT record draws every band (the panel showed the planes)
+    std::array<int, 2> py{}; // each arm's panel y of the picture's top (px below: its left)
+    // a video in part of the picture (a player in a page): that rectangle by VIDEOT, the rest at 16 greys (rw 0: none)
+    int rx = 0, ry = 0, rw = 0, rh = 0;
     // 0.5.66+: block moves, and the pointer as VIDEOX's sprite (64 bytes at sprite_at) instead of in the picture
     bool v66 = false;
     bool coarse_map = false; // auto greys moving: the level map reads only the top two planes (no stale low planes)
     // the canvas path: the whole panorama (cw wide) on the arms, the window's x in an arena word per arm
     int cw = 0, cwin = -1;
     uint32_t xword = 0;
-    std::array<int, 2> px{};
+    std::array<int, 2> px{}; // each arm's panel x of the picture's left (VIDEOX and the canvas)
     // ... and the arms' own pan (a VM program: their gyroscope moves the window between the phone's anchors)
     uint32_t pan_data = 0, pan_table = 0;
     int64_t pan_blk = -1, pan_dummy = -1;

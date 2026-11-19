@@ -349,10 +349,16 @@ class TransformVideoEncoder {
   const std::vector<uint8_t> &Picture() const { return ref_; }
   int Width() const { return w_; }
   int Height() const { return h_; }
+  // Encoder-only tuning (the records stay VIDEOT records): rate-distortion choices, each level lowered, each
+  // 4 x 4 block dropped and each block skipped when the bits saved (as the model stands) outweigh the squared
+  // error added, at lambda = rdo x q^2. 0 is the plain dead-zone quantiser. The default 0.25 took 19-26% fewer
+  // bytes at the same PSNR on two camera clips (0.4: 22-29%, but more stale blocks).
+  void SetRdo(double rdo) { rdo_ = rdo; }
 
  private:
   int w_, h_;
   bool started_ = false;
+  double rdo_ = 0.25;
   std::vector<uint8_t> ref_;
   std::vector<uint16_t> p_;
 };
@@ -706,6 +712,12 @@ void Deinit();
 
 // Host clock used with device times (steady clock, µs).
 int64_t NowUs();
+// The active link's connection interval asked of both arms, x 1.25 ms (6 = 7.5 ms, the default; 9 = 11.25 ms;
+// 12 = 15 ms), for measuring which carries the most: the arms are asked again within 5 s while data flows.
+void SetActiveLink(int units);
+// Restarts a real arm (CTRL REBOOT, a clean reboot; it comes back with a new epoch and the library restores it).
+// Waits for the arm's answer (up to 6 s): false without one. For tests of the recovery.
+bool RestartArm(int arm);
 
 #ifdef SCOUTER_G1_EMULATOR
 // The emulated arms of an emulator build. They run the arms' interpreter
