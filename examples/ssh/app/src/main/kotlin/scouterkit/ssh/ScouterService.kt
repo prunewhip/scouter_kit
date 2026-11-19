@@ -52,6 +52,7 @@ object Session {
     @Volatile var listening = false
     @Volatile var dictating = false // what is said is typed into the terminal
     @Volatile var voiceMode = false // voice mode (Alt+V): talking to the terminal, a strip at the bottom says so
+    @Volatile var voiceControl = false // voice control is on (VoiceControl: Alt+;, the left TouchBar)
     @Volatile var tvTyping = false // in TV mode (Alt+Y), T: the keyboard types into the TV's text field
     @Volatile var hub = false // the hub is open (Alt+G)
     @Volatile var hubTyping = false // the hub takes typing (a timer's length, an alarm, a reminder, a note)
@@ -681,6 +682,7 @@ class ScouterService : Service() {
     // notification.
     private fun end() {
         ended = true
+        vc.stop("the session ended")
         stopListening()
         if (voiceEngine != null) Thread { runCatching { Parakeet.done("glasses") } }.start()
         voiceEngine = null
@@ -1108,7 +1110,11 @@ class ScouterService : Service() {
     }
 
     private fun update(glasses: String? = null, keyer: String? = null, screen: String? = null) {
-        glasses?.let { Session.glasses = it }
+        glasses?.let {
+            // voice control's live speech loaded ahead, so a hold to talk listens at once
+            if (it == "ready" && Session.glasses != "ready" && LiveModel.ready(this)) Recognizers.warm(this)
+            Session.glasses = it
+        }
         // The chosen terminal's state, for the app and the notification.
         val t = settings.active()?.let { terms[it.id] }
         Session.mosh = if (t != null && t.started && moshPaused) "paused" else t?.status ?: "off"
@@ -1618,6 +1624,7 @@ class ScouterService : Service() {
             what == "tvstop" -> tvTab(stop = true)
             what == "termscroll:up" -> if (settings.show == Settings.TERMINAL) scroll(-1, 1, raw = true)
             what == "termscroll:down" -> if (settings.show == Settings.TERMINAL) scroll(1, 1, raw = true)
+            what == "vc" -> vc.toggle()
             what == "ff" -> ffRemote()
             what == "ffstop" -> ffStop()
             what.startsWith("ffkey:") -> what.removePrefix("ffkey:").split(":").let { p ->
@@ -4583,6 +4590,69 @@ class ScouterService : Service() {
 
     private var car: CarMode? = null
     private var carListener: VoiceListener? = null
+
+    // ------------------------------------------------ voice control (VoiceControl)
+
+    private val vc: VoiceControl by lazy { VoiceControl(this, vcHost) }
+    private val vcRedraw: Runnable = Runnable { if (vc.on) vc.draw() }
+    private val vcHost: VoiceControl.Host = object : VoiceControl.Host {
+        override val work: Handler get() = this@ScouterService.work
+        override fun target(): String {
+            if (settings.show != Settings.SCREEN) return "terminal"
+            val src = Session.screenSource.ifEmpty { Settings.PHONE }
+            if (src == Settings.PHONE) return "phone"
+            val s = settings.servers().firstOrNull { it.id == src.removePrefix("screen:") }
+            return if (s?.local == true) "desktop" else "laptop"
+        }
+        override fun showTarget(what: String): String? {
+            when (what) {
+                "phone" -> {
+                    if (screen == null) {
+                        phoneScreen()
+                        return "sharing the phone's screen first (Android asks; Vox taps Start)"
+                    }
+                    choose(Settings.PHONE)
+                }
+                "laptop" -> choose("screen:" + (settings.servers().firstOrNull { !it.local } ?: return "no laptop saved").id)
+                "desktop" -> choose("screen:" + (settings.servers().firstOrNull { it.local } ?: return "no phone desktop saved").id)
+                else -> choose("term:" + (settings.active() ?: return "no terminal saved").id)
+            }
+            return null
+        }
+        override fun picture(): IntArray? {
+            if (settings.show != Settings.SCREEN) return null
+            val st = Native.screenStats()
+            return if (st[5] > 0 && st[6] > 0) intArrayOf(st[5], st[6]) else null
+        }
+        override fun redraw() {
+            Session.overlayGen++
+            screen?.poke()
+            remote?.poke()
+        }
+        override fun band(text: String, lines: Int) {
+            if (glassesWith != null) Native.voiceBand(text, lines)
+        }
+        override fun other(text: String): String? {
+            val m = VoiceCommands.match(settings, text) ?: return null
+            voiceDo(m)
+            return m.label
+        }
+        override fun micBusy(): String? = when {
+            carListener != null -> "Car mode has the microphone"
+            capListener != null -> "live captions have the microphone"
+            else -> {
+                if (listener != null) stopListening()
+                null
+            }
+        }
+        override fun vault(): Vault = this@ScouterService.vault
+        override fun claudeServer(): Settings.Server? = settings.servers().firstOrNull { it.local } ?: settings.active()
+        override fun terminalScroll(dir: Int) = scroll(dir, 1, raw = true)
+        override fun onState() {
+            Session.voiceControl = vc.on
+            Session.changed()
+        }
+    }
     private var carBlanked = false // Car mode turned the glasses' display off
     private val carDevices = HashMap<String, String>() // a car's Bluetooth address: its name
     private val carGone = HashMap<String, Runnable>() // a car whose link dropped: its end of Car mode, if it stays gone
@@ -4879,6 +4949,9 @@ class ScouterService : Service() {
     // What the glasses draw: a screen (the phone's, or a server's once its images come) or the terminal's path
     // (the chosen terminal, or the card of a source that cannot show yet). The choice itself is Settings.source.
     private fun render(want: String) {
+        // voice control's grid follows the picture that now shows
+        work.removeCallbacks(vcRedraw)
+        work.postDelayed(vcRedraw, 900)
         val show = if (want == Settings.SCREEN && screen == null && remote == null) Settings.TERMINAL else want
         if (show == Settings.SCREEN && Session.screenSource.isEmpty()) Session.screenSource = remote?.key ?: Settings.PHONE
         settings.show = show
@@ -5053,6 +5126,14 @@ class ScouterService : Service() {
 
     // A TouchBar gesture: what Settings says it does.
     private fun gesture(arm: Int, gesture: Int) {
+        // Push to talk (voice control): the press held, its marker at once; let go, the phrase is read.
+        if ((gesture == Native.GESTURE_HOLD || gesture == Native.GESTURE_HOLD_END) &&
+            settings.gestureAction(arm, Native.GESTURE_HOLD) == Settings.ACTION_PTT) {
+            if (gesture == Native.GESTURE_HOLD) vc.pttStart() else vc.pttEnd()
+            Session.gesture = (if (arm == 0) "left" else "right") + " held: push to talk"
+            Session.changed()
+            return
+        }
         // The left TouchBar: a hold's own action when it is let go; held 3 s, the glasses go look-up only
         // (Always visible off), which only the app turns back (no accidental switches).
         if (arm == 0 && gesture == Native.GESTURE_HOLD) {
@@ -5096,6 +5177,7 @@ class ScouterService : Service() {
             Settings.ACTION_NEXT, Settings.ACTION_PREV -> source(action)
             Settings.ACTION_LISTEN -> listen(true)
             Settings.ACTION_VOICE_MODE -> voiceModeSet(!Session.voiceMode)
+            Settings.ACTION_VOICE_CONTROL, Settings.ACTION_PTT -> vc.toggle()
             Settings.ACTION_TAB_NEXT -> tabs("next")
             Settings.ACTION_TAB_PREV -> tabs("prev")
             Settings.ACTION_TAB_NEW -> tabs("new")

@@ -446,6 +446,7 @@ object Hotkeys {
             KeyEvent.KEYCODE_J -> "people"
             KeyEvent.KEYCODE_N -> "editor"
             KeyEvent.KEYCODE_D -> "demo"
+            KeyEvent.KEYCODE_SEMICOLON -> "vc" // voice control on / off
             KeyEvent.KEYCODE_COMMA -> "media:prev"
             KeyEvent.KEYCODE_PERIOD -> "media:next"
             else -> null

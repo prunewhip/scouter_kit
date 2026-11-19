@@ -1676,13 +1676,25 @@ JNIEXPORT jboolean JNICALL Java_scouterkit_ssh_Native_screenPointer(JNIEnv *, jc
 // The part of the phone's screen on the glasses (left, top, right, bottom in 1/10000) and its size there (w, h
 // pixels), or null before a frame.
 JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_screenShows(JNIEnv *env, jclass) {
-  int v[6] = {};
+  int v[8] = {};
   auto screen = Mirror();
-  if (!screen || !screen->Shows(v)) return nullptr;
-  jint t[6] = {v[0], v[1], v[2], v[3], v[4], v[5]};
-  jintArray a = env->NewIntArray(6);
-  env->SetIntArrayRegion(a, 0, 6, t);
+  if (!screen || !screen->Shows8(v)) return nullptr;
+  jint t[8] = {v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]};
+  jintArray a = env->NewIntArray(8);
+  env->SetIntArrayRegion(a, 0, 8, t);
   return a;
+}
+
+// Voice control's see-through layer over the screen's picture (0 transparent, else that grey; w x h at (x, y));
+// null: none. It goes with the next frame.
+JNIEXPORT void JNICALL Java_scouterkit_ssh_Native_screenHud(JNIEnv *env, jclass, jbyteArray pixels, jint w, jint h,
+                                                            jint x, jint y) {
+  std::vector<uint8_t> p;
+  if (pixels && w > 0 && h > 0) {
+    p.resize(size_t(env->GetArrayLength(pixels)));
+    env->GetByteArrayRegion(pixels, 0, jsize(p.size()), reinterpret_cast<jbyte *>(p.data()));
+  }
+  if (auto screen = Mirror()) screen->SetHud(std::move(p), w, h, x, y);
 }
 
 // Each eye's panel read back against what was sent (blocks for a second or more): a line per eye.

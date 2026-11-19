@@ -117,6 +117,15 @@ class VoxNotifications : NotificationListenerService() {
                 .onFailure { android.util.Log.w(ScouterService.TAG, "reply: ${it.message}") }.isSuccess
         }
 
+        // One dismissed (as swiped away), or every clearable one.
+        fun dismiss(key: String) {
+            instance?.let { l -> runCatching { l.cancelNotification(key) } }
+        }
+
+        fun clearAll() {
+            instance?.let { l -> runCatching { l.cancelAllNotifications() } }
+        }
+
         val QUIET = setOf(Notification.CATEGORY_SERVICE, Notification.CATEGORY_TRANSPORT, Notification.CATEGORY_PROGRESS,
             Notification.CATEGORY_STATUS, Notification.CATEGORY_SYSTEM, Notification.CATEGORY_NAVIGATION,
             Notification.CATEGORY_STOPWATCH, Notification.CATEGORY_LOCATION_SHARING)

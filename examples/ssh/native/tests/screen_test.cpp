@@ -706,6 +706,20 @@ int main() {
       };
       CHECK(WaitFor([&] { return wrong_rm() == 0; }, 4000));
       std::printf("greys auto 0.5.68, a video in a page: %d pixels differ from the exact picture after it stopped\n", wrong_rm());
+      // voice control's see-through layer: its lit pixels over the picture, the rest of the picture as it was; where
+      // the picture sits (Shows8: x, y)
+      int s8[8] = {};
+      CHECK(rm.Shows8(s8) && s8[4] == 540 && s8[6] == 0 && s8[7] == 0);
+      std::vector<uint8_t> hud(size_t(60) * 20, 0);
+      for (int y = 5; y < 15; y++)
+        for (int x = 10; x < 50; x++) hud[size_t(y) * 60 + size_t(x)] = 255;
+      rm.SetHud(hud, 60, 20, 30, 300);
+      CHECK(WaitFor([&] {
+        rm.Frame(still.data(), 540, 471, gs, go);
+        return (g1::emulator::Panel(0)[size_t(310) * 640 + 100 + 60] & 15) == 15 && wrong_rm() == 0;
+      }, 5000));
+      std::printf("greys auto 0.5.68: the see-through layer drawn (%d pixels unlike the composed picture)\n", wrong_rm());
+      rm.SetHud({}, 0, 0, 0, 0);
       rm.Stop();
     }
 

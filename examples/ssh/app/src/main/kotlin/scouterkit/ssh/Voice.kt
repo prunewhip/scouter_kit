@@ -362,7 +362,7 @@ class PhoneMic(private val context: android.content.Context) : Mic {
 }
 
 // Floats that grow (the phrase being spoken).
-private class Floats {
+internal class Floats {
     var data = FloatArray(16000)
     var size = 0
     fun add(src: FloatArray, n: Int) {

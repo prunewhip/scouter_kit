@@ -51,6 +51,7 @@ object Panels {
             "Alt+Space" to "voice command",
             "Alt+V" to "voice mode: talk to it",
             "Alt+Y" to "TV remote on / off",
+            "Alt+;" to "voice control on / off (left TouchBar: hold to talk)",
         ),
         "Terminal" to listOf(
             "Alt+T" to "new tab",

@@ -97,6 +97,9 @@ class MainActivity : Activity() {
     }
     private lateinit var voiceModel: TextView
     private lateinit var modelButton: TextView
+    private lateinit var liveModelText: TextView
+    private lateinit var liveButton: TextView
+    private lateinit var vcButton: TextView
     private lateinit var micDisc: FrameLayout
     private lateinit var micIcon: IconView
     private lateinit var micHalo: View
@@ -117,7 +120,7 @@ class MainActivity : Activity() {
     private val modelTicker = object : Runnable {
         override fun run() {
             showVoice()
-            if (VoiceModel.progress >= 0 || TranslateModel.progress >= 0) content.postDelayed(this, 500)
+            if (VoiceModel.progress >= 0 || TranslateModel.progress >= 0 || LiveModel.progress >= 0) content.postDelayed(this, 500)
         }
     }
     private lateinit var previewView: PreviewView
@@ -1018,6 +1021,43 @@ class MainActivity : Activity() {
         model.addView(row)
         page.addView(model)
 
+        // Voice control (VoiceControl): the live model, on / off, the microphone.
+        val vcCard = card("Voice control", "The phone or the laptop by voice: the glasses show a grid, say a cell (\"C4\") to " +
+            "tap it, \"type\" to type what you say (\"backspace\", \"send\", \"type\" again ends it), \"back\", \"home\", " +
+            "\"scroll down\", \"open maps\", \"notifications\", \"ask …\" (Claude), \"help\". Left TouchBar: hold to talk, " +
+            "double tap for on / off; Alt+; on the keyboard. The top line always shows what it hears.")
+        val vRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val vTexts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        vTexts.addView(text("Live speech model", 15f, Ui.TEXT, Ui.BOLD))
+        liveModelText = text("", 12.5f, Ui.MUTED)
+        vTexts.addView(liveModelText)
+        vRow.addView(vTexts, lp(0, weight = 1f))
+        liveButton = chip("Download", true) {
+            if (LiveModel.ready(this)) dialog().setTitle("Delete the live speech model?")
+                .setMessage("Voice control then reads with the speech model above (slower words).")
+                .setPositiveButton("Delete") { _, _ ->
+                    Recognizers.reset()
+                    LiveModel.delete(this)
+                    showVoice()
+                }
+                .setNegativeButton("Cancel", null).show()
+            else downloadLive()
+        }
+        vRow.addView(liveButton)
+        vcCard.addView(vRow)
+        vcButton = button(if (Session.voiceControl) "Voice control off" else "Voice control on", 0) {
+            ScouterService.send(this@MainActivity, ScouterService.ACTION_PANEL, "do" to "vc")
+            content.postDelayed({ showVoice() }, 400)
+        }
+        vcCard.addView(vcButton, lp().apply { topMargin = dp(8) })
+        vcCard.addToggle(toggle("The phone's microphone", "Instead of the glasses' (the right arm)", settings.vcPhoneMic) {
+            settings.vcPhoneMic = it
+        })
+        page.addView(vcCard)
+
         // Live captions (Parakeet) and translation into English (Whisper small): on the glasses, Alt+E / Alt+I.
         val listen = card("Captions and translation", "What is said around you, on the glasses as it is said: Alt+E " +
             "captions (the speech model above), Alt+I a translation into English from any language (its own model, " +
@@ -1166,6 +1206,22 @@ class MainActivity : Activity() {
             else -> "Not downloaded yet · ${mb(VoiceModel.bytes)}, Wi-Fi is best"
         }
         modelButton.visibility = if (VoiceModel.available && VoiceModel.progress < 0) View.VISIBLE else View.GONE
+        val live = LiveModel.ready(this)
+        liveModelText.text = when {
+            !VoiceModel.available -> "This build has no speech engine."
+            LiveModel.unpacking -> "Unpacking…"
+            LiveModel.progress >= 0 -> "Downloading… ${mb(LiveModel.progress)} of ${mb(LiveModel.SIZE)}"
+            live -> "Parakeet live (NVIDIA, 0.6B, words every 240 ms) · ${if (Recognizers.loaded) "loaded" else "on this phone"}"
+            LiveModel.problem != null -> "Not downloaded: ${LiveModel.problem}"
+            VoiceModel.ready(this) -> "Not downloaded: voice control uses the model above meanwhile · ${mb(LiveModel.SIZE)}"
+            else -> "Not downloaded yet · ${mb(LiveModel.SIZE)}, Wi-Fi is best"
+        }
+        liveButton.visibility = if (VoiceModel.available && LiveModel.progress < 0) View.VISIBLE else View.GONE
+        liveButton.text = if (live) "Delete" else "Download"
+        val lr = dp(18).toFloat()
+        liveButton.background = ripple(if (live) rounded(Ui.RAISED, lr, dp(1), Ui.STROKE) else accentGradient(lr), lr)
+        liveButton.setTextColor(if (live) Ui.TEXT else Ui.ON_ACCENT)
+        vcButton.text = if (Session.voiceControl) "Voice control off" else "Voice control on"
         modelButton.text = if (ready) "Delete" else "Download"
         val r = dp(18).toFloat()
         modelButton.background = ripple(if (ready) rounded(Ui.RAISED, r, dp(1), Ui.STROKE) else accentGradient(r), r)
@@ -1816,6 +1872,23 @@ class MainActivity : Activity() {
                 VoiceModel.progress = 0
                 Thread {
                     VoiceModel.download(applicationContext)
+                    runOnUiThread { showVoice() }
+                }.start()
+                content.post(modelTicker)
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun downloadLive() {
+        if (LiveModel.progress >= 0) return
+        dialog().setTitle("Download the live speech model?")
+            .setMessage("${LiveModel.SIZE / 1_000_000} MB (NVIDIA's Parakeet, streaming) from GitHub, checked by its SHA-256, " +
+                "then unpacked on the phone. Wi-Fi is best. It goes on where it stopped if interrupted.")
+            .setPositiveButton("Download") { _, _ ->
+                LiveModel.progress = 0
+                Thread {
+                    LiveModel.download(applicationContext)
+                    Recognizers.reset()
                     runOnUiThread { showVoice() }
                 }.start()
                 content.post(modelTicker)

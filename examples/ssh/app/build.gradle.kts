@@ -35,8 +35,8 @@ android {
         applicationId = "io.github.pruittcolon.scouter" // this fork's ID; the code stays in package scouterkit.ssh (JNI names)
         minSdk = 31
         targetSdk = 34
-        versionCode = 109
-        versionName = "1.07"
+        versionCode = 110
+        versionName = "1.08"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             // 16 KB pages: newer Android builds may use them; the library loads either way.
@@ -131,4 +131,6 @@ tasks.named("preBuild") { dependsOn(copyAssets, copyRes) }
 dependencies {
     implementation("com.github.mwiede:jsch:2.28.8")
     implementation("org.bouncycastle:bcprov-jdk18on:1.86") // ed25519 and curve25519 for JSch on Android
+    // Voice control's live speech model comes as a .tar.bz2 (sherpa-onnx's release): unpacked in the app
+    implementation("org.apache.commons:commons-compress:1.27.1")
 }

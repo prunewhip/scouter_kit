@@ -205,13 +205,15 @@ bool Locate(int cx, int cy, int w, int h, const ScreenOptions &o, int pw, int ph
   return fx >= 0 && fx < g.out.w && fy >= 0 && fy < g.out.h;
 }
 
-Rect Shows(int w, int h, const ScreenOptions &o, int pw, int ph, int *ow, int *oh) {
+Rect Shows(int w, int h, const ScreenOptions &o, int pw, int ph, int *ow, int *oh, int *ox, int *oy) {
   *ow = *oh = 0;
   if (w <= 1 || h <= 1 || pw <= 0 || ph <= 0) return {};
   Geo g = Geometry(w, h, o, pw, ph);
   if (g.r.w <= 0 || g.r.h <= 0) return {};
   *ow = g.out.w;
   *oh = g.out.h;
+  if (ox) *ox = g.out.x;
+  if (oy) *oy = g.out.y;
   // The shown part's corners back on the (uncut, unturned) screen.
   auto back = [&](double rx, double ry, double *x, double *y) {
     switch (g.rot) {
@@ -1791,12 +1793,24 @@ void ScreenMirror::SetOverlay(std::vector<uint8_t> pixels, int w, int h, int x, 
 
 // mutex_ held.
 void ScreenMirror::Compose() {
-  if (over_.empty() || frame_.size() != size_t(w_) * size_t(h_)) return;
-  int x0 = std::max(0, over_x_), x1 = std::min(w_, over_x_ + over_w_);
-  int y0 = std::max(0, over_y_), y1 = std::min(h_, over_y_ + over_h_);
-  for (int y = y0; y < y1; y++)
-    for (int x = x0; x < x1; x++)
-      frame_[size_t(y) * size_t(w_) + size_t(x)] = over_[size_t(y - over_y_) * size_t(over_w_) + size_t(x - over_x_)];
+  if (frame_.size() != size_t(w_) * size_t(h_)) return;
+  if (!over_.empty()) {
+    int x0 = std::max(0, over_x_), x1 = std::min(w_, over_x_ + over_w_);
+    int y0 = std::max(0, over_y_), y1 = std::min(h_, over_y_ + over_h_);
+    for (int y = y0; y < y1; y++)
+      for (int x = x0; x < x1; x++)
+        frame_[size_t(y) * size_t(w_) + size_t(x)] = over_[size_t(y - over_y_) * size_t(over_w_) + size_t(x - over_x_)];
+  }
+  if (!hud_.empty()) { // see-through: 0 leaves the picture
+    int x0 = std::max(0, hud_x_), x1 = std::min(w_, hud_x_ + hud_w_);
+    int y0 = std::max(0, hud_y_), y1 = std::min(h_, hud_y_ + hud_h_);
+    for (int y = y0; y < y1; y++) {
+      const uint8_t *s = hud_.data() + size_t(y - hud_y_) * size_t(hud_w_) - size_t(hud_x_);
+      uint8_t *d = frame_.data() + size_t(y) * size_t(w_);
+      for (int x = x0; x < x1; x++)
+        if (s[x]) d[x] = s[x];
+    }
+  }
 }
 
 bool ScreenMirror::PointerPending() {
@@ -1806,10 +1820,17 @@ bool ScreenMirror::PointerPending() {
 }
 
 bool ScreenMirror::Shows(int out[6]) {
+  int v[8] = {};
+  if (!Shows8(v)) return false;
+  std::copy(v, v + 6, out);
+  return true;
+}
+
+bool ScreenMirror::Shows8(int out[8]) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!started_ || src_w_ <= 1 || src_h_ <= 1) return false;
-  int ow = 0, oh = 0;
-  Rect r = ssh::Shows(src_w_, src_h_, src_o_, w_, h_, &ow, &oh);
+  int ow = 0, oh = 0, ox = 0, oy = 0;
+  Rect r = ssh::Shows(src_w_, src_h_, src_o_, w_, h_, &ow, &oh, &ox, &oy);
   if (ow <= 0 || oh <= 0) return false;
   out[0] = r.x;
   out[1] = r.y;
@@ -1817,7 +1838,19 @@ bool ScreenMirror::Shows(int out[6]) {
   out[3] = r.y + r.h;
   out[4] = ow;
   out[5] = oh;
+  out[6] = ox;
+  out[7] = oy;
   return true;
+}
+
+void ScreenMirror::SetHud(std::vector<uint8_t> pixels, int w, int h, int x, int y) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (w <= 0 || h <= 0 || pixels.size() < size_t(w) * size_t(h)) pixels.clear(), w = h = 0;
+  hud_ = std::move(pixels);
+  hud_w_ = w;
+  hud_h_ = h;
+  hud_x_ = x;
+  hud_y_ = y;
 }
 
 // The cursor to both arms: their code puts the picture back where the arrow was and draws it at its new place
@@ -2153,7 +2186,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
     // 0.5.68+: a part that keeps changing while the rest holds still (a video in a page) goes by VIDEOT on its own,
     // so the text around it keeps its 16 greys and full detail
     Rect vr;
-    const bool seen = v.tw && VideoRegion(&vr);
+    const bool seen = v.tw && hud_.empty() && VideoRegion(&vr);
     // a new rectangle: the first, or one the video outgrew (one still inside the rectangle in use keeps it)
     const bool found = seen && (!v.rw || vr.x < v.rx || vr.y < v.ry || vr.x + vr.w > v.rx + v.rw || vr.y + vr.h > v.ry + v.rh);
     if (found) {
@@ -2194,7 +2227,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
     }
     exact_ = frame_;
-    if (!region && now < moving_until_us_ && v.tw) {
+    if (!region && now < moving_until_us_ && v.tw && hud_.empty()) {
       size_t budget = std::min<size_t>(v.room, Tune());
       if (SendVideoT(o, budget, Rect{0, 0, w_, h_})) {
         Count(video_.sent, 2);

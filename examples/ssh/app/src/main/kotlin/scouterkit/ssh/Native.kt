@@ -110,9 +110,12 @@ object Native {
     // The cursor on the phone's screen (1/10000 of its width and height): the arms draw it over the picture at once
     // (black and white). True while it still waits to go (a busy link, a transition): call again soon.
     @JvmStatic external fun screenPointer(x: Int, y: Int, on: Boolean): Boolean
-    // The part of the phone's screen on the glasses (left, top, right, bottom in 1/10000) and its size there (w, h
-    // pixels), or null before a frame.
+    // The part of the phone's screen on the glasses (left, top, right, bottom in 1/10000), its size there (w, h
+    // pixels) and where on the picture (x, y), or null before a frame.
     @JvmStatic external fun screenShows(): IntArray?
+    // Voice control's see-through layer over a screen's picture: w x h pixels at (x, y), 0 transparent (the picture
+    // shows through), else that grey; null: none. In the frames from the next.
+    @JvmStatic external fun screenHud(pixels: ByteArray?, w: Int, h: Int, x: Int, y: Int)
     // A panel over the terminal (Panels): lines with marks (1 bold, 2 faint, 3 highlighted), the whole terminal
     // (full) or a strip at its bottom, at once; null: none.
     @JvmStatic external fun overlay(lines: Array<String>?, marks: IntArray?, full: Boolean)

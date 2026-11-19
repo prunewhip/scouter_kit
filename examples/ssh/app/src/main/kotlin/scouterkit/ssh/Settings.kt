@@ -165,6 +165,13 @@ class Settings(context: Context) {
             looks = all.toString()
             prefs.edit().putBoolean("migrated_102", true).putBoolean("migrated_04", true).apply()
         }
+        // Once (1.08): the left TouchBar is voice control's: held, push to talk; a double tap, on / off (each only
+        // when it was still Vox's default, next / previous source).
+        if (!prefs.getBoolean("migrated_108", false)) {
+            if (gestureAction(0, Native.GESTURE_HOLD) == ACTION_NEXT) setGestureAction(0, Native.GESTURE_HOLD, ACTION_PTT)
+            if (gestureAction(0, Native.GESTURE_DOUBLE) == ACTION_PREV) setGestureAction(0, Native.GESTURE_DOUBLE, ACTION_VOICE_CONTROL)
+            prefs.edit().putBoolean("migrated_108", true).apply()
+        }
         // Once (1.03): text that holds on the lens: full contrast (a page's background to black, its text to white)
         // and midtones lifted, in the setting and every look kept.
         if (!prefs.getBoolean("migrated_103", false)) {
@@ -260,6 +267,13 @@ class Settings(context: Context) {
     }) ?: ACTION_NONE
 
     fun setGestureAction(arm: Int, gesture: Int, action: String) = prefs.edit().putString("gesture_${arm}_$gesture", action).apply()
+
+    // Voice control (VoiceControl): the phone's microphone instead of the glasses', and minutes without a word
+    // before it pauses (0: never).
+    var vcPhoneMic: Boolean
+        get() = prefs.getBoolean("vc_phone_mic", false)
+        set(v) = prefs.edit().putBoolean("vc_phone_mic", v).apply()
+    var vcIdleMinutes: Int by Number("vc_idle_min", 10)
     // Termux's sshd host keys (SHA256:... fingerprints, space separated), as Termux itself reported them: trusted
     // without asking.
     var termuxKeys: String by Text("termux_keys", "")
@@ -494,9 +508,12 @@ class Settings(context: Context) {
         const val ACTION_TAB_PREV = "tab_prev"
         const val ACTION_TAB_NEW = "tab_new"
         const val ACTION_VOICE_MODE = "voice_mode" // voice mode on / off: talking to the terminal
+        const val ACTION_VOICE_CONTROL = "voice_control" // voice control on / off (VoiceControl)
+        const val ACTION_PTT = "ptt" // held: one voice-control phrase, push to talk (on a tap: voice control on / off)
         val ACTIONS = linkedMapOf(ACTION_NONE to "Nothing", ACTION_DISPLAY to "Display off / on",
             ACTION_NEXT to "Next source", ACTION_PREV to "Previous source", ACTION_LISTEN to "Listen (voice command)",
             ACTION_VOICE_MODE to "Voice mode (talk to the terminal)",
+            ACTION_VOICE_CONTROL to "Voice control on / off", ACTION_PTT to "Hold to talk (voice control)",
             ACTION_TAB_NEXT to "Next tab", ACTION_TAB_PREV to "Previous tab", ACTION_TAB_NEW to "New tab",
             ACTION_VIEW to "Switch terminal / screen", ACTION_STOP to "Stop everything")
         const val PHONE = "phone" // the phone's own screen (a source)

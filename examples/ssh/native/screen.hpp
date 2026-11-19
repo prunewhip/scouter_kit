@@ -100,7 +100,7 @@ bool Locate(int cx, int cy, int w, int h, const ScreenOptions &, int pw, int ph,
 
 // The part of a w x h screen that shows on the pw x ph picture, in 1/10000 of the screen (x, y, w, h: left, top,
 // width, height), and the size it takes there (*ow x *oh pixels).
-Rect Shows(int w, int h, const ScreenOptions &, int pw, int ph, int *ow, int *oh);
+Rect Shows(int w, int h, const ScreenOptions &, int pw, int ph, int *ow, int *oh, int *ox = nullptr, int *oy = nullptr);
 
 // Scales the src rectangle r of a (stride sw) luma image into the place d of dst (pw x ph, black around it),
 // averaging the source pixels under each picture pixel. keep: the shape is kept, centred in d. Returns where
@@ -180,9 +180,14 @@ public:
   // A card over the picture (the help, the quick settings): w x h pixels (0 ... 255; black and white: from 128 lit)
   // at (x, y) of the picture, in every frame from the next one; empty: none.
   void SetOverlay(std::vector<uint8_t> pixels, int w, int h, int x, int y);
-  // The part of the phone's screen the glasses show, from the last frame: left, top, right, bottom (1/10000) and
-  // its size on the glasses (w, h pixels). False before a frame.
+  // The part of the phone's screen the glasses show, from the last frame: left, top, right, bottom (1/10000), its
+  // size on the glasses (w, h pixels) and, with room for 8, where on the picture (x, y). False before a frame.
   bool Shows(int out[6]);
+  bool Shows8(int out[8]);
+  // A see-through layer over everything (voice control's bars and grid): w x h pixels at (x, y) of the picture, 0
+  // transparent (the picture shows), else that grey; empty: none. While it is on, moving pictures go on the grey
+  // planes (no transform-coded video, which would draw over it).
+  void SetHud(std::vector<uint8_t> pixels, int w, int h, int x, int y);
 
   // What was sent: frames, the last frame's bytes, bytes a second (over about 2 s), the last detail, frames
   // skipped while the link was busy, the picture's w, h, x, y, the path's levels (0 none), panels off (1).
@@ -235,6 +240,8 @@ private:
   int FrameGray(const ScreenOptions &, Rect c);
   void Compose(); // the overlay into frame_ (mutex_ held)
   std::vector<uint8_t> over_;
+  std::vector<uint8_t> hud_;
+  int hud_w_ = 0, hud_h_ = 0, hud_x_ = 0, hud_y_ = 0;
   int over_w_ = 0, over_h_ = 0, over_x_ = 0, over_y_ = 0;
 
   // The cursor (Pointer) and the last frame's screen and options (where it lands).
