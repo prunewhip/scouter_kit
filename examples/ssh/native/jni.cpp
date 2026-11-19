@@ -1469,10 +1469,18 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
       head.Touch(cols, rows, rows >= 3); // a sphere (rows above and below) goes all the way round
       head.Window(&x, &y);
     }
-    o.src_x = x;
-    o.src_y = y;
-    o.src_w = kW;
-    o.src_h = kH;
+    // The window at the glasses' own picture size (centred in each screen): pixel for pixel, so a head turn is an
+    // exact sideways shift of the last picture, which g1v0 0.5.66+ draws as a block move (the new strip only).
+    int pw = kW, ph = kH;
+    ssh::ScreenMirror::Stats st = screen->stats();
+    if (st.w > 0 && st.h > 0 && st.w <= kW && st.h <= kH) {
+      pw = st.w;
+      ph = st.h;
+    }
+    o.src_x = x + (kW - pw) / 2;
+    o.src_y = y + (kH - ph) / 2;
+    o.src_w = pw;
+    o.src_h = ph;
     o.fit = ssh::ScreenOptions::kStretch;
     o.zoom = 100;
   }

@@ -67,12 +67,15 @@ void vm_draw_row(const uint8_t *arena, const struct vm_draw *d, int32_t r, uint8
  * vm_video_expand turns pixels x0..x1-1 of such a row into (x1 - x0 + 1) / 2 bytes of 4 bpp: level for ink,
  * else 0, a 0 nibble after an odd last pixel; it reads only the bytes of those pixels. */
 #define VM_VIDEO_STATE 1596u
+#define VM_VIDEO_MAXW 2048 /* VIDEOX planes may be this wide (a canvas the panel shows part of); VIDEO stays 640 */
 struct vm_video {
-	uint16_t t[2][VM_PANEL_W + 3], o[VM_PANEL_W + 4];
-	uint8_t cls[2][VM_PANEL_W + 3];
+	uint16_t t[2][VM_VIDEO_MAXW + 3], o[VM_VIDEO_MAXW + 4];
+	uint8_t cls[2][VM_VIDEO_MAXW + 3];
 };
 typedef void vm_span_fn(void *ctx, uint32_t y, uint32_t x0, uint32_t x1, const uint8_t *row);
 int vm_video_check(const uint8_t *arena, const uint32_t *v, uint32_t *detail);
+/* the same with planes up to maxw wide (VIDEOX's planes: VM_VIDEOX_MAXW) */
+int vm_video_check_w(const uint8_t *arena, const uint32_t *v, uint32_t *detail, uint32_t maxw);
 void vm_video_decode(uint8_t *arena, const uint32_t *v, struct vm_video *s, vm_span_fn *span, void *ctx);
 void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t level, uint8_t *out);
 
@@ -90,7 +93,7 @@ void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t leve
 #define VM_VX_PIXELS 8             /* record flag: every plane is pixel coded (vm_videox_pixels) */
 #define VM_VX_BLOCK 16             /* record flag: a rectangle of every plane moves by (dx, dy) (window drags) */
 #define VM_VX_SPRITE 32            /* record flag: a redraw rectangle and a 16 x 16 sprite (the pointer) */
-#define VM_VIDEOX_MAXW 2048        /* pixel-coded planes may be wider than the panel (a canvas the arm pans) */
+#define VM_VIDEOX_MAXW VM_VIDEO_MAXW /* planes may be wider than the panel (a canvas the panel shows part of) */
 #define VM_VIDEOX_PIX_STATE 4100u  /* a pixel-coded plane's state: 2050 u16 probabilities */
 struct vm_videox {
 	uint32_t planes, flags, y0, rows;

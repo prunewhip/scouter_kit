@@ -638,6 +638,50 @@ int main() {
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     CHECK(exact() == 0);
     sm.Stop();
+
+    // The panorama canvas (0.5.66+): a 1920 x 480 black and white panorama goes to the arms once; each window
+    // position (a head turn) is a few bytes, and the panel shows exactly that part of the panorama.
+    {
+      ssh::ScreenMirror cm;
+      CHECK(cm.Start(100, 9, &error));
+      const int PW = 1920, PH = 480;
+      std::vector<uint8_t> pano(size_t(PW) * PH * 4);
+      for (int y = 0; y < PH; y++)
+        for (int x = 0; x < PW; x++) {
+          bool ink = ((x / 8 + y / 12) % 3 == 0) || (x % 97 < 3) || (y % 41 < 2);
+          uint8_t *px = &pano[(size_t(y) * PW + size_t(x)) * 4];
+          px[0] = px[1] = px[2] = ink ? 255 : 0;
+          px[3] = 255;
+        }
+      ssh::ScreenOptions po;
+      po.invert = 0;
+      po.levels = 16;
+      po.fit = ssh::ScreenOptions::kStretch;
+      po.zoom = 100;
+      po.src_w = 540;
+      po.src_h = 471;
+      po.src_y = 4;
+      int bytes_after = 0;
+      for (int step = 0; step < 6; step++) {
+        po.src_x = 700 + 23 * step;
+        int r = 0;
+        CHECK(WaitFor([&] { r = cm.Frame(pano.data(), PW, PH, PW * 4, po); return r == ssh::ScreenMirror::kShown; }, 5000));
+        if (step) bytes_after = std::max(bytes_after, cm.stats().bytes);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < 471; y++)
+          for (int x = 0; x < 540; x++) {
+            uint8_t want = pano[(size_t(y + 4) * PW + size_t(po.src_x + x)) * 4] ? 15 : 0;
+            wrong += pl[size_t(y) * 640 + size_t(x + 100)] != want;
+          }
+        if (wrong) std::printf("canvas step %d: %d pixels wrong\n", step, wrong);
+        CHECK(wrong == 0);
+      }
+      std::printf("panorama canvas: head turns %d bytes at most\n", bytes_after);
+      CHECK(bytes_after < 200);
+      cm.Stop();
+    }
     g1::emulator::SetFirmware(5, 0);
   }
   fx->Stop();

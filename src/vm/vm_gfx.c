@@ -593,6 +593,11 @@ struct rc {
 
 int vm_video_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
 {
+	return vm_video_check_w(a, v, detail, VM_PANEL_W);
+}
+
+int vm_video_check_w(const uint8_t *a, const uint32_t *v, uint32_t *detail, uint32_t maxw)
+{
 	uint32_t bmp = v[0], stride = v[1], w = v[2], h = v[3], level = v[6], src = v[7], n = v[8], st = v[9];
 	int64_t bend;
 
@@ -600,8 +605,8 @@ int vm_video_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
 		*detail = level;
 		return VM_E_ARG;
 	}
-	if (w == 0 || w > VM_PANEL_W || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
-		*detail = w == 0 || w > VM_PANEL_W ? w : h == 0 || h > VM_PANEL_H ? h : stride;
+	if (w == 0 || w > maxw || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
+		*detail = w == 0 || w > maxw ? w : h == 0 || h > VM_PANEL_H ? h : stride;
 		return VM_E_ARG;
 	}
 	bend = bmp + (int64_t)(h - 1) * stride + (w + 7) / 8;
@@ -997,11 +1002,7 @@ int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, ui
 
 	uint32_t maxw;
 
-	if (n >= 2 && rend <= ARENA && a[src] <= 63 && (a[src] & VM_VX_PIXELS)) {
-		maxw = VM_VIDEOX_MAXW;   /* pixel-coded planes may be a canvas wider than the panel */
-	} else {
-		maxw = VM_PANEL_W;
-	}
+	maxw = VM_VIDEOX_MAXW;   /* a canvas wider than the panel: (x, y) places it, the panel shows its part */
 	if (w == 0 || w > maxw || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
 		*detail = w == 0 || w > maxw ? w : h == 0 || h > VM_PANEL_H ? h : stride;
 		return VM_E_ARG;
@@ -1016,6 +1017,12 @@ int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, ui
 		*detail = x->flags > 63 ? x->flags : x->planes;
 		return VM_E_FORMAT;
 	}
+#ifdef VM_NO_PIXEL_CODING
+	if (x->flags & VM_VX_PIXELS) { /* this build has no pixel coding */
+		*detail = x->flags;
+		return VM_E_FORMAT;
+	}
+#endif
 	if ((int64_t)pt + 4 * x->planes > ARENA || (int64_t)stt + 4 * x->planes > ARENA || (int64_t)lv + 16 > ARENA) {
 		*detail = (int64_t)pt + 4 * x->planes > ARENA ? pt : (int64_t)stt + 4 * x->planes > ARENA ? stt : lv;
 		return VM_E_ARENA;
@@ -1137,7 +1144,7 @@ int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, ui
 			return VM_E_FORMAT;
 		}
 		vm_videox_plane(v, x, p, pv);
-		err = vm_video_check(a, pv, detail);   /* the plane's record flags */
+		err = vm_video_check_w(a, pv, detail, VM_VIDEOX_MAXW);   /* the plane's record flags */
 		if (err) {
 			return err;
 		}
@@ -1266,6 +1273,10 @@ static inline uint32_t bit1(const uint8_t *row, uint32_t x)
 void vm_videox_pixels(uint8_t *a, const uint32_t *v, const struct vm_videox *x, uint32_t p, vm_span_fn *span,
 		      void *ctx)
 {
+#ifdef VM_NO_PIXEL_CODING
+	(void)a, (void)v, (void)x, (void)p, (void)span, (void)ctx; /* never called: the check refuses the flag */
+	return;
+#endif
 	uint32_t stride = v[1], w = v[2], h = v[3], src = x->at[p], n = x->len[p], st = x->state[p];
 	uint32_t flags = a[src], prev = 1;
 	const uint8_t *up_plane[3] = {0, 0, 0};

@@ -208,6 +208,7 @@ private:
   bool SendVideoX(size_t max_bytes, scouter_kit::g1::RowMove move, bool pix_ready = false,
                   scouter_kit::g1::BlockMove block = {});
   scouter_kit::g1::Sprite PointerSprite(); // the sprite fields for the next record (and where it then is)
+  void LevelMap(bool coarse);              // the arms' level map: exact (16 greys) or the top two planes only
   bool SendMotion(size_t max_bytes); // frame_ (at detail 2) on the motion stream: false when larger than max_bytes
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
@@ -232,7 +233,13 @@ private:
   bool started_ = false;
   int dx_ = 0, dy_ = 0;
   int x_ = 0, y_ = 0, w_ = 0, h_ = 0;
-  int levels_ = 0; // the path in use: 16 gray, 2 video, 1 VIDEOX (greys as planes), 0 none
+  int levels_ = 0; // the path in use: 16 gray, 2 video, 1 VIDEOX (greys as planes), 3 canvas (a panorama), 0 none
+  static constexpr int kCanvasPath = 3;
+  int canvas_w_ = 0; // the panorama's width the canvas path is asked for (Frame)
+  bool canvas_failed_ = false;
+  std::vector<uint8_t> cluma_, crot_, cbase_, cframe_, cprev_; // the canvas path's picture
+  bool StartCanvas(int cw);
+  int FrameCanvas(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &);
   int want_levels_ = 0; // the levels the options asked for (a rebooted arm starts that path again)
   std::vector<uint8_t> exact_; // auto greys: the last full-detail picture, to tell motion from stillness
   size_t Tune();                // the moving frames' budget, self-tuned to the link (mutex_ held)
@@ -294,6 +301,11 @@ private:
     bool in_motion = false, mredraw = true;
     // 0.5.66+: block moves, and the pointer as VIDEOX's sprite (64 bytes at sprite_at) instead of in the picture
     bool v66 = false;
+    bool coarse_map = false; // auto greys moving: the level map reads only the top two planes (no stale low planes)
+    // the canvas path: the whole panorama (cw wide) on the arms, the window's x in an arena word per arm
+    int cw = 0, cwin = -1;
+    uint32_t xword = 0;
+    std::array<int, 2> px{};
     uint32_t sprite_at = 0;
     int spr_x = -32768, spr_y = 0; // where the arms draw it now (-32768: nowhere)
     uint32_t k = 0;

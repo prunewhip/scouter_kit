@@ -35,6 +35,14 @@ config G1_REQUIRE_SECURITY
 	bool "Out of the case, require an encrypted, bonded link for every write (CMD, CTRL, SMP)"
 	default y
 
+config G1_VIDEOX_PIXELS
+	bool "VIDEOX pixel coding (record flag bit 3)"
+	default n
+	help
+	  The JBIG-style pixel coder for VIDEOX planes. Measured through Vox's mirror it saved ~9% on camera
+	  video and lost on cartoons against transition coding with auto greys, so no host uses it; off, a
+	  record with flag bit 3 is error 4 and its decoder is not built in.
+
 config G1_FAST_DECODE
 	bool "Run the app core at 128 MHz while VIDEO/VIDEOX decode and draw"
 	default y

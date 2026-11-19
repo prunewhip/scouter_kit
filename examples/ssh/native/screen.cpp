@@ -581,10 +581,11 @@ void ScreenMirror::DropPath(bool keep_panels) {
     sk::gray::Clear();
     sk::Flush();
   }
-  if (levels_ == 2 || levels_ == 1) {
+  if (levels_ == 2 || levels_ == 1 || levels_ == kCanvasPath) {
     if (video_.base >= 0) g1::Free(g1::Address(video_.base));
     for (int64_t a : video_.parts) g1::Free(g1::Address(a));
     video_ = Video{};
+    cprev_.clear();
     if (!keep_panels) {
       Panels(false);
       Panels(true);
@@ -664,6 +665,21 @@ static std::vector<uint8_t> SpriteArrow() {
 
 bool ScreenMirror::Path(int levels) {
   want_levels_ = levels;
+  if (levels == kCanvasPath) {
+    if (levels_ == kCanvasPath && video_.cw == canvas_w_) return true;
+    DropPath();
+    if (StartCanvas(canvas_w_)) {
+      levels_ = kCanvasPath;
+      error_.clear();
+      return true;
+    }
+    LOG("screen: %s; the panorama goes window by window", error_.c_str());
+    if (video_.base >= 0) g1::Free(g1::Address(video_.base));
+    for (int64_t a : video_.parts) g1::Free(g1::Address(a));
+    video_ = Video{};
+    canvas_failed_ = true;
+    return false;
+  }
   int planes = levels == 4 ? 2 : levels == 8 ? 3 : 4;
   // Greys go as VIDEOX planes where the firmware has it (a fraction of the bytes), else as 4-bit uploads.
   int want = levels == 2 ? 2 : HasVideoX() ? 1 : 16;
@@ -1022,6 +1038,7 @@ bool ScreenMirror::StartVideoX(int planes) {
   tuned_budget_ = kMotionBudget;
   calm_frames_ = 0;
   link_busy_ = false;
+  v.coarse_map = false;
   v.pix.assign(size_t(w_) * h_, 0);
   v.shown.assign(size_t(w_) * h_, 0);
   v.k = 0;
@@ -1101,6 +1118,24 @@ bool ScreenMirror::SendMotion(size_t max_bytes) {
   return true;
 }
 
+// The level map on both arms. Exact: Gray-coded 16 levels. Coarse (auto greys while moving): the top two planes
+// only, 0 / 5 / 10 / 15, so the low planes the moving frames leave as they were show nothing (no ghosting, no
+// bytes); back to exact, every row is drawn again with it (redraw).
+void ScreenMirror::LevelMap(bool coarse) {
+  Video &v = video_;
+  if (coarse == v.coarse_map || v.planes != 4) return;
+  std::vector<uint8_t> map(16, 0);
+  for (int i = 0; i < 16; i++) {
+    int g3 = i >> 3 & 1, g2 = i >> 2 & 1, g1 = i >> 1 & 1, g0 = i & 1;
+    int b3 = g3, b2 = b3 ^ g2, b1 = b2 ^ g1, b0 = b1 ^ g0;
+    map[size_t(i)] = uint8_t(coarse ? (b3 * 2 + b2) * 5 : b3 * 8 + b2 * 4 + b1 * 2 + b0);
+  }
+  for (g1::Arm *a : {&g1::left, &g1::right})
+    if (a->GetState().present) a->WriteArena(v.levels_at, map);
+  v.coarse_map = coarse;
+  if (!coarse) v.redraw = true;
+}
+
 // The sprite fields for a record on 0.5.66+ (the pointer drawn by the arms over the picture): the rectangle where
 // it was (drawn from the planes again) and where it goes; updates spr_x/spr_y to that. Off on older firmware.
 g1::Sprite ScreenMirror::PointerSprite() {
@@ -1123,6 +1158,136 @@ g1::Sprite ScreenMirror::PointerSprite() {
   v.spr_x = s.x;
   v.spr_y = s.y;
   return s;
+}
+
+// The canvas path (0.5.66+): the panorama (cw x h_ pixels, 1:1 with the source) as 2 planes (4 greys) when that fits
+// the arena, else 1 (black and white); per arm, stored code that runs VIDEOX at x = the word at xword (the eye's
+// place minus the window's left), so a head turn is that word and a record of unchanged planes with redraw.
+bool ScreenMirror::StartCanvas(int cw) {
+  Video &v = video_;
+  if (cw < 2 || cw > 2048) return error_ = "no canvas for that width", false;
+  uint32_t stride = uint32_t(((cw + 7) / 8 + 3) & ~3), room = kRecordMaxX / 2;
+  Spare();
+  int planes = 0;
+  for (int p : {2, 1}) {
+    if (p == 2 && cw > 1400) continue;
+    v.base = g1::Alloc(kCodeX + 32 + 16 + 4 + kHeader + room + 4);
+    if (v.base < 0) break;
+    bool ok = true;
+    for (int k = 0; k < p && ok; k++) {
+      int64_t a = g1::Alloc(stride * uint32_t(h_));
+      if (a < 0) ok = false; else v.parts.push_back(a);
+    }
+    int64_t st = ok ? g1::Alloc(uint32_t(p) * g1::kVideoState) : -1;
+    if (st >= 0) {
+      v.parts.push_back(st);
+      planes = p;
+      break;
+    }
+    g1::Free(g1::Address(v.base));
+    v.base = -1;
+    for (int64_t a : v.parts) g1::Free(g1::Address(a));
+    v.parts.clear();
+  }
+  if (!planes) return error_ = "no room on the arms for the panorama canvas", false;
+  v.planes = planes;
+  v.stride = stride;
+  v.room = room;
+  v.cw = cw;
+  v.cwin = -1;
+  v.code = uint32_t(v.base);
+  v.plane_tab = v.code + kCodeX;
+  v.state_tab = v.plane_tab + 16;
+  v.levels_at = v.state_tab + 16;
+  v.xword = v.levels_at + 16;
+  v.buf = v.xword + 4;
+  v.state = uint32_t(v.parts[size_t(planes)]);
+  std::vector<uint8_t> tabs(32, 0), map(16, 0);
+  for (int k = 0; k < planes; k++) {
+    Put32(tabs, size_t(4 * k), uint32_t(v.parts[size_t(k)]));
+    Put32(tabs, size_t(16 + 4 * k), v.state + uint32_t(k) * g1::kVideoState);
+  }
+  const int n = (1 << planes) - 1;
+  for (int k = 0; k <= n; k++) map[size_t(k ^ (k >> 1))] = uint8_t(k * 15 / n);
+  for (int val = 0; val < 256; val++) {
+    int k = (val * n + 127) / 255;
+    v.index[size_t(val)] = uint8_t(k ^ (k >> 1));
+  }
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    v.px[size_t(i)] = i == 0 ? x_ - std::max(0, -dx_) : x_ - std::max(0, dx_);
+    int py = i == 0 ? y_ + std::max(0, -dy_) : y_ + std::max(0, dy_);
+    g1::Program p(v.code, 32);
+    g1::Address at = p.Here();
+    p.SleepUntil(g1::ArenaWord(v.buf / 4));
+    p.VideoX(p.Const(v.plane_tab), p.Const(v.stride), p.Const(uint32_t(cw)), p.Const(uint32_t(h_)),
+             g1::ArenaWord(v.xword / 4), p.Const(uint32_t(py)), p.Const(v.levels_at), p.Const(v.buf + kHeader),
+             g1::ArenaWord(v.buf / 4 + 2), p.Const(v.state_tab));
+    p.Ret();
+    std::string why;
+    if (!p.Valid(&why)) return error_ = "the canvas code: " + why, false;
+    if (p.Here() > v.code + kCodeX) return error_ = "the canvas code is larger than its room", false;
+    for (int k = 0; k < planes; k++)
+      arm.WriteArena(uint32_t(v.parts[size_t(k)]), std::vector<uint8_t>(size_t(stride) * size_t(h_), 0));
+    arm.WriteArena(v.plane_tab, tabs);
+    arm.WriteArena(v.levels_at, map);
+    if (!arm.Load(p)) return error_ = "the canvas code did not load", false;
+    v.call[size_t(i)] = at;
+    v.epochs[size_t(i)] = arm.GetState().epoch_changes;
+  }
+  v.penc = std::make_unique<g1::PlaneVideoEncoder>(cw, h_, planes);
+  v.pix.assign(size_t(cw) * size_t(h_), 0);
+  v.k = 0;
+  v.redraw = true;
+  v.v66 = true;
+  LOG("screen: panorama canvas %d x %d, %d plane%s (%d greys): head turns move a window on the arms", cw, h_, planes,
+      planes > 1 ? "s" : "", 1 << planes);
+  return true;
+}
+
+int ScreenMirror::FrameCanvas(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &o) {
+  Video &v = video_;
+  int ready = VideoReady();
+  if (ready != kShown) return ready;
+  ScreenOptions oc = o;
+  oc.src_x = 0;
+  oc.src_w = w;
+  oc.fit = ScreenOptions::kStretch;
+  oc.zoom = 100;
+  oc.cursor_x = oc.cursor_y = -1;
+  Rect c = Base(rgba, w, h, stride, oc, v.cw, h_, &cluma_, &crot_, &cbase_);
+  Finish(cbase_, v.cw, c, oc, 1, &cframe_);
+  int win = std::clamp(o.src_x, 0, std::max(0, v.cw - w_));
+  bool moved = win != v.cwin;
+  if (!moved && !v.redraw && cframe_ == cprev_) return kSame;
+  for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[cframe_[i]];
+  std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw || moved, {}, v.room);
+  if (rec.empty()) return kBusy;
+  int64_t lead = std::min<int64_t>(v.lead + int64_t(rec.size()) * 1000000 / 40000, 1000000);
+  std::vector<uint8_t> msg(kHeader + rec.size());
+  Put32(msg, 4, v.k);
+  Put32(msg, 8, uint32_t(rec.size()));
+  std::memcpy(msg.data() + kHeader, rec.data(), rec.size());
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    if (moved) {
+      std::vector<uint8_t> word(4);
+      Put32(word, 0, uint32_t(v.px[size_t(i)] - win));
+      arm.WriteArena(v.xword, word);
+    }
+    Put32(msg, 0, arm.DeviceTime(lead));
+    arm.WriteArena(v.buf, msg);
+    arm.Call(v.call[size_t(i)]);
+  }
+  v.cwin = win;
+  v.redraw = false;
+  v.k++;
+  v.sent = int(msg.size());
+  cprev_ = cframe_;
+  Count(v.sent, 1);
+  return kShown;
 }
 
 // Whether a record may go now: both arms connected with little queued; a rebooted arm (its bitmap and decoder
@@ -1497,6 +1662,12 @@ int ScreenMirror::Frame(const uint8_t *rgba, int w, int h, int stride, const Scr
   bool hide = Hidden(o);
   ApplyHidden(hide);
   if (hide) return kHidden;
+  // A panorama (jni.cpp gives its window at the picture's size): on 0.5.66+ the whole panorama goes to the arms
+  // once and a head turn only moves the window (an arena word), a few bytes instead of a picture.
+  bool canvas = !canvas_failed_ && o.src_w == w_ && o.src_h == h_ && w > o.src_w && w <= 2048 && o.src_y >= 0 &&
+                o.src_y + h_ <= h && HasVideoX66();
+  canvas_w_ = canvas ? w : 0;
+  if (canvas && Path(kCanvasPath)) return FrameCanvas(rgba, w, h, stride, o);
   if (!Path(o.levels)) return kSame;
   // Where the cursor lands follows the screen's size and the options that place it.
   if (w != src_w_ || h != src_h_ || o.fit != src_o_.fit || o.pan_x != src_o_.pan_x || o.pan_y != src_o_.pan_y ||
@@ -1618,6 +1789,7 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
     }
     if (now < moving_until_us_) {
       size_t budget = std::min<size_t>(v.room, Tune());
+      LevelMap(true);
       for (int n = 2; n <= 4; n++) {
         Make(o, c, n);
         Compose();
@@ -1635,6 +1807,10 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
   }
   // The scroll is found on the exact picture; "steady" (a pixel changed by one level keeps its old one: noise from a
   // camera or video) applies only when nothing scrolled, since it would break the shifted rows' match.
+  if (v.coarse_map) {
+    LevelMap(false); // the motion ended: the exact map, every row drawn again with the exact picture
+    redraw = true;
+  }
   g1::BlockMove block;
   auto make = [&](int n) {
     Make(o, c, n);

@@ -101,6 +101,7 @@ namespace {
 
 constexpr uint32_t kArenaBytes = 262144;
 constexpr int kPanelW = 640;
+constexpr int kVideoMaxW = 2048; // VIDEOX planes up to this wide (a canvas the panel shows part of)
 constexpr int kPanelH = 480;
 constexpr int kRowBytes = kPanelW / 2;
 
@@ -788,7 +789,7 @@ uint32_t Transitions(const uint8_t *row, uint32_t w, uint16_t *t) {
 
 VideoEncoder::VideoEncoder(int width, int height)
     : w_(width), h_(height), nb_(width > 0 ? (width + 7) / 8 : 0), p_(kVProbs, 2048) {
-  if (w_ >= 1 && w_ <= kPanelW && h_ >= 1 && h_ <= kPanelH) prev_.assign(size_t(nb_) * size_t(h_), 0);
+  if (w_ >= 1 && w_ <= kVideoMaxW && h_ >= 1 && h_ <= kPanelH) prev_.assign(size_t(nb_) * size_t(h_), 0);
 }
 
 bool VideoEncoder::Move(int y0, int rows, int dy) {
@@ -825,7 +826,7 @@ bool VideoEncoder::MoveRect(int x, int y, int w, int h, int dx, int dy) {
 
 PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes, Coding coding)
     : w_(width), h_(height), n_(planes), coding_(coding) {
-  if (w_ < 1 || w_ > kPanelW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
+  if (w_ < 1 || w_ > kVideoMaxW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
     n_ = 0;
     return;
   }
@@ -1118,8 +1119,8 @@ std::vector<uint8_t> VideoEncoder::Encode(std::span<const uint8_t> pixels, bool 
         cur[size_t(y) * nb + size_t(x) / 8] |= uint8_t(0x80 >> (x % 8));
   std::vector<uint16_t> p = started_ ? p_ : std::vector<uint16_t>(kVProbs, 2048);
   RangeEncoder e{p.data(), out};
-  uint16_t ref[kPanelW + 1], ct[kPanelW + 1];
-  uint8_t rcode[kPanelW + 1], ccode[kPanelW + 1], old[kPanelW / 8 + 8] = {};
+  uint16_t ref[kVideoMaxW + 1], ct[kVideoMaxW + 1];
+  uint8_t rcode[kVideoMaxW + 1], ccode[kVideoMaxW + 1], old[kVideoMaxW / 8 + 8] = {};
   uint32_t nref = 0, prev_same = 2;
   for (uint32_t y = 0; y < uint32_t(h_); y++) {
     const uint8_t *pr = prev_.data() + y * nb, *cr = cur.data() + y * nb;
