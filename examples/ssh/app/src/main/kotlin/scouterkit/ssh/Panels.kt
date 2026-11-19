@@ -478,14 +478,15 @@ object Panels {
         val rowH = minOf(20f, (h - 90f) / maxOf(1, items.size))
         var y = 64f
         for ((t, m) in items) {
-            val text = t.replace(Regex("[▌▐░▒▓]"), "").trim()
+            // columns (mono): the block marks become spaces and nothing is trimmed, so every row keeps its alignment
+            val text = if (mono) t.replace(Regex("[▌▐░▒▓]"), " ").trimEnd() else t.replace(Regex("[▌▐░▒▓]"), "").trim()
             when (m) {
                 3 -> {
                     c.drawRect(8f, y - 14f, w - 8f, y + 5f, bar)
-                    c.drawText(text, 14f, y, paint(14f, true).apply { color = Color.BLACK })
+                    c.drawText(text, 14f, y, paint(14f, true, mono).apply { color = Color.BLACK })
                 }
-                1 -> c.drawText(text, 10f, y, paint(14f, true))
-                else -> c.drawText(text, 10f, y, paint(13.5f))
+                1 -> c.drawText(text, 10f, y, paint(14f, true, mono))
+                else -> c.drawText(text, 10f, y, paint(13.5f, false, mono))
             }
             y += rowH
         }
@@ -525,9 +526,9 @@ object Panels {
         for ((i, t) in content.lines.withIndex()) {
             val mark = content.marks.getOrElse(i) { 0 }
             val p = when (mark) {
-                1, 3 -> paint(16f, true, mono)
-                2 -> paint(14f, false, mono)
-                else -> paint(15f, false, mono)
+                1, 3 -> paint(16f, true)
+                2 -> paint(14f)
+                else -> paint(15f)
             }
             if (mark == 3) {
                 c.drawRect(4f, (y - line + 6).toFloat(), w - 4f, (y + 5).toFloat(), lit)

@@ -142,11 +142,13 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
     fun pttStart() {
         holding = true
         if (on) {
+            listener?.setHold(true)
             pulse = !pulse
             say("● HOLDING: speak, let go to do it")
             return
         }
         start()
+        listener?.setHold(true)
         feedback = "◌ waking: keep holding and say a command"
         feedbackAt = SystemClock.elapsedRealtime()
         draw()
@@ -155,6 +157,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
     fun pttEnd() {
         if (!holding) return
         holding = false
+        listener?.setHold(false)
         listener?.flushNow()
     }
 
@@ -226,6 +229,14 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         }
 
         @Volatile private var flushKeep = false
+        @Volatile private var recRef: LiveRecognizer? = null
+        @Volatile private var heldNow = false
+
+        // The left TouchBar held / let go: one phrase from press to release.
+        fun setHold(on: Boolean) {
+            heldNow = on
+            recRef?.hold(on)
+        }
 
         // What is said so far is a phrase now (the hold let go); it goes on listening.
         fun flushNow() {
@@ -237,6 +248,8 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
             var reason = ""
             try {
                 val rec = Recognizers.get(ctx) { loading -> post { if (listener === this) { status = loading; draw() } } }
+                recRef = rec
+                rec.hold(heldNow)
                 if (stopped) return
                 val m: Mic = if (settings.vcPhoneMic) PhoneMic(ctx) else GlassesMic
                 mic = m

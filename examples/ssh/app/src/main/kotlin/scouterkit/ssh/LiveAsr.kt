@@ -127,6 +127,8 @@ interface LiveRecognizer {
     fun feed(samples: FloatArray, n: Int, partial: (String) -> Unit, final: (String) -> Unit)
     // Ends the phrase under way now (push to talk let go): its text, or "".
     fun flush(): String
+    // Held (the left TouchBar): everything from now until flush() is one phrase, never cut at a pause.
+    fun hold(on: Boolean) {}
     fun release()
 }
 
@@ -164,12 +166,15 @@ class StreamingRecognizer(c: Context, trailingSilence: Float = 0.6f) : LiveRecog
             last = t
             if (t.isNotEmpty()) partial(t)
         }
-        if (rec.isEndpoint(stream)) {
+        if (!holding && rec.isEndpoint(stream)) {
             if (t.isNotEmpty()) final(t)
             rec.reset(stream)
             last = ""
         }
     }
+
+    @Volatile private var holding = false
+    override fun hold(on: Boolean) { holding = on }
 
     @Synchronized
     override fun flush(): String {
@@ -197,13 +202,28 @@ class StreamingRecognizer(c: Context, trailingSilence: Float = 0.6f) : LiveRecog
 class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
     override val name = "Parakeet (phrases)"
     private val vad = Vad(null, engine.vadConfig.copy(sileroVadModelConfig = engine.vadConfig.sileroVadModelConfig.copy(
-        threshold = 0.4f, minSpeechDuration = 0.12f, minSilenceDuration = 0.45f)))
+        threshold = 0.4f, minSpeechDuration = 0.12f, minSilenceDuration = 0.7f)))
     private val window = FloatArray(512)
     private var fill = 0
     private val before = Floats()
     private val phrase = Floats()
     private var speaking = false
     private var lastPartialAt = 0L
+    private var holding = false
+
+    // Held: the phrase starts now (with the last 0.6 s before the press) and runs to the release, whatever the VAD
+    // says: a sentence with pauses is read whole, with its context ("then" stays "then", not a lone "Ten").
+    @Synchronized
+    override fun hold(on: Boolean) {
+        if (on == holding) return
+        holding = on
+        if (on && !speaking) {
+            speaking = true
+            phrase.clear()
+            phrase.add(before.toArray(), before.size)
+            before.clear()
+        }
+    }
 
     @Synchronized
     override fun feed(samples: FloatArray, n: Int, partial: (String) -> Unit, final: (String) -> Unit) {
@@ -225,7 +245,8 @@ class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
             before.clear()
         }
         val now = android.os.SystemClock.elapsedRealtime()
-        if (speaking && now - lastPartialAt > 250 && phrase.size > 4000) {
+        // the words so far, read again every 250 ms (every 700 ms once the phrase is past 6 s: a long hold)
+        if (speaking && now - lastPartialAt > (if (phrase.size > 96_000) 700 else 250) && phrase.size > 4000) {
             lastPartialAt = now
             val t = engine.text(phrase.toArray())
             if (t.isNotEmpty()) partial(t)
@@ -233,6 +254,7 @@ class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
         while (!vad.empty()) {
             val seg = vad.front()
             vad.pop()
+            if (holding) continue // held: no phrase ends at a pause; the release reads it all
             // our buffer (from before the VAD heard it) when it holds the phrase, else the VAD's segment
             val audio = if (speaking && phrase.size >= seg.samples.size) phrase.toArray() else seg.samples
             speaking = false

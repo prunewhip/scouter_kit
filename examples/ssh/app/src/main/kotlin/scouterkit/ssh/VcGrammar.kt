@@ -274,11 +274,16 @@ object VcGrammar {
         }
         if (tail != null) {
             val cut = if (tail == Cmd.NewLine) 2 else 1
-            val text = words.dropLast(cut).joinToString(" ").trimEnd(',', '.', ' ')
+            val text = fix(words.dropLast(cut).joinToString(" ").trimEnd(',', '.', ' '))
             return listOfNotNull(if (text.isNotEmpty()) Cmd.Text(text) else null, tail)
         }
-        return listOf(Cmd.Text(raw.trim()))
+        return listOf(Cmd.Text(fix(raw.trim())))
     }
+
+    // Names the speech model mishears, put right in typed text ("clod" was "Claude").
+    private val FIXES = listOf(Regex("\\b(clod|clawed|claud|clode|klod)\\b", RegexOption.IGNORE_CASE) to "Claude",
+        Regex("\\bcloud code\\b", RegexOption.IGNORE_CASE) to "Claude Code")
+    fun fix(t: String): String = FIXES.fold(t) { s, (r, to) -> r.replace(s, to) }
 
     // What each command says on the glasses when it is done (the verification).
     fun label(c: Cmd): String = when (c) {
