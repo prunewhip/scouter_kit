@@ -37,12 +37,59 @@ object Copilot {
     fun cues(n: Int): List<Turn> = synchronized(turns) { turns.filter { it.state == "done" || it.state == "thinking" }.takeLast(n) }
     fun heardTail(n: Int): List<Pair<String, String>> = synchronized(lock) { heard.takeLast(n).toList() }
 
-    const val MODEL = "claude-sonnet-5-5" // Copilot only (the user's choice); every other Claude in Vox keeps its own
+    const val MODEL = "claude-sonnet-5-5" // Copilot's default (the user's choice); every other Claude in Vox keeps its own
+
+    // Quick changes (the phone's Copilot screen, or keys on the glasses' view): Claude's model, the view's look.
+    val MODELS = listOf("sonnet" to "Sonnet", "haiku" to "Haiku", "opus" to "Opus")
+    private val MODEL_IDS = mapOf("sonnet" to MODEL, "haiku" to "claude-haiku-5-5", "opus" to "claude-opus-5-5")
+    val LAYOUTS = listOf("left" to "Cue left", "right" to "Cue right", "cue" to "Cue only")
+    val LENGTHS = listOf("short" to "Short", "normal" to "Normal", "long" to "Detailed")
+    val WIDTHS = listOf(28 to "Narrow", 36 to "Normal", 45 to "Wide")
+    fun model(c: Context) = prefs(c).getString("model", "sonnet")?.takeIf { it in MODEL_IDS } ?: "sonnet"
+    fun setModel(c: Context, v: String) = prefs(c).edit().putString("model", v).apply()
+    fun modelId(c: Context) = MODEL_IDS[model(c)] ?: MODEL
+    fun modelName(c: Context) = MODELS.firstOrNull { it.first == model(c) }?.second ?: "Sonnet"
+    fun modeName(c: Context) = MODES.firstOrNull { it.first == mode(c) }?.second ?: "Interview"
+    fun layout(c: Context) = prefs(c).getString("layout", "left")?.takeIf { v -> LAYOUTS.any { it.first == v } } ?: "left"
+    fun setLayout(c: Context, v: String) = prefs(c).edit().putString("layout", v).apply()
+    fun earlier(c: Context) = prefs(c).getBoolean("earlier", true)
+    fun setEarlier(c: Context, v: Boolean) = prefs(c).edit().putBoolean("earlier", v).apply()
+    fun cueLength(c: Context) = prefs(c).getString("cue_length", "normal")?.takeIf { v -> LENGTHS.any { it.first == v } } ?: "normal"
+    fun setCueLength(c: Context, v: String) = prefs(c).edit().putString("cue_length", v).apply()
+    fun heardWidth(c: Context) = prefs(c).getInt("heard_width", 36).coerceIn(20, 50)
+    fun setHeardWidth(c: Context, v: Int) = prefs(c).edit().putInt("heard_width", v).apply()
+
+    // A key on the glasses' view: the next mode, model, layout, cue length, or earlier cues on / off. What changes
+    // Claude's briefing (mode, model, length) starts Claude again, briefed, while it runs.
+    fun cycle(c: Context, what: String) {
+        fun <T> next(l: List<T>, cur: T) = l[(l.indexOf(cur) + 1).mod(l.size)]
+        when (what) {
+            "mode" -> setMode(c, next(MODES.map { it.first }, mode(c)))
+            "model" -> setModel(c, next(MODELS.map { it.first }, model(c)))
+            "layout" -> setLayout(c, next(LAYOUTS.map { it.first }, layout(c)))
+            "length" -> setCueLength(c, next(LENGTHS.map { it.first }, cueLength(c)))
+            "earlier" -> setEarlier(c, !earlier(c))
+            "width" -> setHeardWidth(c, next(WIDTHS.map { it.first }, WIDTHS.map { it.first }.minByOrNull { kotlin.math.abs(it - heardWidth(c)) } ?: 36))
+            else -> return
+        }
+        if (what == "mode" || what == "model" || what == "length") reconfigure(c)
+        changed()
+    }
+
+    // The briefing changed (mode, model, cue length, background): Claude started again and briefed, if it runs.
+    fun reconfigure(c: Context) {
+        if (!on || brain(c) != "claude") return
+        synchronized(this) {
+            live?.close()
+            live = null
+        }
+        Thread({ brief(c.applicationContext) }, "vox-copilot-brief").start()
+    }
 
     // Claude kept running through the whole talk: one `claude -p` reading and writing JSON lines over one SSH channel,
     // so a cue costs only the model's answer (~2.6 s) instead of Claude starting each time (~7 s more on the phone,
     // measured 2026-11-19). The answer streams in (text deltas) and shows on the glasses as it is written.
-    private class Live(c: Context, val system: String) {
+    private class Live(c: Context, val system: String, val model: String) {
         private val stream: Bootstrap.Stream
         @Volatile var dead = false
         @Volatile private var text = StringBuilder()
@@ -54,7 +101,7 @@ object Copilot {
             val s = settings.servers().firstOrNull { it.local } ?: settings.active()
                 ?: throw IllegalStateException("no server for Claude (Terminal tab)")
             // its own folder: Claude Code there loads no project notes or memory, so it knows the briefing and nothing else
-            val cmd = CarClaude.PATH + "mkdir -p ~/.vox-copilot && cd ~/.vox-copilot; ANTHROPIC_MODEL=$MODEL exec claude -p --effort low " +
+            val cmd = CarClaude.PATH + "mkdir -p ~/.vox-copilot && cd ~/.vox-copilot; ANTHROPIC_MODEL=$model exec claude -p --effort low " +
                 "--input-format stream-json " +
                 "--output-format stream-json --verbose --include-partial-messages --allowedTools '' --append-system-prompt " +
                 CarClaude.q(system) + " 2>&1"
@@ -114,10 +161,11 @@ object Copilot {
     @Synchronized
     private fun liveFor(c: Context): Live? {
         val sys = system(c)
+        val m = modelId(c)
         val l = live
-        if (l != null && !l.dead && l.system == sys) return l
+        if (l != null && !l.dead && l.system == sys && l.model == m) return l
         l?.close()
-        live = runCatching { Live(c, sys) }.onFailure { Log.w(ScouterService.TAG, "copilot: live Claude: ${it.message}") }.getOrNull()
+        live = runCatching { Live(c, sys, m) }.onFailure { Log.w(ScouterService.TAG, "copilot: live Claude: ${it.message}") }.getOrNull()
         return live
     }
 
@@ -295,7 +343,12 @@ object Copilot {
         val prep = prep(c).trim()
         val background = if (prep.isEmpty()) "\n\nNo background was given: never state facts about the user; give the shape of a strong answer instead."
             else "\n\n=== THE USER'S BACKGROUND (the only source of facts about them) ===\n$prep\n=== END OF BACKGROUND ==="
-        if (mode(c) == "interview") return INTERVIEW + background
+        val rule = when (cueLength(c)) {
+            "short" -> "At most 2 lines, each under 7 words."
+            "long" -> "At most 4 lines, each under 13 words."
+            else -> "At most 3 lines, each under 9 words."
+        }
+        if (mode(c) == "interview") return INTERVIEW.replace("At most 3 lines, each under 9 words.", rule) + background
         val what = when (mode(c)) {
             "meeting" -> "a meeting"
             "sales" -> "a sales call (the user sells)"
@@ -383,14 +436,14 @@ HOW TO ANSWER
                         val (r, why) = l.ask(text, 25_000) { partial(c, turn.question, it) }
                         if (r != null) {
                             answer = r
-                            turn.by = "Claude"
+                            turn.by = "Claude ${modelName(c)}"
                         } else Log.w(ScouterService.TAG, "copilot: live Claude: $why (one claude -p instead)")
                     }
                     if (answer == null) {
-                        val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", MODEL)
+                        val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", modelId(c))
                         if (a.error != null) problem = a.error else {
                             answer = a.text
-                            turn.by = "Claude"
+                            turn.by = "Claude ${modelName(c)}"
                         }
                         if (a.session != null) session = a.session
                     }

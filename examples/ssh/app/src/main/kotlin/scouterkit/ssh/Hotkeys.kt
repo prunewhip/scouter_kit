@@ -150,9 +150,23 @@ object Hotkeys {
             act("edkey:${e.keyCode}:${e.metaState}:$ch")
             return true
         }
-        // Copilot's interview view open: Esc ends Copilot, Space or Enter asks for a cue now.
-        if (Session.copilotPanel && bare && e.keyCode in setOf(KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER)) {
-            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) act(if (e.keyCode == KeyEvent.KEYCODE_ESCAPE) "cpkey:esc" else "cpkey:now")
+        // Copilot's view open: Esc ends Copilot, Space or Enter a cue now; M mode, C Claude's model, L layout, S cue
+        // size, E earlier cues, W the heard column's width, ↑ / ↓ scroll what was heard.
+        val cp = if (Session.copilotPanel && bare) when (e.keyCode) {
+            KeyEvent.KEYCODE_ESCAPE -> "esc"
+            KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER -> "now"
+            KeyEvent.KEYCODE_M -> "mode"
+            KeyEvent.KEYCODE_C -> "model"
+            KeyEvent.KEYCODE_L -> "layout"
+            KeyEvent.KEYCODE_S -> "length"
+            KeyEvent.KEYCODE_E -> "earlier"
+            KeyEvent.KEYCODE_W -> "width"
+            KeyEvent.KEYCODE_DPAD_UP -> "up"
+            KeyEvent.KEYCODE_DPAD_DOWN -> "down"
+            else -> null
+        } else null
+        if (cp != null) {
+            if (e.action == KeyEvent.ACTION_DOWN && (e.repeatCount == 0 || cp == "up" || cp == "down")) act("cpkey:$cp")
             return true
         }
         // Listen mode's panel open: O (or Space) on / off, P pause, the arrows and Page Up / Down earlier lines, Esc.

@@ -1726,8 +1726,7 @@ class ScouterService : Service() {
             }
             what == "copilotview" -> copilotOpen()
             what == "copilotclose" -> copilotClose()
-            what == "cpkey:esc" -> { Copilot.stop(); copilotClose() }
-            what == "cpkey:now" -> Copilot.askNow(this)
+            what.startsWith("cpkey:") -> copilotKey(what.removePrefix("cpkey:"))
             what.startsWith("copilot:") && Copilot.on -> if (Session.copilotPanel) copilotSoon() else copilotOpen()
             what.startsWith("copilot:") -> { // the copilot's cue: "copilot:<question>\u0001<cue>" (Copilot.kt)
                 val q = what.removePrefix("copilot:").substringBefore('\u0001')
@@ -2799,6 +2798,38 @@ class ScouterService : Service() {
         Session.changed()
     }
 
+    private var copilotScroll = 0 // lines of what was heard scrolled back (↑ / ↓)
+    private var copilotSaid = "" // what a key just changed, in the header for a moment
+    private var copilotSaidAt = 0L
+
+    private fun copilotKey(k: String) {
+        when (k) {
+            "esc" -> {
+                Copilot.stop()
+                copilotClose()
+                return
+            }
+            "now" -> Copilot.askNow(this)
+            "up" -> copilotScroll = (copilotScroll + 2).coerceAtMost(80)
+            "down" -> copilotScroll = (copilotScroll - 2).coerceAtLeast(0)
+            else -> {
+                Copilot.cycle(this, k)
+                copilotSaid = when (k) {
+                    "mode" -> "mode: ${Copilot.modeName(this)}"
+                    "model" -> "Claude ${Copilot.modelName(this)} (briefing it)"
+                    "layout" -> Copilot.LAYOUTS.firstOrNull { it.first == Copilot.layout(this) }?.second.orEmpty()
+                    "length" -> "cues: " + (Copilot.LENGTHS.firstOrNull { it.first == Copilot.cueLength(this) }?.second ?: "")
+                    "earlier" -> if (Copilot.earlier(this)) "earlier cues shown" else "earlier cues hidden"
+                    "width" -> "heard column ${Copilot.heardWidth(this)}%"
+                    else -> ""
+                }
+                copilotSaidAt = SystemClock.elapsedRealtime()
+                work.postDelayed({ copilotSoon() }, 3200)
+            }
+        }
+        copilotDraw()
+    }
+
     // At most every 300 ms (the cue streams in, the words come fast).
     private fun copilotSoon() {
         if (!Session.copilotPanel) return
@@ -2809,12 +2840,17 @@ class ScouterService : Service() {
 
     private fun copilotDraw() {
         copilotDrawn = SystemClock.elapsedRealtime()
-        framePanel(Panels.COPILOT, "VOX//INTERVIEW", "Esc ends", "Space or right triple tap: a cue now", mono = true) { width, max ->
+        val c = this
+        val layout = Copilot.layout(c)
+        framePanel(Panels.COPILOT, "VOX//${Copilot.modeName(c).uppercase(java.util.Locale.US).substringBefore(' ')}", "Esc ends",
+            "␣ cue · M mode · C model · L layout · S size · E earlier · W width · ↑↓", mono = true) { width, max ->
             val rows = mutableListOf<Pair<String, Int>>()
             val min = if (Copilot.startedAt > 0) (System.currentTimeMillis() - Copilot.startedAt) / 60000 else 0
-            rows += ("▌▌ LIVE ▐░▒▓ Claude Sonnet · ${Copilot.status.ifEmpty { "listening" }.lowercase(java.util.Locale.US)} · $min min") to 1
-            val lw = (width * 0.64f).toInt().coerceAtLeast(18)
-            val rw = (width - lw - 3).coerceAtLeast(8)
+            val said = if (copilotSaid.isNotEmpty() && SystemClock.elapsedRealtime() - copilotSaidAt < 3000) " · » $copilotSaid" else ""
+            rows += ("▌▌ LIVE ▐░▒▓ ${Copilot.modeName(c)} · Claude ${Copilot.modelName(c)} · " +
+                "${Copilot.status.ifEmpty { "listening" }.lowercase(java.util.Locale.US)} · $min min$said") to 1
+            val lw = if (layout == "cue") width else (width * (100 - Copilot.heardWidth(c)) / 100).coerceAtLeast(18)
+            val rw = if (layout == "cue") 0 else (width - lw - 3).coerceAtLeast(8)
             // left: what to say
             val left = ArrayList<Pair<String, Int>>()
             val cues = Copilot.cues(4)
@@ -2828,7 +2864,7 @@ class ScouterService : Service() {
             }
             left += "◢ SAY" to 2
             for (l in main.lines()) for (w in Panels.wrap(l, lw - 2)) left += "▌ $w" to 1
-            val older = cues.filter { it !== newest && it.state == "done" }.asReversed()
+            val older = if (Copilot.earlier(c)) cues.filter { it !== newest && it.state == "done" }.asReversed() else emptyList()
             if (older.isNotEmpty()) left += "◣ EARLIER" to 2
             for (t in older) Panels.wrap(t.answer.lines().firstOrNull().orEmpty(), lw - 2).firstOrNull()?.let { left += "  $it" to 2 }
             // right: what is said
@@ -2838,11 +2874,18 @@ class ScouterService : Service() {
                 heard += Panels.wrap("$tag› $text", rw)
             }
             val body = (max - 1).coerceAtLeast(3)
-            val right = listOf("◢ HEARD") + heard.takeLast(body - 1)
+            copilotScroll = copilotScroll.coerceAtMost((heard.size - (body - 1)).coerceAtLeast(0))
+            val right = listOf("◢ HEARD" + if (copilotScroll > 0) " ↑$copilotScroll" else "") +
+                heard.dropLast(copilotScroll).takeLast(body - 1)
             for (i in 0 until body) {
                 val l = left.getOrNull(i)
-                rows += ((l?.first ?: "").take(lw).padEnd(lw) + " ┊ " + right.getOrElse(i) { "" }.take(rw)) to
-                    (if (l?.second == 1) 1 else 0)
+                val lt = (l?.first ?: "").take(lw)
+                val rt = right.getOrElse(i) { "" }.take(rw)
+                rows += when (layout) {
+                    "cue" -> lt
+                    "right" -> rt.padEnd(rw) + " ┊ " + lt
+                    else -> lt.padEnd(lw) + " ┊ " + rt
+                } to (if (l?.second == 1) 1 else 0)
             }
             rows
         }

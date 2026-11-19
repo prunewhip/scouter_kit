@@ -64,11 +64,27 @@ class CopilotActivity : Activity() {
             if (!micOk()) return@button
             Copilot.askNow(this)
         })
-        top.addView(text("On the glasses: Q in the Listen panel (hub L) asks for a cue.", 12.5f, Ui.FAINT).apply { setPadding(0, dp(8), 0, 0) })
+        top.addView(text("On the glasses: its own view opens (Esc ends it); Space or the right TouchBar's triple tap asks for a cue.",
+            12.5f, Ui.FAINT).apply { setPadding(0, dp(8), 0, 0) })
         body.addView(top)
 
         val how = card("This talk")
-        how.addView(segmented(Copilot.MODES.map { it.first to it.second.substringBefore(' ') }, Copilot.mode(this)) { Copilot.setMode(this, it) })
+        how.addView(segmented(Copilot.MODES.map { it.first to it.second.substringBefore(' ') }, Copilot.mode(this)) {
+            Copilot.setMode(this, it)
+            Copilot.reconfigure(this)
+        })
+        how.addView(text("Claude's model", 13f, Ui.FAINT).apply { setPadding(0, dp(6), 0, 0) })
+        how.addView(segmented(Copilot.MODELS, Copilot.model(this)) {
+            Copilot.setModel(this, it)
+            Copilot.reconfigure(this)
+        })
+        how.addView(text("Sonnet: quick and sharp (the default). Haiku: the quickest. Opus: the deepest, a little slower. " +
+            "Only Copilot uses this.", 12.5f, Ui.FAINT))
+        how.addView(text("Cue size", 13f, Ui.FAINT).apply { setPadding(0, dp(6), 0, 0) })
+        how.addView(segmented(Copilot.LENGTHS, Copilot.cueLength(this)) {
+            Copilot.setCueLength(this, it)
+            Copilot.reconfigure(this)
+        })
         how.addToggle(toggle("Answer by itself", "When someone else asks a question. Off: only when you ask (Answer now, Q).",
             Copilot.auto(this)) { Copilot.setAuto(this, it) })
         how.addView(text("Answers from", 13f, Ui.FAINT).apply { setPadding(0, dp(6), 0, 0) })
@@ -76,6 +92,16 @@ class CopilotActivity : Activity() {
         how.addView(text("Claude knows the whole talk and your background; the phone's model is the stand-in when Claude " +
             "cannot be reached (it sees the last minute only, and Listen pauses while it thinks).", 12.5f, Ui.FAINT))
         body.addView(how)
+
+        val look = card("On the glasses", "The view while Copilot is on. Keys there: Space a cue now, M mode, C model, " +
+            "L layout, S cue size, E earlier cues, W width, ↑ ↓ scroll, Esc ends.")
+        look.addView(segmented(Copilot.LAYOUTS, Copilot.layout(this)) { Copilot.setLayout(this, it) })
+        look.addView(text("What was heard: column width", 13f, Ui.FAINT).apply { setPadding(0, dp(6), 0, 0) })
+        look.addView(segmented(Copilot.WIDTHS.map { it.first.toString() to it.second }, Copilot.heardWidth(this).toString()) {
+            Copilot.setHeardWidth(this, it.toIntOrNull() ?: 36)
+        })
+        look.addToggle(toggle("Earlier cues", "Faint under the newest one", Copilot.earlier(this)) { Copilot.setEarlier(this, it) })
+        body.addView(look)
 
         val prep = card("Your background", "What Claude answers from: your résumé, the job post, who you are meeting, your " +
             "numbers and stories. Paste it or write it; it stays on this phone and goes to Claude with the talk.")
