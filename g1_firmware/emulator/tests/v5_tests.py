@@ -280,7 +280,16 @@ def vectors_body(e, res, n=int(os.environ.get("G1_VECTORS", "40")), seed=int(os.
     cases = load_vectors(path)
     res["cases"] = []
     for case in cases:
-        r = replay(arm, case)
+        try:
+            r = replay(arm, case)
+        except Exception:
+            res["broke_in"] = case["name"]
+            try:   # the arm's own record of why it rebooted, if it did (retained ring: "=== boot ... last fault")
+                arm.hello()
+                res["boot_banners"] = [x for x in arm.read_log().splitlines() if x.startswith("=== boot")][-3:]
+            except Exception as ex:
+                res["boot_banners"] = f"unreadable: {ex!r}"
+            raise
         res["cases"].append(r)
         if r["fails"]:
             arm.log(f"[{arm.name}] vector {case['name']} FAILED: {r['fails'][:3]}")
@@ -2995,6 +3004,33 @@ def videox_body(e, res):
     assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
 
 
+def videot_body(e, res):
+    """VIDEOT (VM.md §3.9, 0.5.68+): tools/draw_bench.py --videot's nine 320 x 240 records (drawn 640 x 480) back to
+    back, the last 4000 random bytes at q 1: the arm stays up, VM_STATUS is answered while they run, no VM error, and
+    the panel and the arena end as the mirror's (the mirror is the same VM core)."""
+    import draw_bench
+    arm = e.arm
+    out = res.setdefault("videot", {})
+    recs = draw_bench.videot_records(e.run)
+    out["record_bytes"] = [len(r) for r in recs]
+    boots, epoch = arm.info["boot_count"], arm.epoch
+    last = draw_bench.videot_send(arm, recs)
+    status = []
+    arm.run_until(lambda: draw_bench.VIDEOT_MARK in arm.fences, 60, "the first VIDEOT")
+    while last not in arm.fences and len(status) < 400:
+        status.append(arm.ctrl("VM_STATUS", timeout=5.0, tries=1)["status"])
+    arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOT")
+    arm.wait_idle(10)
+    out["videot_ms"] = draw_bench.marks_ms(arm, draw_bench.VIDEOT_MARK, len(recs))
+    out["vm_status_answered"] = len(status)
+    h = arm.hello()
+    out["same_boot"] = h["boot_count"] == boots and arm.epoch == epoch
+    out["panel"] = arm.panel_read(0, 480)
+    out["arena"] = arm.arena_crc()
+    assert out["same_boot"] and status and all(x == 0 for x in status), out
+    assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
+
+
 def test_panel_read(name):
     return run(name, CUR_MIC, panel_read_body)
 
@@ -3004,6 +3040,9 @@ def test_video(name):
 
 def test_videox(name):
     return run(name, CUR_MIC, videox_body)
+
+def test_videot(name):
+    return run(name, CUR_MIC, videot_body)
 
 def test_peer(name):
     return run(name, CUR_MIC, peer_body)
@@ -3399,7 +3438,7 @@ TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "upd
          "bad_packets": test_bad_packets, "no_panel": test_no_panel, "starve": test_starve,
          "sessions": test_sessions, "imu": test_imu, "diag": test_diag, "pair_link": test_pair_link,
          "peer": test_peer, "pair_stream": test_pair_stream,
-         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "panel_guard": test_panel_guard,
+         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "videot": test_videot, "panel_guard": test_panel_guard,
          "assets": test_assets}
 for _t in ("crash", "hang", "thread_hang", "safe_mode", "lost_packet", "reset_mid_frame", "security", "pmic_watchdog",
            "i2c_errors", "no_pmic"):

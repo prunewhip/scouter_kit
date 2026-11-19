@@ -39,8 +39,8 @@ The emulator (Renode 1.16.1 with g1-fw's nRF5340 platform and models, commit `b8
 test in a rootless, network-less container: the replica MCUboot, the g1v0 image, Even's 1.6.6 network core
 and a virtual phone that bridges the emulated BLE link to a host program (`g1host.py --emu SOCKET`).
 `gate.sh`'s standard set: `smoke power unattended security mic_capture mic_lease draw_bench panel_standby
-panel_prop panel_read video panel_guard in_case case_hold case_blank mic_popup_standby touch light gyro peer
-pair_link assets`, plus `chain chain_right` (0.4.10 → G1_FROM → VERSION → NEXT
+panel_prop panel_read video videox videot panel_guard in_case case_hold case_blank mic_popup_standby touch light
+gyro peer pair_link assets`, plus `chain chain_right` (0.4.10 → G1_FROM → VERSION → NEXT
 over SMP, both roles) when those builds exist; `all` adds the rest, among them `restore` (Even's 1.6.6 installed by
 `flash.py` itself). The board harness has the TouchBar controller (g1-fw's model with this project's interrupt
 line, wear events and modes) at TWIM2 0x12 with its interrupt on P1.09; the firmware arms that interrupt before the
@@ -195,6 +195,23 @@ The notes below were written during development. Their paths (`tools/…`, `emu/
 and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, `imu_check.py`, `imu_cal.py`,
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
+
+### What 0.5.68 adds (VIDEOT transform-coded video; flash locked at boot)
+
+- **VIDEOT** (opcode 0x58, VM.md §3.9): natural video as 8-bit pictures up to 320 × 240, 8 × 8 blocks with motion
+  vectors (±7) and 4 × 4 Walsh-Hadamard residuals, range coded; drawn at twice the size with a 2 × 2 ordered dither
+  (16 levels), each band of 8 rows drawn as soon as it is decoded. Library `TransformVideoEncoder` (closed loop).
+  A real camera clip at 256 × 240: ~1.9 KB a frame at 29 dB (q 45), where Vox's 4 grey planes took ~2.6 KB at 19 dB.
+- **Flash locked at boot** (`CONFIG_G1_LOCK_FLASH`, default y): right after `board_init` and before Bluetooth or the
+  case link, SPU regions 0–61 (0x0–0xF8000: MCUboot and the running image) become read + execute only, locked until
+  the next reset; region 62 (the primary slot's trailer, which a confirm writes) and 63 (settings) stay writable.
+  The boot log says `flash 0x0-0xf8000 read + execute only until reset (region 0: 0x115)`. Updates are unchanged.
+- `CONFIG_G1_VIDEOX_PIXELS` (VIDEOX pixel coding, flag bit 3) is off in g1v0: it did not pay through Vox's mirror.
+- Tests: `vm_test` VIDEOT vectors (also run on the emulated arm by `vectors`), `tests/videot_test.cpp` (bit-exact
+  round trips, every band drawn, 3000 random records with no write outside the frame and state, the dither within
+  2/255, Vox's mirror on emulated arms with 0 wrong panel pixels; ASan/UBSan clean), emulator test `videot`
+  (`tools/draw_bench.py --videot`'s records, the last 4000 random bytes: the arm stays up, the panel and the arena
+  equal the mirror's). Gate 0.5.68: 26/26, the update chain from 0.5.63 on both arms.
 
 ### What 0.5.66 adds (VIDEOX block moves, the sprite, wide canvases; 128 MHz held through bursts)
 

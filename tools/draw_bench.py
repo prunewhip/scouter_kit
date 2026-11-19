@@ -2,9 +2,10 @@
 """DRAW cost on an arm: the arm's own NOTIFY times around each DRAW (panel_write_ms) for a set of rectangle
 sizes, each drawn `--n` times from a 4 bpp arena bitmap, then a least-squares fit of time = a·rows + b·bytes
 (bytes = rows × ceil(w / 2)) per width class. Panel on, nothing else running; the panel ends off. With --video:
-instead, the time of VIDEO (VM.md §3.7) for five worst-case 640 × 480 records (needs g++).
+instead, the time of VIDEO (VM.md §3.7) for five worst-case 640 × 480 records (needs g++); --videox and --videot
+the same for VIDEOX (§3.8) and VIDEOT (§3.9).
 
-  python3 -I draw_bench.py --ble ADDR --name R --out logs/draw/1 [--video]"""
+  python3 -I draw_bench.py --ble ADDR --name R --out logs/draw/1 [--video | --videox | --videot]"""
 import argparse
 import json
 import statistics
@@ -42,6 +43,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--video", action="store_true", help="0.5.42+: VIDEO's worst cases instead of the DRAW sizes")
     ap.add_argument("--videox", action="store_true", help="0.5.62+: VIDEOX, 16 greys as 4 planes with row moves")
+    ap.add_argument("--videot", action="store_true", help="0.5.68+: VIDEOT, transform-coded video at 320 x 240")
     args = ap.parse_args()
     arm = g.Arm(g.BleTransport(args.ble), name=args.name)
     arm.setup()
@@ -64,6 +66,18 @@ def main():
         arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOX")
         out = {"hello": {k: h[k] for k in ("version", "role")}, "record_bytes": [len(r) for r in recs],
                "videox_ms": videox_ms(arm, len(recs)), "panel": arm.panel_read(0, 480)}
+        print(json.dumps(out), flush=True)
+        arm.set_panel(0)
+        arm.wait_idle(10)
+    elif args.videot:
+        with tempfile.TemporaryDirectory() as tmp:
+            recs = videot_records(tmp)
+        h = arm.hello()
+        last = videot_send(arm, recs)
+        arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOT")
+        arm.wait_idle(10)
+        out = {"hello": {k: h[k] for k in ("version", "role")}, "record_bytes": [len(r) for r in recs],
+               "videot_ms": marks_ms(arm, VIDEOT_MARK, len(recs)), "panel": arm.panel_read(0, 480)}
         print(json.dumps(out), flush=True)
         arm.set_panel(0)
         arm.wait_idle(10)
@@ -177,6 +191,46 @@ def videox_send(arm, recs, planes=4):
             "NOTIFY", k(VIDEOX_MARK + 2 * i + 1), k(0)))
     arm.flush()
     return VIDEOX_MARK + 2 * len(recs) - 1
+
+
+VIDEOT_MARK = 0x7400
+
+
+def videot_records(out_dir):
+    """the VIDEOT records of ../tests/videot_records.cpp (g1v0 0.5.68+): 320 x 240 camera pan, a still frame, a scene
+    cut at q 8, then 4000 random bytes"""
+    sk = Path(__file__).resolve().parent.parent
+    exe = Path(out_dir) / "videot_records"
+    subprocess.run(["g++", "-std=c++20", "-O2", "-DSCOUTER_G1_EMULATOR", str(sk / "tests/videot_records.cpp"),
+                    str(sk / "src/base/scouter_kit.cpp"), str(sk / "src/vm/vm.c"), str(sk / "src/vm/vm_gfx.c"),
+                    "-o", str(exe), "-lpthread"], check=True)
+    r = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+    return [bytes.fromhex(x) for x in r.stdout.split()]
+
+
+def videot_send(arm, recs, w=320, h=240):
+    """the records as VIDEOTs (drawn 2w x 2h at (0, 0)), each between NOTIFYs VIDEOT_MARK + 2i and + 2i + 1; returns
+    the last mark"""
+    fr, st = arm.alloc(w * h), arm.alloc(5928)  # the frame and VIDEOT_STATE
+    bufs = [arm.alloc(len(r)) for r in recs]
+    arm.write_arena_rle(fr, bytes(w * h))
+    arm.write_arena_rle(st, bytes(5928))
+    for b, r in zip(bufs, recs):
+        arm.write_arena(b, r)
+    arm.wait_idle(60)
+    k = arm.k
+    for i, (b, r) in enumerate(zip(bufs, recs)):
+        arm.add(g.Code().ins("NOTIFY", k(VIDEOT_MARK + 2 * i), k(0)).ins(
+            "VIDEOT", k(4 * fr), k(w), k(h), k(0), k(0), k(4 * b), k(len(r)), k(4 * st)).ins(
+            "NOTIFY", k(VIDEOT_MARK + 2 * i + 1), k(0)))
+    arm.flush()
+    return VIDEOT_MARK + 2 * len(recs) - 1
+
+
+def marks_ms(arm, mark, n):
+    """the arm's time between NOTIFYs mark + 2i and + 2i + 1, ms"""
+    f = arm.fences
+    return [round((f[mark + 2 * i + 1]["t_dev"] - f[mark + 2 * i]["t_dev"]) / 1000, 1) for i in range(n)]
 
 
 def videox_ms(arm, n):
