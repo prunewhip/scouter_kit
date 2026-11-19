@@ -79,6 +79,9 @@ class MainActivity : Activity() {
     private lateinit var lookSub: TextView
     private lateinit var forgetChip: TextView
     private lateinit var defaultChip: TextView
+    private lateinit var ownChip: TextView
+    private lateinit var ownList: LinearLayout
+    private var ownShown: List<String>? = null // the apps ownList was made for
     private var screenBuiltFor: String? = null // the look the Screen tab's controls were made with
     private lateinit var voiceState: TextView
     private var voiceModeButton: TextView? = null // voice mode on / off (talking to the terminal)
@@ -431,25 +434,32 @@ class MainActivity : Activity() {
         shown.addView(chipRow(shareChip, colour, chip("Check the glasses", false) { checkGlasses() }))
         page.addView(shown)
 
-        // The look per app: whose look the settings below are, kept as they change.
-        val per = card("Look for")
+        // The look: every app uses its screen's default look (16 greys) unless it was given one of its own here; the
+        // settings below change the look named on this card.
+        val per = card("Changing the look of")
         lookTitle = text("", 18f, Ui.TEXT, Ui.BOLD)
         lookSub = text("", 12.5f, Ui.MUTED).apply { setPadding(0, dp(2), 0, dp(4)) }
         per.addView(lookTitle)
         per.addView(lookSub)
-        forgetChip = chip("Forget its look", false) {
+        ownChip = chip("Give it its own look", false) {
+            Looks.makeOwn(settings, Looks.key)
+            note = "${Looks.name(this, settings, Looks.key)} now keeps its own look: changes you make while it shows stay with it."
+            show()
+        }
+        forgetChip = chip("Back to the default look", false) {
             Looks.forget(settings, Looks.key)
             rebuildScreen()
             show()
         }
-        defaultChip = chip("Use for every app", false) {
+        defaultChip = chip("Make it the default", false) {
             Looks.makeDefault(settings, Looks.key)
             note = "This look is now the default for every app without its own."
             show()
         }
-        per.addView(chipRow(forgetChip, defaultChip))
-        per.addToggle(toggle("Remember the look per app", "Each phone app and laptop window keeps the look you set while " +
-            "it shows, and gets it back when it shows again", settings.looksPerApp) {
+        per.addView(chipRow(ownChip, forgetChip, defaultChip))
+        ownList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        per.addView(ownList)
+        per.addToggle(toggle("Apps can have their own look", "Off: one look for everything, whatever app shows", settings.looksPerApp) {
             settings.looksPerApp = it
             if (!it) Looks.key = ""
             if (ScouterService.running) ScouterService.send(this)
@@ -601,7 +611,7 @@ class MainActivity : Activity() {
         val size = page.section("Speed and detail", "screen_speed", "speed",
             hint = "Less to send is faster on the glasses and lighter on both batteries.")
         size.addView(subhead("Greys"))
-        size.addView(segmented(listOf("2" to "B&W · fast", "4" to "4", "8" to "8", "16" to "16"),
+        size.addView(segmented(listOf("16" to "16 · 4-bit", "8" to "8", "4" to "4", "2" to "B&W"),
             settings.screenLevels.toString()) { settings.screenLevels = it.toInt() })
         size.addView(subhead("Detail"))
         size.addView(segmented(listOf("0" to "Auto", "1" to "Full", "2" to "½", "3" to "⅓", "4" to "¼"),
@@ -1584,26 +1594,48 @@ class MainActivity : Activity() {
         // The look per app.
         val lk = Looks.key
         if (lk != screenBuiltFor && settings.looksPerApp) rebuildScreen()
+        val app = lk.isNotEmpty() && Looks.fallback(lk) != null && settings.looksPerApp
+        val own = app && Looks.own(settings, lk)
         when {
             !settings.looksPerApp -> {
                 lookTitle.text = "Every app"
-                lookSub.text = "One look for everything (per app is off)."
+                lookSub.text = "One look for everything."
             }
             lk.isEmpty() -> {
-                lookTitle.text = "Nothing on the glasses yet"
+                lookTitle.text = "The default look"
                 lookSub.text = "Once a screen shows, its app (or laptop window) is named here."
+            }
+            own -> {
+                lookTitle.text = Looks.name(this, settings, lk)
+                lookSub.text = "Its own look: what you change here stays with it."
+            }
+            app -> {
+                lookTitle.text = Looks.name(this, settings, lk) + " · the default look"
+                lookSub.text = "Changes here change the default, for every app without its own look."
             }
             else -> {
                 lookTitle.text = Looks.name(this, settings, lk)
-                val own = Looks.own(settings, lk)
-                lookSub.text = if (Looks.fallback(lk) == null) "The default look for this screen's apps."
-                    else if (own) "Its own look: kept as you change it."
-                    else "The default look: change anything to give it its own."
+                lookSub.text = "The default look for this screen's apps."
             }
         }
-        val app = lk.isNotEmpty() && Looks.fallback(lk) != null && settings.looksPerApp
-        forgetChip.visibility = if (app && Looks.own(settings, lk)) View.VISIBLE else View.GONE
-        defaultChip.visibility = if (app) View.VISIBLE else View.GONE
+        ownChip.visibility = if (app && !own) View.VISIBLE else View.GONE
+        forgetChip.visibility = if (own) View.VISIBLE else View.GONE
+        defaultChip.visibility = if (own) View.VISIBLE else View.GONE
+        // the apps with a look of their own, each with its way back to the default
+        val owners = if (settings.looksPerApp) Looks.ownKeys(settings) else emptyList()
+        if (owners != ownShown) {
+            ownShown = owners
+            ownList.removeAllViews()
+            if (owners.isNotEmpty())
+                ownList.addView(text("With their own look (tap to send back to the default)", 12.5f, Ui.MUTED).apply {
+                    setPadding(0, dp(8), 0, dp(2))
+                })
+            for (k in owners) ownList.addView(chipRow(chip(Looks.name(this, settings, k) + "  ×", false) {
+                Looks.forget(settings, k)
+                if (k == Looks.key) rebuildScreen()
+                show()
+            }))
+        }
 
         // The other tabs.
         val sharing = Session.capturing

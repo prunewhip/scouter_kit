@@ -46,7 +46,7 @@ class Settings(context: Context) {
     var screenInvert: Boolean
         get() = prefs.getBoolean("screen_invert", true)
         set(v) = prefs.edit().putBoolean("screen_invert", v).apply()
-    var screenLevels: Int by Number("screen_levels", 2) // 2: the fast path (VIDEO records); 4, 8 or 16 greys
+    var screenLevels: Int by Number("screen_levels", 16) // 16 greys (4-bit, the default); 2: black and white; 4, 8
     // Less to send: pixels in blocks of detail x detail (1 ... 4), or 0, auto (black and white): every pixel
     // when a frame fits `screenBudget` KB, else coarser; a screen that stopped moving sharpens.
     var screenDetail: Int by Number("screen_detail", 0)
@@ -155,11 +155,15 @@ class Settings(context: Context) {
             Session.overlay == Panels.HOME || Session.overlay == Panels.PEOPLE) 1 else 0,
         if (headTurn) 1 else 0)
 
-    // Once: the fast path (black and white) for everyone, as 0.4 made it the default.
+    // Once (1.02): 16 greys (4-bit) for everything, the screen's setting and every look kept (per app and each
+    // source's default), as the user asked; a look's other settings stay.
     fun migrate() {
-        if (prefs.getBoolean("migrated_04", false)) return
-        screenLevels = 2
-        prefs.edit().putBoolean("migrated_04", true).apply()
+        if (prefs.getBoolean("migrated_102", false)) return
+        screenLevels = 16
+        val all = runCatching { org.json.JSONObject(looks) }.getOrDefault(org.json.JSONObject())
+        for (k in all.keys().asSequence().toList()) all.optJSONObject(k)?.put("levels", 16)
+        looks = all.toString()
+        prefs.edit().putBoolean("migrated_102", true).putBoolean("migrated_04", true).apply()
     }
 
     // The look-up view (LookUp): the fade when the terminal comes and goes (ms, 0: none), and the header above the

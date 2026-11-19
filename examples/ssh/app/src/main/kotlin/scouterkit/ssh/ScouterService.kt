@@ -3171,7 +3171,7 @@ class ScouterService : Service() {
             refresh()
         }
         if (settings.show == Settings.SCREEN) {
-            t += pick("Picture", listOf("2" to "black and white (fast)", "4" to "4 greys", "8" to "8 greys", "16" to "16 greys"),
+            t += pick("Picture", listOf("16" to "16 greys (4-bit)", "8" to "8 greys", "4" to "4 greys", "2" to "black and white"),
                 { settings.screenLevels.toString() }, { settings.screenLevels = it.toInt() })
             t += num("Invert", { settings.screenInvertPct }, { settings.screenInvertPct = it }, 0, 100, 10, { "$it%" })
             t += num("Threshold", { settings.screenThreshold }, { settings.screenThreshold = it }, 16, 240, 8)

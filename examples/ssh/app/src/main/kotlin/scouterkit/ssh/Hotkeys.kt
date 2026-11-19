@@ -344,17 +344,8 @@ object Hotkeys {
                 ScouterService.send(context, ScouterService.ACTION_TABS, "tab" to if (e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) "prev" else "next")
             return true
         }
-        // Ctrl+Left, with a screen on the glasses: back to the SSH terminal. A server's screen goes to that server's
-        // terminal, the phone's to the terminal in use. In the terminal itself it is the word before, as ever.
-        if (e.isCtrlPressed && !e.isAltPressed && !e.isMetaPressed && !e.isShiftPressed &&
-            e.keyCode == KeyEvent.KEYCODE_DPAD_LEFT && Session.showing == Settings.SCREEN) {
-            val shown = Session.screenSource
-            val term = if (shown.startsWith("screen:")) "term:" + shown.removePrefix("screen:")
-                else settings.active()?.let { "term:${it.id}" }
-            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 && term != null)
-                ScouterService.send(context, ScouterService.ACTION_SOURCE, Shortcuts.EXTRA to term, "fx" to "left")
-            return true
-        }
+        // (1.02: Ctrl+Left no longer leaves a screen for the terminal: Ctrl+arrows, Ctrl+A, C, V, X, Z ... are the apps'
+        // own everywhere. Alt+Up goes to the terminal.)
         if (!e.isAltPressed || e.isCtrlPressed || e.isMetaPressed) return false
         // The phone's screen on the glasses: Alt+Backspace is Back, Alt+H Home, Alt+R Recents, Alt+N the
         // notifications (VoxKeys).

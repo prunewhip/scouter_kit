@@ -2,9 +2,11 @@ package scouterkit.ssh
 
 import org.json.JSONObject
 
-// The screen's look remembered per app: the phone's app in front (VoxKeys tells which), a server's window in front
-// (its X11 class, asked over SSH), else per source. A change of the look while one of them shows is kept for it,
-// and its look comes back when it shows again; one without a look of its own takes its source's. Keys:
+// The screen's look: each source has a default look (the phone's screen, each server's screen), and an app can be
+// given a look of its own on purpose (the Screen tab: "Give it its own look"): the phone's app in front (VoxKeys
+// tells which), a server's window in front (its X11 class, asked over SSH). A change while an app with its own look
+// shows is kept for that app; any other change goes to the source's default, so every app without its own look
+// follows it (1.02: before, any change while an app showed made it a look of its own, unasked). Keys:
 // "app:PACKAGE", "win:SERVER:CLASS", "src:phone", "src:screen:SERVER"; the looks are JSON in Settings.looks.
 object Looks {
     @Volatile var app = "" // the phone's app in front (Vox's own and the system's windows left out)
@@ -109,16 +111,28 @@ object Looks {
         return true
     }
 
-    // The settings changed: the look in use keeps them (unless they are the look it already has).
+    // The settings changed: the app's own look keeps them when it has one, else its source's default does.
     fun remember(s: Settings) {
         val k = key.ifEmpty { return }
+        val target = if (own(s, k)) k else fallback(k) ?: k
         val now = capture(s)
-        val had = lookOf(s, k)
-        if (had != null && same(now, had)) return
         val a = all(s)
-        a.put(k, now)
+        val had = a.optJSONObject(target)
+        if (had != null && same(now, had)) return
+        a.put(target, now)
         s.looks = a.toString()
     }
+
+    // The app in front gets a look of its own (the settings as they are): later changes are kept for it only.
+    fun makeOwn(s: Settings, key: String) {
+        if (fallback(key) == null) return
+        val a = all(s)
+        a.put(key, capture(s))
+        s.looks = a.toString()
+    }
+
+    // The apps and windows with a look of their own.
+    fun ownKeys(s: Settings): List<String> = all(s).keys().asSequence().filter { fallback(it) != null }.toList().sorted()
 
     // The key's own look goes: its source's applies again.
     fun forget(s: Settings, key: String) {
