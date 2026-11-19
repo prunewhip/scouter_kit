@@ -4632,6 +4632,18 @@ class ScouterService : Service() {
         override fun band(text: String, lines: Int) {
             if (glassesWith != null) Native.voiceBand(text, lines)
         }
+        override fun panel(title: String?, lines: List<String>) {
+            if (glassesWith == null || settings.show == Settings.SCREEN) return
+            if (title == null) {
+                if (Session.overlay.isEmpty()) Native.overlay(null, null, false)
+                return
+            }
+            val g = region()
+            val cols = if (g[2] > 0) g[0] / g[2] else settings.cols
+            val rows = if (g[3] > 0) g[1] / g[3] else settings.rows
+            val c = Panels.frameLines(cols, rows, "VOX//$title", "say \"cancel\"", lines.map { it to 0 }, "")
+            Native.overlay(c.lines.toTypedArray(), c.marks.toIntArray(), true)
+        }
         override fun other(text: String): String? {
             val m = VoiceCommands.match(settings, text) ?: return null
             voiceDo(m)

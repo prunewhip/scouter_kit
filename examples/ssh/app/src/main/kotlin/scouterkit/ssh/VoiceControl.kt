@@ -42,6 +42,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         fun picture(): IntArray? // the screen picture's w, h on the glasses, or null (the terminal shows)
         fun redraw() // the picture again (the HUD changed)
         fun band(text: String, lines: Int) // the terminal's band (empty: none)
+        fun panel(title: String?, lines: List<String>) // a box over the terminal (null: none)
         fun other(text: String): String? // Vox's voice commands: what it did, or null (no such command)
         fun micBusy(): String? // someone else has the microphone (Car mode, captions, listening)
         fun vault(): Vault
@@ -940,19 +941,32 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         val p = host.picture()
         if (host.target() == "terminal" || p == null) {
             Native.screenHud(null, 0, 0, 0, 0)
-            host.band(bandText(), if (panel != null || notifs != null) 6 else 2)
+            host.band(bandText(), 2)
+            val box = panel ?: notifs?.let { list -> "NOTIFICATIONS" to list.mapIndexed { i, n -> "${i + 1}  ${n.app}: ${n.title} ${n.text}" } }
+            host.panel(box?.first, box?.second ?: emptyList())
+            terminalPanel = box != null
             return
         }
         host.band("", 0)
+        if (terminalPanel) {
+            host.panel(null, emptyList())
+            terminalPanel = false
+        }
         val art = render(p[0], p[1])
         Native.screenHud(art, p[0], p[1], 0, 0)
         host.redraw()
         if (SystemClock.elapsedRealtime() < flashUntil) host.work.postDelayed({ draw() }, flashUntil - SystemClock.elapsedRealtime() + 20)
     }
 
+    private var terminalPanel = false
+
     private fun clearHud() {
         Native.screenHud(null, 0, 0, 0, 0)
         host.band("", 0)
+        if (terminalPanel) {
+            host.panel(null, emptyList())
+            terminalPanel = false
+        }
         host.redraw()
     }
 
@@ -971,8 +985,6 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         b.append("  ").append(if (partial.isNotEmpty()) "“$partial”" else if (status == "LIVE") "speak…" else why)
         val fb = feedback.takeIf { SystemClock.elapsedRealtime() - feedbackAt < 6000 }
         b.append('\n').append(fb ?: if (typing) "typing: \"backspace\", \"send\", \"type\" ends" else "say a command, \"help\"")
-        panel?.let { (title, lines) -> b.append("\n— $title —\n").append(lines.joinToString("\n")) }
-        notifs?.let { list -> list.forEachIndexed { i, n -> b.append("\n${i + 1} ${n.app}: ${n.title} ${n.text}".take(80)) } }
         return b.toString()
     }
 
