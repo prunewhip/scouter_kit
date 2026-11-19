@@ -1213,7 +1213,8 @@ class MainActivity : Activity() {
             LiveModel.progress >= 0 -> "Downloading… ${mb(LiveModel.progress)} of ${mb(LiveModel.SIZE)}"
             live -> "Parakeet live (NVIDIA, 0.6B, words every 240 ms) · ${if (Recognizers.loaded) "loaded" else "on this phone"}"
             LiveModel.problem != null -> "Not downloaded: ${LiveModel.problem}"
-            VoiceModel.ready(this) -> "Not downloaded: voice control uses the model above meanwhile · ${mb(LiveModel.SIZE)}"
+            VoiceModel.ready(this) -> "Optional: voice control already works with the model above; this one writes words " +
+                "as they are said · ${mb(LiveModel.SIZE)}"
             else -> "Not downloaded yet · ${mb(LiveModel.SIZE)}, Wi-Fi is best"
         }
         liveButton.visibility = if (VoiceModel.available && LiveModel.progress < 0) View.VISIBLE else View.GONE

@@ -394,10 +394,14 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
                 host.work.post { stop("asked") ; host.band("", 0) }
                 "✓ VOICE CONTROL OFF"
             }
-            VcGrammar.Cmd.Cancel -> {
+            VcGrammar.Cmd.Cancel -> if (zoom == null && notifs == null && panel == null && !typing) {
+                host.work.post { stop("cancel"); host.band("", 0) }
+                "✓ VOICE CONTROL OFF"
+            } else {
                 zoom = null
                 notifs = null
                 panel = null
+                typing = false
                 "✓ CANCELLED"
             }
             is VcGrammar.Cmd.Other -> host.other(c.text)?.let { "✓ $it" }

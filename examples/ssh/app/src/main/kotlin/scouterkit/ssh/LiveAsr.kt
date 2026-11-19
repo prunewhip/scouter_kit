@@ -190,10 +190,14 @@ class StreamingRecognizer(c: Context, trailingSilence: Float = 0.6f) : LiveRecog
 }
 
 // The fallback: the phrase Parakeet (Parakeet.use) with Silero VAD, the phrase so far read again every 250 ms from
-// a quarter second in (the old listener waited half a second and read every 0.6 s).
+// a quarter second in (the old listener waited half a second and read every 0.6 s). Commands come one after another
+// without waiting for a prompt, so a phrase's soft start ("sc" of scroll, "h" of help) must not be lost: the VAD is
+// more sensitive than the push-to-talk one, and the phrase read is our own buffer from 0.5 s before the VAD heard
+// speech (its own segment starts where it heard it: "scroll up" came out as "roll up").
 class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
     override val name = "Parakeet (phrases)"
-    private val vad = Vad(null, engine.vadConfig)
+    private val vad = Vad(null, engine.vadConfig.copy(sileroVadModelConfig = engine.vadConfig.sileroVadModelConfig.copy(
+        threshold = 0.4f, minSpeechDuration = 0.12f, minSilenceDuration = 0.45f)))
     private val window = FloatArray(512)
     private var fill = 0
     private val before = Floats()
@@ -212,7 +216,7 @@ class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
         }
         if (speaking) phrase.add(samples, n) else {
             before.add(samples, n)
-            before.keepLast(4800)
+            before.keepLast(9600)
         }
         if (!speaking && vad.isSpeechDetected()) {
             speaking = true
@@ -229,9 +233,11 @@ class PhraseRecognizer(private val engine: VoiceEngine) : LiveRecognizer {
         while (!vad.empty()) {
             val seg = vad.front()
             vad.pop()
+            // our buffer (from before the VAD heard it) when it holds the phrase, else the VAD's segment
+            val audio = if (speaking && phrase.size >= seg.samples.size) phrase.toArray() else seg.samples
             speaking = false
             phrase.clear()
-            val t = engine.text(seg.samples)
+            val t = engine.text(audio)
             if (t.isNotEmpty()) final(t)
         }
     }

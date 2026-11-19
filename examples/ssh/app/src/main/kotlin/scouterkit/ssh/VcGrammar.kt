@@ -95,7 +95,10 @@ object VcGrammar {
     private val STOP = setOf("stop listening", "voice off", "voice control off", "stop voice", "stop voice control",
         "exit voice control", "goodbye", "good bye", "turn off voice control", "close voice", "close voice control")
     // Closes the box shown (notifications, help, Claude, a zoom), else voice control itself.
-    private val CLOSE = setOf("close", "exit", "sleep", "go to sleep", "that's all", "thats all", "done")
+    private val CLOSE = setOf("close", "exit", "sleep", "go to sleep", "that's all", "thats all", "done", "end", "and",
+        "the end", "stop", "quit", "finish", "finished", "end it", "end voice")
+    // How "scroll" comes out when its start is lost or misheard.
+    private val SCROLL = setOf("scroll", "scrolls", "roll", "stroll", "school", "squirrel", "girl", "scrawl", "scroller", "crawl")
     private val TYPE_WORDS = setOf("type", "typing", "start typing", "dictate", "type mode", "keyboard")
     private val TYPE_END = setOf("type", "stop typing", "done typing", "end typing", "finish typing", "typing off",
         "exit typing", "stop", "done")
@@ -112,7 +115,8 @@ object VcGrammar {
         if (p in STOP) return listOf(Cmd.Stop)
         if (st.typing) return typing(raw, w, p)
         if (p in TYPE_WORDS) return listOf(Cmd.TypeToggle)
-        if (p == "help" || p == "what can i say" || p == "show help" || p == "commands") return listOf(Cmd.Help)
+        if (p in setOf("help", "help me", "what can i say", "show help", "commands", "yelp", "kelp", "health", "hell"))
+            return listOf(Cmd.Help)
         if (p == "cancel" || p == "never mind" || p == "nevermind") return listOf(Cmd.Cancel)
 
         if (st.zoomed) {
@@ -190,13 +194,15 @@ object VcGrammar {
             return listOf(Cmd.Open(w.drop(1).joinToString(" ")))
         }
 
-        // scrolling: "scroll down", "scroll down three", "page up", "swipe left"
-        if (q0 in setOf("scroll", "page", "swipe", "go") && w.size >= 2) {
+        // scrolling: "scroll down", "scroll down three", "page up", "swipe left"; a direction alone ("up"); "scroll"
+        // alone goes down
+        if (q0 in SCROLL || q0 in setOf("page", "swipe", "go") || (w.size <= 2 && w[0] in setOf("up", "down", "left", "right"))) {
             val dir = w.firstOrNull { it in setOf("up", "down", "left", "right") }
             if (dir != null) {
                 val times = w.mapNotNull { number(it) }.firstOrNull { it in 1..10 } ?: 1
                 return listOf(Cmd.Scroll(if (q0 == "swipe") swipeDir(dir) else dir, times))
             }
+            if (q0 in SCROLL && w.size == 1) return listOf(Cmd.Scroll("down", 1))
         }
 
         // a cell: "c4", "tap c4", "double c4", "long press c4", "right click c4", "zoom c4", "drag c4 to c8"
