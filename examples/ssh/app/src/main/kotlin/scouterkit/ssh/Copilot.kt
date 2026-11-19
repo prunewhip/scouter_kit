@@ -27,6 +27,98 @@ object Copilot {
     private var given = 0 // how many of them Claude has
     @Volatile private var session: String? = null
     @Volatile private var busy = false
+    @Volatile private var live: Live? = null
+
+    // Claude kept running through the whole talk: one `claude -p` reading and writing JSON lines over one SSH channel,
+    // so a cue costs only the model's answer (~2.6 s) instead of Claude starting each time (~7 s more on the phone,
+    // measured 2026-11-19). The answer streams in (text deltas) and shows on the glasses as it is written.
+    private class Live(c: Context, val system: String) {
+        private val stream: Bootstrap.Stream
+        @Volatile var dead = false
+        @Volatile private var text = StringBuilder()
+        @Volatile private var onText: ((String) -> Unit)? = null
+        private val done = java.util.concurrent.LinkedBlockingQueue<Pair<String?, String?>>()
+
+        init {
+            val settings = Settings(c)
+            val s = settings.servers().firstOrNull { it.local } ?: settings.active()
+                ?: throw IllegalStateException("no server for Claude (Terminal tab)")
+            val cmd = CarClaude.PATH + "cd ~ 2>/dev/null; ANTHROPIC_MODEL=haiku exec claude -p --input-format stream-json " +
+                "--output-format stream-json --verbose --include-partial-messages --allowedTools '' --append-system-prompt " +
+                CarClaude.q(system) + " 2>&1"
+            stream = Bootstrap(Vault(c)).stream(s.host, s.port, s.user, cmd, input = true)
+            Thread({ read() }, "vox-copilot-live").start()
+        }
+
+        private fun read() {
+            runCatching {
+                stream.input.bufferedReader().forEachLine { line ->
+                    val j = runCatching { org.json.JSONObject(line) }.getOrNull() ?: return@forEachLine
+                    when (j.optString("type")) {
+                        "stream_event" -> {
+                            val d = j.optJSONObject("event")?.optJSONObject("delta")
+                            if (d?.optString("type") == "text_delta") {
+                                val t = synchronized(this) { text.append(d.optString("text")); text.toString() }
+                                onText?.invoke(t)
+                            }
+                        }
+                        "result" -> done.offer(if (j.optBoolean("is_error")) null to j.optString("result").ifEmpty { "Claude had a problem" }
+                            else j.optString("result") to null)
+                    }
+                }
+            }
+            dead = true
+            done.offer(null to "Claude stopped")
+        }
+
+        // One turn: the answer, or null and why (the caller falls back to one `claude -p`).
+        fun ask(question: String, timeoutMs: Long, partial: (String) -> Unit): Pair<String?, String?> {
+            val out = stream.output ?: return null to "no input"
+            synchronized(this) { text = StringBuilder() }
+            done.clear()
+            onText = partial
+            try {
+                val msg = org.json.JSONObject().put("type", "user")
+                    .put("message", org.json.JSONObject().put("role", "user").put("content", question))
+                out.write((msg.toString() + "\n").toByteArray())
+                out.flush()
+            } catch (e: Exception) {
+                dead = true
+                return null to (e.message ?: "Claude's input closed")
+            }
+            val r = done.poll(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) ?: (null to "no answer in ${timeoutMs / 1000} s")
+            onText = null
+            if (r.first == null) dead = true // a late answer must not land on the next question
+            return r
+        }
+
+        fun close() {
+            dead = true
+            runCatching { stream.close() }
+        }
+    }
+
+    // The running Claude for this talk's mode and notes (started again when they changed).
+    @Synchronized
+    private fun liveFor(c: Context): Live? {
+        val sys = system(c)
+        val l = live
+        if (l != null && !l.dead && l.system == sys) return l
+        l?.close()
+        live = runCatching { Live(c, sys) }.onFailure { Log.w(ScouterService.TAG, "copilot: live Claude: ${it.message}") }.getOrNull()
+        return live
+    }
+
+    // The cue as it is written, on the glasses (at most every 350 ms; never a PASS on its way).
+    @Volatile private var partialAt = 0L
+    private fun partial(c: Context, question: String, t: String) {
+        val now = SystemClock.elapsedRealtime()
+        val s = t.trim()
+        if (s.length < 6 || s.uppercase(Locale.US).startsWith("PASS") || now - partialAt < 350 || !ScouterService.running) return
+        partialAt = now
+        val lines = s.lines().map { it.trim().trimStart('-', '•', '*', ' ') }.filter { it.isNotEmpty() }.take(4).joinToString("\n")
+        runCatching { ScouterService.send(c, ScouterService.ACTION_PANEL, "do" to "copilot:${question.take(160)}\u0001$lines…") }
+    }
     private var pending: StringBuilder? = null // a question still being said
     private var pendingAt = 0L
     private var pendingFirst = 0L
@@ -70,6 +162,7 @@ object Copilot {
         Settings(c).listenOn = true
         runCatching { ListenService.ensure(c) }
         set("Listening")
+        if (brain(c) == "claude") Thread({ liveFor(c) }, "vox-copilot-warm").start() // Claude starting while they talk
         Thread({
             while (on) {
                 Listen.looking(30_000)
@@ -91,6 +184,8 @@ object Copilot {
         if (!on) return
         on = false
         set("")
+        live?.close()
+        live = null
         Log.i(ScouterService.TAG, "copilot: off")
     }
 
@@ -195,12 +290,22 @@ object Copilot {
                 else {
                     val text = (if (fresh.isEmpty()) "" else "Heard since the last time:\n${lines(fresh)}\n\n") +
                         (if (question.isBlank()) "Give the cue for what was just said." else "Answer this now: $question")
-                    val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", "haiku")
-                    if (a.error != null) problem = a.error else {
-                        answer = a.text
-                        turn.by = "Claude"
+                    val l = liveFor(c)
+                    if (l != null) {
+                        val (r, why) = l.ask(text, 25_000) { partial(c, turn.question, it) }
+                        if (r != null) {
+                            answer = r
+                            turn.by = "Claude"
+                        } else Log.w(ScouterService.TAG, "copilot: live Claude: $why (one claude -p instead)")
                     }
-                    if (a.session != null) session = a.session
+                    if (answer == null) {
+                        val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", "haiku")
+                        if (a.error != null) problem = a.error else {
+                            answer = a.text
+                            turn.by = "Claude"
+                        }
+                        if (a.session != null) session = a.session
+                    }
                 }
             }
             if (answer == null) { // the phone's own model, from the last lines

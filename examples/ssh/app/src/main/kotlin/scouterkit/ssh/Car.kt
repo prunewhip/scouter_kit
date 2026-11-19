@@ -529,9 +529,9 @@ object CarClaude {
         "through the car's speakers. Answer in short, natural spoken sentences, usually one to four. No markdown, lists, " +
         "headings, code, URLs or emoji. If a full answer would be long, give the gist and offer to go on."
 
-    private const val PATH = "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH\"; export PATH; "
+    const val PATH = "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH\"; export PATH; "
 
-    private fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
+    fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
     // system: what Claude is told it is doing; tools: what it may use ("" none); model: for this one process
     // (ANTHROPIC_MODEL: `claude --model` can become the user's saved default), "" the user's own.

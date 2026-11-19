@@ -5308,6 +5308,10 @@ class ScouterService : Service() {
             Settings.ACTION_LISTEN -> listen(true)
             Settings.ACTION_VOICE_MODE -> voiceModeSet(!Session.voiceMode)
             Settings.ACTION_VOICE_CONTROL, Settings.ACTION_PTT -> vc.toggle()
+            Settings.ACTION_COPILOT -> {
+                note("Copilot: a cue for what was just said…", 2500)
+                Copilot.askNow(this)
+            }
             Settings.ACTION_TAB_NEXT -> tabs("next")
             Settings.ACTION_TAB_PREV -> tabs("prev")
             Settings.ACTION_TAB_NEW -> tabs("new")

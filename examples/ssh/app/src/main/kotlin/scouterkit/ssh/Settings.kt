@@ -180,6 +180,11 @@ class Settings(context: Context) {
             voiceAlways = false
             prefs.edit().putBoolean("migrated_113", true).apply()
         }
+        // Once (1.15): the right TouchBar's triple tap asks Copilot for a cue now (only when it did nothing).
+        if (!prefs.getBoolean("migrated_115", false)) {
+            if (gestureAction(1, Native.GESTURE_TRIPLE) == ACTION_NONE) setGestureAction(1, Native.GESTURE_TRIPLE, ACTION_COPILOT)
+            prefs.edit().putBoolean("migrated_115", true).apply()
+        }
         // Once (1.03): text that holds on the lens: full contrast (a page's background to black, its text to white)
         // and midtones lifted, in the setting and every look kept.
         if (!prefs.getBoolean("migrated_103", false)) {
@@ -518,10 +523,12 @@ class Settings(context: Context) {
         const val ACTION_VOICE_MODE = "voice_mode" // voice mode on / off: talking to the terminal
         const val ACTION_VOICE_CONTROL = "voice_control" // voice control on / off (VoiceControl)
         const val ACTION_PTT = "ptt" // held: one voice-control phrase, push to talk (on a tap: voice control on / off)
+        const val ACTION_COPILOT = "copilot" // Copilot: a cue for what was just said, now (it starts Copilot if off)
         val ACTIONS = linkedMapOf(ACTION_NONE to "Nothing", ACTION_DISPLAY to "Display off / on",
             ACTION_NEXT to "Next source", ACTION_PREV to "Previous source", ACTION_LISTEN to "Listen (voice command)",
             ACTION_VOICE_MODE to "Voice mode (talk to the terminal)",
             ACTION_VOICE_CONTROL to "Voice control on / off", ACTION_PTT to "Hold to talk (voice control)",
+            ACTION_COPILOT to "Copilot: a cue now (interview mode)",
             ACTION_TAB_NEXT to "Next tab", ACTION_TAB_PREV to "Previous tab", ACTION_TAB_NEW to "New tab",
             ACTION_VIEW to "Switch terminal / screen", ACTION_STOP to "Stop everything")
         const val PHONE = "phone" // the phone's own screen (a source)
