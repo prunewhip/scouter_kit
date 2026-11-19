@@ -36,6 +36,7 @@ object Panels {
         "Display" to listOf(
             "Alt+0" to "heads-up: look up to see",
             "Alt+L" to "display off / on",
+            "Alt+Shift+L" to "Listen mode on / off",
             "Alt+= / -" to "brighter / dimmer",
             "Alt+S" to "quick settings",
             "Alt+A" to "this help (or hold Alt)",

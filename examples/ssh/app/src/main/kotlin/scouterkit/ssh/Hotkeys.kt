@@ -520,6 +520,12 @@ object Hotkeys {
             }
             return true
         }
+        // Alt+Shift+L: Listen mode on / off ("LISTENING ON" on the glasses for a moment, then back to what showed).
+        if (e.keyCode == KeyEvent.KEYCODE_L && e.isShiftPressed) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0)
+                ScouterService.send(context, ScouterService.ACTION_PANEL, "do" to "listentoggle")
+            return true
+        }
         val target = when (e.keyCode) {
             KeyEvent.KEYCODE_DPAD_LEFT -> "left"
             KeyEvent.KEYCODE_DPAD_RIGHT -> "right"

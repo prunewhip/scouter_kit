@@ -1724,6 +1724,7 @@ class ScouterService : Service() {
                 val t = rest.substringAfter(':')
                 if (Session.overlay == Panels.LISTEN) { listenSaid = t.take(120); listenDraw() } else note(t, ms)
             }
+            what == "listentoggle" -> listenToggle()
             what == "copilotview" -> copilotOpen()
             what == "copilotclose" -> copilotClose()
             what.startsWith("cpkey:") -> copilotKey(what.removePrefix("cpkey:"))
@@ -2889,6 +2890,21 @@ class ScouterService : Service() {
             }
             rows
         }
+    }
+
+    // Alt+Shift+L: Listen mode on / off, said on the glasses for a moment; then back to what was showing.
+    private fun listenToggle() {
+        if (Listen.on || ListenService.running) {
+            ListenService.stop(this)
+            note("○ LISTENING OFF", 2500)
+            return
+        }
+        ListenService.start(this)
+        note("◉ LISTENING ON", 2500)
+        work.postDelayed({
+            if (!Listen.on && !ListenService.running)
+                note("✗ Listening could not start: open Vox once (Android's rule), then Alt+Shift+L again", 6000)
+        }, 3000)
     }
 
     private fun listenClose() {
