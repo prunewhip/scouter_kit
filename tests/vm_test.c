@@ -28,7 +28,7 @@ enum {
 	ST16 = 0x25, ST8 = 0x26, ST4 = 0x27, JMP = 0x30, CALL = 0x31, RET = 0x32, END = 0x33, HALT = 0x34,
 	BEQ = 0x35, BNE = 0x36, BLTU = 0x37, BGEU = 0x38, BLTS = 0x39, BGES = 0x3A, SLEEP_UNTIL = 0x40,
 	WAIT_EVENT = 0x41, RAISE = 0x42, NOTIFY = 0x43, SYS_READ = 0x44, SYS_WRITE = 0x45, FILL = 0x50,
-	BLIT = 0x51, GLYPHS = 0x52, DRAW = 0x53, LINE = 0x54, VIDEO = 0x55, ASSET_LOAD = 0x56, VIDEOX = 0x57
+	BLIT = 0x51, GLYPHS = 0x52, DRAW = 0x53, LINE = 0x54, VIDEO = 0x55, ASSET_LOAD = 0x56, VIDEOX = 0x57, VIDEOT = 0x58
 };
 
 static void spec_shape(uint8_t op, int *k, int *lit);
@@ -4848,6 +4848,44 @@ static void vvideo_case(int env)
 	vend();
 }
 
+/* VIDEOT (§3.9): random bit streams behind valid headers (any bytes decode to some picture), the first resetting and
+ * flat, at sizes from one block to the full 320 x 240, on the panel, at odd x, at its edges and off it */
+static void vvideot_case(int env)
+{
+	static uint8_t buf[700];
+	const uint32_t fr = 0x20000, src = 0x10000, st = 0x38000;
+	uint32_t v[8];
+
+	venv(env);
+	seed = 0x7D1DE0;
+	vput("case videot\n");
+	vprologue();
+	for (int i = 0; i < 12; i++) {
+		uint32_t w = i == 5 ? 320 : 8 * (1 + rndn(12)), h = i == 5 ? 240 : 8 * (1 + rndn(8)), n = 2 + rndn(600);
+
+		for (uint32_t k = 0; k < n; k++) {
+			buf[k] = (uint8_t)rnd();
+		}
+		buf[0] = (uint8_t)(i == 0 ? 7 : rndn(8));
+		buf[1] = (uint8_t)(1 + rndn(63));
+		vupload(src, buf, n);
+		v[0] = fr;
+		v[1] = w;
+		v[2] = h;
+		v[3] = i == 5 ? 0 : (uint32_t)((int32_t)rndn(760) - 60);
+		v[4] = i == 5 ? 0 : (uint32_t)((int32_t)rndn(520) - 20);
+		v[5] = src;
+		v[6] = n;
+		v[7] = st;
+		vins(VIDEOT, v, 8);
+		vidle();
+		if (i % 3 == 2 || i == 5) {
+			vpanel();
+		}
+	}
+	vend();
+}
+
 static void vfuzz_case(uint64_t cseed, int env)
 {
 	static struct gen g, gp;
@@ -4941,28 +4979,28 @@ static void vectors(const char *path, uint32_t n, uint64_t s0)
 	}
 	vmode = 1;
 	fprintf(out, "# scouter_kit/tests/vm_test vectors, seed 0x%llx\n", (unsigned long long)s0);
-	for (uint32_t i = 0; i <= n + 1 && tried < 50 * (n + 2); tried++) {
+	for (uint32_t i = 0; i <= n + 2 && tried < 50 * (n + 3); tried++) {
 		uint64_t cs = (s0 + tried * 0x9E3779B97F4A7C15ull) | 1;
 
-		i == 0 ? vdraw_case(0) : i == 1 ? vvideo_case(0) : vfuzz_case(cs, 0);
+		i == 0 ? vdraw_case(0) : i == 1 ? vvideo_case(0) : i == 2 ? vvideot_case(0) : vfuzz_case(cs, 0);
 		if (vbad) {
-			CHECK(i > 1);
+			CHECK(i > 2);
 			continue;
 		}
 		memcpy(first, vtext, vlen);
 		first_len = vlen;
-		i == 0 ? vdraw_case(1) : i == 1 ? vvideo_case(1) : vfuzz_case(cs, 1);
+		i == 0 ? vdraw_case(1) : i == 1 ? vvideo_case(1) : i == 2 ? vvideot_case(1) : vfuzz_case(cs, 1);
 		if (vbad || vlen != first_len || memcmp(first, vtext, vlen) != 0) {
-			CHECK(i > 1);
+			CHECK(i > 2);
 			continue;
 		}
 		fwrite(vtext, 1, vlen, out);
-		kept += i > 1;
+		kept += i > 2;
 		i++;
 	}
 	fclose(out);
 	vmode = 0;
-	printf("vectors: draw and video cases + %u fuzz cases (%u tried) in %s\n", (unsigned)kept, (unsigned)tried, path);
+	printf("vectors: draw, video and videot cases + %u fuzz cases (%u tried) in %s\n", (unsigned)kept, (unsigned)tried, path);
 }
 
 int main(int argc, char **argv)
