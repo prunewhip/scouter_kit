@@ -209,7 +209,7 @@ class ScouterService : Service() {
     }
     // The arms in the charging case: really charging? (CaseCheck: one buzz "Charging ✓", or three and "seat it
     // again"). On its own thread (each look is a few Bluetooth reads): every 5 s for the first minute in the case,
-    // then 15 s; 10 s out of it.
+    // then 15 s; out of it only IN_CASE, every 20 s.
     private val caseThread = HandlerThread("case-check").apply { start() }
     private val caseHandler = Handler(caseThread.looper)
     private val caseCheck = CaseCheck()
@@ -219,7 +219,7 @@ class ScouterService : Service() {
         override fun run() {
             if (ended) return
             val now = android.os.SystemClock.elapsedRealtime()
-            val s = runCatching { Native.caseStats() }.getOrNull()
+            val s = runCatching { Native.caseStats(caseCheck.inCase) }.getOrNull()
             if (s != null && s.size >= 12) {
                 fun arm(i: Int) = CaseCheck.Arm(s[i] == 1, s[i + 1], s[i + 2], s[i + 3], s[i + 4], s[i + 5])
                 val l = arm(0)
@@ -236,7 +236,7 @@ class ScouterService : Service() {
                 for (e in events) work.post { caseEvent(e) }
             }
             val young = caseCheck.inCase && now - caseSince < 60_000
-            caseHandler.postDelayed(this, if (young) 5000L else if (caseCheck.inCase) 15000L else 10000L)
+            caseHandler.postDelayed(this, if (young) 5000L else if (caseCheck.inCase) 15000L else 20000L)
         }
     }
 
@@ -1191,7 +1191,6 @@ class ScouterService : Service() {
     private fun update(glasses: String? = null, keyer: String? = null, screen: String? = null) {
         glasses?.let {
             // voice control's live speech loaded ahead, so a hold to talk listens at once
-            if (it == "ready" && Session.glasses != "ready" && LiveModel.ready(this)) Recognizers.warm(this)
             Session.glasses = it
         }
         // The chosen terminal's state, for the app and the notification.
@@ -4555,6 +4554,18 @@ class ScouterService : Service() {
         else work.postDelayed(bandOff, settings.voiceBandSecs.coerceIn(1, 30) * 1000L)
         Session.changed()
         if (!l.once) work.postDelayed({ voiceAlways() }, 1000)
+        work.removeCallbacks(voiceRelease)
+        work.postDelayed(voiceRelease, 60_000)
+    }
+
+    // The speech model (hundreds of MB) is let go a minute after the last listening, unless something listens again
+    // (or loads it) by then, or always-listening is on (it would load it again at once).
+    private val voiceRelease = Runnable {
+        if (voiceEngine == null || listener != null || carListener != null || capListener != null || voiceLoading ||
+            Session.voiceMode || Session.car.isNotEmpty() || Session.captions.isNotEmpty() || settings.voiceAlways) return@Runnable
+        voiceEngine = null
+        Thread { runCatching { Parakeet.done("glasses") } }.start()
+        Log.i(TAG, "voice: speech model let go (idle a minute)")
     }
 
     // ------------------------------------------------ voice mode: talking to the terminal

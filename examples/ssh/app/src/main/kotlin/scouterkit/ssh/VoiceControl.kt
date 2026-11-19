@@ -97,6 +97,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         feedback = ""
         partial = ""
         lastSpeechAt = SystemClock.elapsedRealtime()
+        host.work.removeCallbacks(releaseModel)
         host.alwaysOn(true)
         listen(false)
         host.work.removeCallbacks(idleCheck)
@@ -121,6 +122,16 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         host.alwaysOn(false)
         if (why.isNotEmpty()) Log.i(ScouterService.TAG, "voice control: $why")
         host.onState()
+        host.work.removeCallbacks(releaseModel)
+        host.work.postDelayed(releaseModel, 60_000)
+    }
+
+    // The speech model (hundreds of MB of the phone's memory) is not kept while voice control is off: let go a minute
+    // after it closes (a quick wake again reuses it), loaded again at the next wake (LOADING SPEECH meanwhile).
+    private val releaseModel = Runnable {
+        if (on || ptt || listener != null) return@Runnable
+        Thread({ runCatching { Recognizers.reset() } }, "voice-release").start()
+        Log.i(ScouterService.TAG, "voice control: speech model let go (off for a minute)")
     }
 
     // The left TouchBar held: off, it wakes voice control (STARTING at once, LIVE once sound comes) and the first

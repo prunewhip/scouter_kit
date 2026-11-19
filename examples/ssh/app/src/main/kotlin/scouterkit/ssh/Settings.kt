@@ -174,6 +174,12 @@ class Settings(context: Context) {
             if (gestureAction(0, Native.GESTURE_DOUBLE) == ACTION_PREV) setGestureAction(0, Native.GESTURE_DOUBLE, ACTION_VOICE_CONTROL)
             prefs.edit().putBoolean("migrated_108", true).apply()
         }
+        // Once (1.13): the microphone only while voice control (or another voice feature asked for) is on: "Vox …"
+        // always-listening off (it kept the glasses' microphone and the speech model busy all day; the user asked).
+        if (!prefs.getBoolean("migrated_113", false)) {
+            voiceAlways = false
+            prefs.edit().putBoolean("migrated_113", true).apply()
+        }
         // Once (1.03): text that holds on the lens: full contrast (a page's background to black, its text to white)
         // and midtones lifted, in the setting and every look kept.
         if (!prefs.getBoolean("migrated_103", false)) {

@@ -1366,7 +1366,7 @@ JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_powerStats(JNIEnv *env, j
 // Each arm in the charging case (CaseCheck): per arm (left, then right) connected (0/1), IN_CASE, CHARGE (0 not
 // charging, 1 charging, 2 complete), BATT_MA (positive while discharging), BATT_PCT, CASE_LID (0 open, 1 closed);
 // -1 where unknown (not connected, no answer, or UNKNOWN out of the case). Blocks while the arms answer.
-JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_caseStats(JNIEnv *env, jclass) {
+JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_caseStats(JNIEnv *env, jclass, jboolean full) {
   jint v[12];
   for (jint &x : v) x = -1;
   {
@@ -1380,7 +1380,7 @@ JNIEXPORT jintArray JNICALL Java_scouterkit_ssh_Native_caseStats(JNIEnv *env, jc
           const scouter_kit::g1::Property props[] = {scouter_kit::g1::PROP_IN_CASE, scouter_kit::g1::PROP_CHARGE,
                                                  scouter_kit::g1::PROP_BATT_MA, scouter_kit::g1::PROP_BATT_PCT,
                                                  scouter_kit::g1::PROP_CASE_LID};
-          for (int i = 0; i < 5; i++) {
+          for (int i = 0; i < (full ? 5 : 1); i++) {
             uint32_t x = 0;
             if (a->Prop(props[i], &x) && x != 0x80000000u) o[1 + i] = jint(int32_t(x));
           }
