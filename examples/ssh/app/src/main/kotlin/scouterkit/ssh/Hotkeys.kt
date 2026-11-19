@@ -29,7 +29,26 @@ object Hotkeys {
         if (keyboardSwitch(context, e)) return true
         if (shortcut(context, e)) return true
         if (toLaptop(context, e)) return RemoteInput.key(e)
-        return toGlasses(context, e) && Keyboard.send(e)
+        if (!toGlasses(context, e)) return false
+        // The terminal: Up / Down scroll it (as the wheel: tmux's copy mode, ending at the bottom); Shift+Up / Down are
+        // the program's own arrows (a menu, the shell's history).
+        val arrow = e.keyCode == KeyEvent.KEYCODE_DPAD_UP || e.keyCode == KeyEvent.KEYCODE_DPAD_DOWN
+        if (arrow && !e.isCtrlPressed && !e.isAltPressed && !e.isMetaPressed) {
+            if (!e.isShiftPressed) {
+                if (e.action == KeyEvent.ACTION_DOWN) ScouterService.send(context, ScouterService.ACTION_PANEL,
+                    "do" to if (e.keyCode == KeyEvent.KEYCODE_DPAD_UP) "termscroll:up" else "termscroll:down")
+                return true
+            }
+            return Keyboard.sendPlain(e)
+        }
+        // Typing while scrolled back: down to the bottom first (copy mode ends there), so the keys reach the program.
+        if (e.action == KeyEvent.ACTION_DOWN && Session.wheelUp > 0 && !KeyEvent.isModifierKey(e.keyCode) &&
+            e.keyCode != KeyEvent.KEYCODE_PAGE_UP && e.keyCode != KeyEvent.KEYCODE_PAGE_DOWN) {
+            val n = Session.wheelUp
+            Session.wheelUp = 0
+            repeat(n) { Native.mouse(65, Session.wheelRow, Session.wheelCol) }
+        }
+        return Keyboard.send(e)
     }
 
     // A server's screen on the glasses (the laptop's): the keyboard types there (RemoteInput), as the terminal

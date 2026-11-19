@@ -60,6 +60,7 @@ object Panels {
             "Alt+X" to "keyboard off / on",
             "Alt+M" to "pointer (arrows, Enter)",
             "Alt+F" to "Firefox on the TV, worked from the keyboard (Alt+Shift+F stops it)",
+            "Up / Down" to "scroll (Shift: the program's arrows)",
         ),
         "Phone screen" to listOf(
             "Alt+C" to "share it (taps Start)",

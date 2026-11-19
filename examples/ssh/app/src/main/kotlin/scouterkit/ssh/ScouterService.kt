@@ -68,6 +68,11 @@ object Session {
     @Volatile var demo = false // the preview mode is running (Alt+D, the Preview button)
     @Volatile var tvKeys = false // the keyboard is the Vizio TV's remote (Alt+Y)
     @Volatile var ffKeys = false // the keyboard and trackpad work Firefox on the TV (Alt+F)
+    // The terminal scrolled back by the wheel (tmux's copy mode): wheel-up events sent less wheel-down ones, and
+    // where; typing first scrolls back down that much (copy mode ends at the bottom), so the keys reach the program.
+    @Volatile var wheelUp = 0
+    @Volatile var wheelRow = 0
+    @Volatile var wheelCol = 0
     @Volatile var tabs = "" // the last tab action's problem, if any
     // The glasses' cursor on the phone's screen, in 1/10000 of its width and height (-1: none): drawn into the
     // phone's picture (Settings.screenOptions), its clicks tapped there by VoxKeys.
@@ -1166,6 +1171,7 @@ class ScouterService : Service() {
     }
 
     private var swipe = 0f
+    private var wheelAcc = 0f
 
     // The trackpad: the arrow glides like a mouse pointer (the setting's speed, quicker strokes go further); a tap
     // clicks, a right click (two fingers) right-clicks, the wheel and two-finger swipes scroll. A click while the
@@ -1194,7 +1200,17 @@ class ScouterService : Service() {
                 if (!Session.pointer) return pointer("toggle")
                 pointer(if (kind == VoxKeys.Trackpad.RIGHT) "right" else "click")
             }
-            VoxKeys.Trackpad.WHEEL -> if (dy != 0f) scroll(if (dy > 0) -1 else 1, kotlin.math.abs(dy).toInt().coerceIn(1, 5))
+            VoxKeys.Trackpad.WHEEL -> if (dy != 0f) {
+                // A trackpad's two-finger swipe comes as many fractional notches: they add up to whole ones (each was
+                // a full step, so a swipe flew off); a turn the other way starts afresh.
+                if (wheelAcc != 0f && (wheelAcc > 0) != (dy > 0)) wheelAcc = 0f
+                wheelAcc += dy
+                val n = wheelAcc.toInt()
+                if (n != 0) {
+                    wheelAcc -= n
+                    scroll(if (n > 0) -1 else 1, kotlin.math.abs(n).coerceIn(1, 5))
+                }
+            }
             VoxKeys.Trackpad.SCROLL -> {
                 swipe += dy
                 val step = 28f
@@ -1600,6 +1616,8 @@ class ScouterService : Service() {
             what == "tv" -> tvRemote()
             what == "tvtab" -> tvTab()
             what == "tvstop" -> tvTab(stop = true)
+            what == "termscroll:up" -> if (settings.show == Settings.TERMINAL) scroll(-1, 1, raw = true)
+            what == "termscroll:down" -> if (settings.show == Settings.TERMINAL) scroll(1, 1, raw = true)
             what == "ff" -> ffRemote()
             what == "ffstop" -> ffStop()
             what.startsWith("ffkey:") -> what.removePrefix("ffkey:").split(":").let { p ->
@@ -3463,8 +3481,8 @@ class ScouterService : Service() {
     // over the server's kept SSH connection (steps that come meanwhile add up).
     private var scrollPending = 0
     private var scrolling = false
-    private fun scroll(dir0: Int, steps: Int) {
-        val dir = if (settings.scrollNatural) dir0 else -dir0
+    private fun scroll(dir0: Int, steps: Int, raw: Boolean = false) {
+        val dir = if (raw || settings.scrollNatural) dir0 else -dir0
         val lines = settings.scrollSpeed.coerceIn(1, 10) * steps
         val g = region()
         // Where the wheel turns: under the pointer, or (it off) the terminal's middle.
@@ -3476,7 +3494,13 @@ class ScouterService : Service() {
         // The wheel: each event about 3 lines in tmux.
         val wheel = maxOf(1, (lines + 2) / 3)
         var taken = true
-        repeat(wheel) { if (taken) taken = Native.mouse(if (dir < 0) 64 else 65, row, col) }
+        var sent = 0
+        repeat(wheel) { if (taken) taken = Native.mouse(if (dir < 0) 64 else 65, row, col).also { if (it) sent++ } }
+        if (sent > 0) {
+            Session.wheelUp = maxOf(0, Session.wheelUp + if (dir < 0) sent else -sent)
+            Session.wheelRow = row
+            Session.wheelCol = col
+        }
         if (taken) return
         // tmux's mouse is off (only the pointer turned it on): on now, so the next scroll goes as the wheel at once;
         // this one through its copy mode.

@@ -36,6 +36,14 @@ object Keyboard {
             (e.source and InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
     }
 
+    // A key without its Shift (Shift+Up as plain Up: the program's own arrow while plain Up scrolls).
+    fun sendPlain(e: KeyEvent): Boolean {
+        if (e.action != KeyEvent.ACTION_DOWN) return usages.containsKey(e.keyCode)
+        val u = usages[e.keyCode] ?: return false
+        Native.keyEvent(HID, 0, u)
+        return true
+    }
+
     // Sends a key press (repeats included) to the terminal. Returns whether the key was the terminal's: modifier
     // keys alone and keys it has no meaning for (volume, media) stay Android's.
     fun send(e: KeyEvent): Boolean {
