@@ -38,6 +38,8 @@ std::atomic<int> g_x{0}, g_y{0};
 std::atomic<bool> g_center{false};
 std::atomic<int> g_face{-1};
 std::atomic<int> g_pitch{-1000}; // the head's pitch, degrees (+ up); -1000 unknown
+std::atomic<int> g_rate_pxs{0};       // the window's x speed at the last reading, pixels a second (0 still)
+std::atomic<int64_t> g_read_us{0};    // when that reading was
 
 g1::Arm *Pick() {
   if (g1::right.GetState().connected) return &g1::right;
@@ -85,6 +87,13 @@ bool HeadView::Window(int *x, int *y) {
 
 void HeadView::Center() { g_center = true; }
 void HeadView::Face(int x) { g_face = std::max(0, x); }
+int HeadView::Lead(int64_t ahead_us) {
+  if (!g_running) return 0;
+  int64_t age = g1::NowUs() - g_read_us + ahead_us;
+  if (age < 0 || age > 150000) return 0; // an old reading: the head stopped being read
+  return int(int64_t(g_rate_pxs) * age / 1000000);
+}
+
 int HeadView::Pitch() { return g_running ? g_pitch.load() : -1000; }
 
 void HeadView::Run() {
@@ -169,6 +178,8 @@ void HeadView::Run() {
         still_n = 0;
         yaw += r * dt;
       }
+      g_rate_pxs = std::fabs(r) < kStillDps ? 0 : int(std::lround(-r * kPxPerDeg));
+      g_read_us = t;
     }
     last = t;
     int cols = g_cols, rows = g_rows, hx, hy;

@@ -661,6 +661,17 @@ int main() {
       po.src_w = 540;
       po.src_h = 471;
       po.src_y = 4;
+      auto window_of = [&](int a, int panel_x, int panel_y) {
+        const uint8_t *pl = g1::emulator::Panel(a);
+        for (int sx = 0; sx + 540 <= PW; sx++) {
+          bool same = true;
+          for (int y = 0; y < 471 && same; y += 7)
+            for (int x = 0; x < 540 && same; x += 3)
+              same = pl[size_t(y + panel_y) * 640 + size_t(x + panel_x)] == (pano[(size_t(y + 4) * PW + size_t(sx + x)) * 4] ? 15 : 0);
+          if (same) return sx;
+        }
+        return -1;
+      };
       int bytes_after = 0;
       for (int step = 0; step < 6; step++) {
         po.src_x = 700 + 23 * step;
@@ -675,10 +686,26 @@ int main() {
             uint8_t want = pano[(size_t(y + 4) * PW + size_t(po.src_x + x)) * 4] ? 15 : 0;
             wrong += pl[size_t(y) * 640 + size_t(x + 100)] != want;
           }
+        CHECK(window_of(1, 0, 9) == po.src_x); // the right eye: 100 to the left, 9 lower (Start(100, 9))
         if (wrong) std::printf("canvas step %d: %d pixels wrong\n", step, wrong);
         CHECK(wrong == 0);
       }
-      std::printf("panorama canvas: head turns %d bytes at most\n", bytes_after);
+      // A head turn the phone does not send: 30 degrees a second to the left (GYR_Y +30000 mdps) for ~0.5 s on both
+      // arms; each arm moves the window itself, ~16 px a degree (~240 px), both eyes the same, and the panel is
+      // exactly the panorama there. The sensor back at 0 (still): the window stays.
+      int frames_before = cm.stats().frames;
+      for (int a = 0; a < 2; a++) g1::emulator::SetProperty(a, g1::PROP_GYR_Y, 30000);
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      for (int a = 0; a < 2; a++) g1::emulator::SetProperty(a, g1::PROP_GYR_Y, 0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      int wl = window_of(0, 100, 0), wr = window_of(1, 0, 9);
+      std::printf("panorama canvas: a turn of ~15 degrees left on the arms alone: window %d -> left eye %d, right eye "
+                  "%d (%d frames sent meanwhile)\n", po.src_x, wl, wr, cm.stats().frames - frames_before);
+      CHECK(wl >= 0 && wl == wr);
+      CHECK(wl < po.src_x - 180 && wl > po.src_x - 300);
+      std::printf("panorama canvas: head turns %d bytes at most, the arms' own pan %s\n", bytes_after,
+                  cm.stats().pan ? "running" : "NOT running");
+      CHECK(cm.stats().pan == 1);
       CHECK(bytes_after < 200);
       cm.Stop();
     }

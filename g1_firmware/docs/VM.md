@@ -383,8 +383,13 @@ picture with its top-left at plane pixel (sx, sy): 64 bytes at `sprite` (inside 
 of a u16 mask and a u16 ink, big-endian, bit 15 the left pixel; where the mask is 1 the panel shows 15 for ink 1,
 0 for ink 0 (at scale 2 each sprite pixel is 2 × 2). The sprite's rows are drawn too. A pointer move is a record
 of unchanged planes with the old place as the redraw rectangle (a few bytes, no frame).
-**Wide planes** (0.5.66+): with pixel coding w may be up to 2048 (transition coding keeps w ≤ 640): a canvas wider
-than the panel, of which the rectangle at (x, y) shows the part on the panel (x negative pans it).
+**Wide planes** (0.5.66+): w may be up to 2048 (both codings; `VIDEO` keeps w ≤ 640): a canvas wider than the
+panel, of which the rectangle at (x, y) shows the part on the panel (x negative pans it). Vox puts a whole panorama
+(e.g. 1920 × 471, 4 greys) on the arms this way; a head turn is a new x and a record of unchanged planes with the
+redraw flag (~20 bytes), and with the head-turn view on, a 20 ms `TIMER` program on each arm moves x itself from
+its own `GYR_Y` between the phone's anchors (8 bytes), so a turn shows without waiting for the link.
+**Pixel coding in g1v0**: off by default from 0.5.66 (`CONFIG_G1_VIDEOX_PIXELS=n`: flag bit 3 is error 4); it
+measured ~9% smaller than Vox's motion mode on real video, not worth a decoder no host uses.
 
 **Scale 2** (flag bit 2): plane pixel (c, r) is panel pixels (x + 2c … x + 2c + 1, y + 2r … y + 2r + 1); the
 rectangle is 2w × 2h, clipped as `DRAW`. With pixel coding at half size, natural video takes ~1.5 KB a frame at 4

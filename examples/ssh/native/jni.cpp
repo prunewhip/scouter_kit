@@ -1468,6 +1468,7 @@ JNIEXPORT jint JNICALL Java_scouterkit_ssh_Native_screenFrame(JNIEnv *env, jclas
       ssh::HeadView &head = ssh::HeadView::Get();
       head.Touch(cols, rows, rows >= 3); // a sphere (rows above and below) goes all the way round
       head.Window(&x, &y);
+      o.pan_lead = head.Lead(25000); // the anchor's way to the arms: the frame, Bluetooth, their next 20 ms tick
     }
     // The window at the glasses' own picture size (centred in each screen): pixel for pixel, so a head turn is an
     // exact sideways shift of the last picture, which g1v0 0.5.66+ draws as a block move (the new strip only).

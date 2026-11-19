@@ -582,6 +582,7 @@ void ScreenMirror::DropPath(bool keep_panels) {
     sk::Flush();
   }
   if (levels_ == 2 || levels_ == 1 || levels_ == kCanvasPath) {
+    if (video_.pan_running) StopPan(); // the arms' own pan: the terminal starts its program later
     if (video_.base >= 0) g1::Free(g1::Address(video_.base));
     for (int64_t a : video_.parts) g1::Free(g1::Address(a));
     video_ = Video{};
@@ -1246,6 +1247,153 @@ bool ScreenMirror::StartCanvas(int cw) {
   return true;
 }
 
+// The arms' own pan (VM program, Antigravity's "phone-anchored" design): every 20 ms each arm reads its gyroscope's
+// turn about up (GYR_Y, mdps; a 2 dps dead band against drift while still), adds it up since the phone's last anchor
+// (ANCH: the window's left in the canvas; ACC: the turn since, (mdps / 16) x (us / 16)), and when the window moved
+// draws the canvas again at the new place from a record of unchanged planes (its own reset states, so the phone's
+// encoder never sees it). The phone stays the one tracker: each head-turn update it writes ANCH and ACC = 0 to both
+// arms, so the eyes never drift apart, and the turn shows at once instead of a link round trip later.
+void ScreenMirror::StartPan() {
+  Video &v = video_;
+  const int P = v.planes;
+  if (v.pan_blk < 0) {
+    v.pan_blk = g1::Alloc(1024);
+    v.pan_dummy = v.pan_blk >= 0 ? g1::Alloc(uint32_t(P) * g1::kVideoState) : -1;
+    if (v.pan_blk >= 0) v.parts.push_back(v.pan_blk);
+    if (v.pan_dummy >= 0) v.parts.push_back(v.pan_dummy);
+  }
+  if (v.pan_dummy < 0) {
+    LOG("screen: no room for the arms' own pan (head turns go from the phone)");
+    v.pan_failed = true;
+    return;
+  }
+  uint32_t code = uint32_t(v.pan_blk), data = code + 768, rec = data + 64, dummy = uint32_t(v.pan_dummy);
+  // the pan record: redraw, every plane's rows the same, from reset states (a fresh encoder's first record of a
+  // blank picture: "same" against nothing is "same" against anything)
+  std::vector<uint8_t> r;
+  {
+    g1::PlaneVideoEncoder fresh(v.cw, h_, P);
+    r = fresh.Encode(std::vector<uint8_t>(size_t(v.cw) * size_t(h_), 0), true, {}, 96);
+  }
+  if (r.empty() || r.size() > 96) {
+    LOG("screen: the pan record is %zu bytes (96 room): no arm pan", r.size());
+    v.pan_failed = true;
+    return;
+  }
+  std::vector<uint8_t> dt(32, 0);
+  for (int k = 0; k < P; k++) {
+    Put32(dt, size_t(4 * k), uint32_t(v.parts[size_t(k)]));
+    Put32(dt, size_t(16 + 4 * k), dummy + uint32_t(k) * g1::kVideoState);
+  }
+  const int maxx = std::max(0, v.cw - w_);
+  int started = 0, present = 0;
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    present++;
+    int py = i == 0 ? y_ + std::max(0, -dy_) : y_ + std::max(0, dy_);
+    g1::Program p(code, 40);
+    auto W = [&](int k) { return g1::ArenaWord(data / 4 + uint32_t(k)); };
+    auto C = [&](int64_t x) { return p.Const(uint32_t(x)); };
+    auto ANCH = W(0), ACC = W(1), LT = W(2), DX = W(3), T = W(4), R = W(5), X = W(6), D = W(7);
+    auto XW = g1::ArenaWord(v.xword / 4);
+    auto start = p.NewLabel(), tick = p.NewLabel(), use = p.NewLabel(), skip = p.NewLabel(), c1 = p.NewLabel(),
+         c2 = p.NewLabel(), c3 = p.NewLabel(), done = p.NewLabel();
+    p.Bind(start);
+    p.SysRead(LT, C(g1::PROP_TIME_US));
+    p.Add(T, LT, C(20000));
+    p.SysWrite(C(g1::PROP_TIMER), T);
+    p.End();
+    p.Bind(tick);
+    p.SysRead(T, C(g1::PROP_TIME_US));
+    p.Sub(D, T, LT);
+    p.Mov(LT, T);
+    p.BltU(C(100000), D, skip);          // a gap over 100 ms (a long draw): no turn guessed across it
+    p.SysRead(R, C(g1::PROP_GYR_Y));     // UNKNOWN with the gyroscope off (the head-turn view off): no pan
+    p.Beq(R, C(g1::UNKNOWN), skip);
+    p.BgeS(R, C(2000), use);
+    p.BltS(R, C(-2000), use);
+    p.Jmp(skip);
+    p.Bind(use);
+    p.Sar(R, R, C(4));
+    p.Shr(D, D, C(4));
+    p.Mul(R, R, D);
+    p.Add(ACC, ACC, R);
+    p.BltS(ACC, C(600000000), c3);       // ~2450 px: a long turn with no anchor (the phone away) stops there
+    p.Mov(ACC, C(600000000));
+    p.Bind(c3);
+    p.BgeS(ACC, C(-600000000), skip);
+    p.Mov(ACC, C(-600000000));
+    p.Bind(skip);
+    p.DivS(X, ACC, C(244141));           // 16 px a degree (HeadView's): (mdps/16)(us/16) x 256e-9 x 16
+    p.Sub(X, ANCH, X);
+    p.BgeS(X, C(0), c1);
+    p.Mov(X, C(0));
+    p.Bind(c1);
+    p.BltS(X, C(maxx + 1), c2);
+    p.Mov(X, C(maxx));
+    p.Bind(c2);
+    p.Sub(X, C(v.px[size_t(i)]), X);     // the panel x of the canvas's left
+    p.Beq(X, DX, done);
+    p.Mov(DX, X);
+    p.Mov(XW, X);
+    p.VideoX(C(rec + 96), C(v.stride), C(v.cw), C(h_), XW, C(py), C(v.levels_at), C(rec), C(r.size()),
+             C(rec + 96 + 16));
+    p.Bind(done);
+    p.Add(T, T, C(20000));
+    p.SysWrite(C(g1::PROP_TIMER), T);
+    p.End();
+    p.On(g1::TRIGGER_START, start);
+    p.On(g1::TRIGGER_TIMER, tick);
+    p.Changes(data, 32);
+    p.Changes(v.xword, 4);
+    p.Changes(dummy, uint32_t(P) * g1::kVideoState);
+    std::string why;
+    if (!p.Valid(&why) || p.Here() > data) {
+      LOG("screen: the pan program: %s", why.empty() ? "too large" : why.c_str());
+      break;
+    }
+    std::vector<uint8_t> words(32, 0), xw(4);
+    int win = std::clamp(v.cwin, 0, maxx);
+    Put32(words, 0, uint32_t(win));                         // ANCH: the window shown now
+    Put32(words, 12, uint32_t(v.px[size_t(i)] - win));      // DX: where it is drawn now
+    Put32(xw, 0, uint32_t(v.px[size_t(i)] - win));
+    arm.WriteArena(data, words);
+    arm.WriteArena(v.xword, xw);
+    arm.WriteArena(rec, r);
+    arm.WriteArena(rec + 96, dt);
+    arm.SysWrite(g1::PROP_GYRO_RATE, 52); // both arms' (the head-turn view reads one)
+    if (!arm.Load(p) || !arm.Start(code)) {
+      LOG("screen: the pan program did not start on arm %d", i);
+      break;
+    }
+    started++;
+  }
+  v.pan_data = data;
+  v.pan_table = code;
+  v.pan_running = started > 0;
+  if (started < present) { // both eyes or neither
+    StopPan();
+    v.pan_failed = true;
+  } else if (started) {
+    LOG("screen: the arms pan the panorama themselves (their gyroscopes, the phone's anchors)");
+  }
+}
+
+void ScreenMirror::StopPan() {
+  Video &v = video_;
+  for (g1::Arm *a : {&g1::left, &g1::right})
+    if (a->GetState().connected) {
+      a->Stop();
+      a->SysWrite(g1::PROP_GYRO_RATE, 0); // the head-turn view asks again for its arm while it runs
+    }
+  if (v.pan_running) {
+    v.pan_running = false;
+    v.cwin = -1; // the phone moves the window again: written at the next frame
+    v.redraw = true;
+  }
+}
+
 int ScreenMirror::FrameCanvas(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &o) {
   Video &v = video_;
   int ready = VideoReady();
@@ -1258,9 +1406,24 @@ int ScreenMirror::FrameCanvas(const uint8_t *rgba, int w, int h, int stride, con
   oc.cursor_x = oc.cursor_y = -1;
   Rect c = Base(rgba, w, h, stride, oc, v.cw, h_, &cluma_, &crot_, &cbase_);
   Finish(cbase_, v.cw, c, oc, 1, &cframe_);
+  if (o.head && !v.pan_running && !v.pan_failed && v.cwin >= 0) StartPan();
+  else if (!o.head && v.pan_running) StopPan();
   int win = std::clamp(o.src_x, 0, std::max(0, v.cw - w_));
   bool moved = win != v.cwin;
   if (!moved && !v.redraw && cframe_ == cprev_) return kSame;
+  if (v.pan_running && moved) {
+    // the phone's anchor: the arms' own pan moves the window there now and follows their gyroscopes until the next
+    std::vector<uint8_t> anchor(8, 0);
+    Put32(anchor, 0, uint32_t(std::clamp(win + std::clamp(o.pan_lead, -96, 96), 0, std::max(0, v.cw - w_))));
+    for (g1::Arm *a : {&g1::left, &g1::right})
+      if (a->GetState().present) a->WriteArena(v.pan_data, anchor);
+    v.cwin = win;
+    if (!v.redraw && cframe_ == cprev_) {
+      Count(8, 1);
+      return kShown;
+    }
+    moved = false; // the content goes as usual; the arms redraw at the new place themselves
+  }
   for (size_t i = 0; i < v.pix.size(); i++) v.pix[i] = v.index[cframe_[i]];
   std::vector<uint8_t> rec = v.penc->Encode(v.pix, v.redraw || moved, {}, v.room);
   if (rec.empty()) return kBusy;
@@ -1272,7 +1435,7 @@ int ScreenMirror::FrameCanvas(const uint8_t *rgba, int w, int h, int stride, con
   for (int i = 0; i < 2; i++) {
     g1::Arm &arm = i == 0 ? g1::left : g1::right;
     if (!arm.GetState().present) continue;
-    if (moved) {
+    if (moved && !v.pan_running) {
       std::vector<uint8_t> word(4);
       Put32(word, 0, uint32_t(v.px[size_t(i)] - win));
       arm.WriteArena(v.xword, word);
@@ -1517,6 +1680,7 @@ ScreenMirror::Stats ScreenMirror::stats() {
   s.y = y_;
   s.path = started_ ? levels_ : 0;
   s.hidden = hidden_ ? 1 : 0;
+  s.pan = started_ && levels_ == kCanvasPath && video_.pan_running ? 1 : 0;
   return s;
 }
 

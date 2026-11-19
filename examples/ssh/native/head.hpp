@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // Head-turn view: a server's picture made of screens (640 x 480 each, the glasses' size) in columns and rows -- a
 // panorama (glasses-panorama: three terminals) or a sphere (glasses-sphere: a 360-degree ring with rows above and
 // below) -- shows the window the head points at, following it (a frame at a time). Turning: the gyroscope (VM.md
@@ -24,6 +26,9 @@ public:
   void Face(int x);
   // The head's pitch (degrees, + up) as last read; -1000 while off or unknown.
   int Pitch();
+  // How far the window moves (x, pixels) from the last reading to `ahead_us` after now, at the turn rate read
+  // then: the arms' own pan is anchored where the head will point when the anchor arrives (0 while still or off).
+  int Lead(int64_t ahead_us);
 
 private:
   void Run();

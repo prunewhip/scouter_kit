@@ -56,6 +56,9 @@ struct ScreenOptions {
   // A panorama from a server (screens side by side): the part shown follows the head's turn (HeadView), else the
   // middle screen.
   bool head = true;
+  // The head-turn view's motion ahead of its last reading (pixels, HeadView::Lead): the arms' own pan (canvas,
+  // 0.5.66+) is anchored at src_x + pan_lead, where the head points by the time the anchor reaches them.
+  int pan_lead = 0;
   // An exact part of the source (its pixels), instead of fit / pan / zoom: the head-turn view's window. src_w <= 0:
   // none.
   int src_x = 0, src_y = 0, src_w = 0, src_h = 0;
@@ -183,6 +186,7 @@ public:
   // skipped while the link was busy, the picture's w, h, x, y, the path's levels (0 none), panels off (1).
   struct Stats {
     int frames = 0, bytes = 0, rate = 0, detail = 1, busy = 0, w = 0, h = 0, x = 0, y = 0, path = 0, hidden = 0;
+    int pan = 0; // 1: the arms pan the panorama canvas themselves (their gyroscopes)
   };
   Stats stats();
   // The last picture sent (w x h, 0 ... 255): what the glasses show. False before the first.
@@ -239,6 +243,8 @@ private:
   bool canvas_failed_ = false;
   std::vector<uint8_t> cluma_, crot_, cbase_, cframe_, cprev_; // the canvas path's picture
   bool StartCanvas(int cw);
+  void StartPan();
+  void StopPan();
   int FrameCanvas(const uint8_t *rgba, int w, int h, int stride, const ScreenOptions &);
   int want_levels_ = 0; // the levels the options asked for (a rebooted arm starts that path again)
   std::vector<uint8_t> exact_; // auto greys: the last full-detail picture, to tell motion from stillness
@@ -306,6 +312,10 @@ private:
     int cw = 0, cwin = -1;
     uint32_t xword = 0;
     std::array<int, 2> px{};
+    // ... and the arms' own pan (a VM program: their gyroscope moves the window between the phone's anchors)
+    uint32_t pan_data = 0, pan_table = 0;
+    int64_t pan_blk = -1, pan_dummy = -1;
+    bool pan_running = false, pan_failed = false;
     uint32_t sprite_at = 0;
     int spr_x = -32768, spr_y = 0; // where the arms draw it now (-32768: nowhere)
     uint32_t k = 0;
