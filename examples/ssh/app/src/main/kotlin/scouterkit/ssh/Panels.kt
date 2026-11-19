@@ -17,6 +17,7 @@ object Panels {
     const val INTRO = "intro" // the preview mode's title card (Intro)
     const val VOICE = "voice" // voice mode's strip at the bottom (ScouterService.voiceModeSet)
     const val TV = "tv" // the TV remote while the keyboard is the TV's (Alt+Y)
+    const val FIREFOX = "firefox" // Firefox on the TV while the keyboard and trackpad are its (Alt+F)
     const val HUB = "hub" // the hub: timer, stopwatch, alarm, reminders, notes (Alt+G)
     const val CAPTIONS = "captions" // live captions (Alt+E) or translation (Alt+I)
     const val HOME = "home" // smart home: the TVs, Home Assistant's lights, switches, thermostats (Alt+O)
@@ -58,7 +59,7 @@ object Panels {
             "Alt+K" to "keys: phone / glasses",
             "Alt+X" to "keyboard off / on",
             "Alt+M" to "pointer (arrows, Enter)",
-            "Alt+F" to "Firefox on the TV (tab)",
+            "Alt+F" to "Firefox on the TV, worked from the keyboard (Alt+Shift+F stops it)",
         ),
         "Phone screen" to listOf(
             "Alt+C" to "share it (taps Start)",

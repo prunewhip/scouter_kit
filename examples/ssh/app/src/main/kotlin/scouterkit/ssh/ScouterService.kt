@@ -67,6 +67,7 @@ object Session {
     @Volatile var pointer = false // the pointer is on (its keys move and click it)
     @Volatile var demo = false // the preview mode is running (Alt+D, the Preview button)
     @Volatile var tvKeys = false // the keyboard is the Vizio TV's remote (Alt+Y)
+    @Volatile var ffKeys = false // the keyboard and trackpad work Firefox on the TV (Alt+F)
     @Volatile var tabs = "" // the last tab action's problem, if any
     // The glasses' cursor on the phone's screen, in 1/10000 of its width and height (-1: none): drawn into the
     // phone's picture (Settings.screenOptions), its clicks tapped there by VoxKeys.
@@ -1133,7 +1134,7 @@ class ScouterService : Service() {
     // (their own arrow, drawn by the arms: Android leaves its pointer out of the shared screen); otherwise the phone's.
     private fun trackpadMode() {
         VoxKeys.capture(!ended && settings.trackpad && glassesWith != null && Session.glasses == "ready" && !Session.blank &&
-            (settings.show == Settings.TERMINAL || onPhone() || onLaptop()) && !Session.tunes)
+            (settings.show == Settings.TERMINAL || onPhone() || onLaptop() || Session.ffKeys) && !Session.tunes)
         pocket()
     }
 
@@ -1170,6 +1171,7 @@ class ScouterService : Service() {
     // clicks, a right click (two fingers) right-clicks, the wheel and two-finger swipes scroll. A click while the
     // pointer is off only shows it.
     private fun trackpad(kind: Int, dx: Float, dy: Float) {
+        if (Session.ffKeys) return ffTrackpad(kind, dx, dy)
         if (Session.overlay == Panels.HELP || Session.overlay == Panels.SETTINGS) return panelTrackpad(kind, dy)
         if (Session.overlay == Panels.EDITOR) return editorTrackpad(kind, dy)
         if (Session.overlay == Panels.LISTEN) return listenTrackpad(kind, dy)
@@ -1598,6 +1600,14 @@ class ScouterService : Service() {
             what == "tv" -> tvRemote()
             what == "tvtab" -> tvTab()
             what == "tvstop" -> tvTab(stop = true)
+            what == "ff" -> ffRemote()
+            what == "ffstop" -> ffStop()
+            what.startsWith("ffkey:") -> what.removePrefix("ffkey:").split(":").let { p ->
+                ffPost("{\"op\":\"key\",\"code\":${p[0].toIntOrNull() ?: 0},\"meta\":${p.getOrNull(1)?.toIntOrNull() ?: 0}}")
+            }
+            what.startsWith("ffchar:") -> what.removePrefix("ffchar:").toIntOrNull()?.let { c ->
+                ffPost(org.json.JSONObject().put("op", "text").put("text", String(Character.toChars(c))).toString())
+            }
             what.startsWith("tv:") -> tvKey(what.removePrefix("tv:"))
             what == "hub" -> hubOpen()
             what == "editor" -> editorOpen()
@@ -1708,6 +1718,7 @@ class ScouterService : Service() {
             Session.listenPanel -> Panels.LISTEN
             Session.captions.isNotEmpty() -> Panels.CAPTIONS
             Session.tvKeys -> Panels.TV
+            Session.ffKeys -> Panels.FIREFOX
             Session.voiceMode -> Panels.VOICE
             else -> ""
         }
@@ -1775,6 +1786,7 @@ class ScouterService : Service() {
             Panels.VOICE -> Panels.voice(voiceStripText)
             Panels.INTRO -> return // drawn by introFrame
             Panels.TV -> return tvDraw()
+            Panels.FIREFOX -> return ffDraw()
             Panels.HUB -> return hubDraw()
             Panels.CAPTIONS -> return captionsDraw()
             Panels.HOME -> return homeDraw()
@@ -4047,6 +4059,185 @@ class ScouterService : Service() {
                 if (!stop) fetchTabs()
             }
         }.start()
+    }
+
+    // ------------------------------------------------ Firefox on the TV, worked from the keyboard (Alt+F)
+
+    // Alt+F: Firefox by itself on the TV (the phone's `phone` mirror, in a tmux session of its own: no tab among the
+    // terminal's) and the keyboard and trackpad its (typing, Enter, Backspace, Tab, the arrows, Ctrl shortcuts; Esc is
+    // Back; the trackpad moves its pointer, a click taps, two fingers scroll), with a panel on the glasses like the TV
+    // remote's. Alt+F again: the keyboard back, Firefox stays on the TV; Alt+Shift+F stops it. The mirror takes the
+    // keys over its local touchpad API (POST 127.0.0.1:8772/pad, its run's key in X-Key, read over SSH).
+    private var ffStatus = ""
+    @Volatile private var ffKey = ""
+    private val ffPool = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var ffMoveX = 0f
+    private var ffMoveY = 0f
+    private var ffSwipe = 0f
+    private val ffFlush = Runnable {
+        if (ffMoveX != 0f || ffMoveY != 0f) {
+            ffPost("{\"op\":\"move\",\"dx\":${ffMoveX.toInt()},\"dy\":${ffMoveY.toInt()}}")
+            ffMoveX -= ffMoveX.toInt()
+            ffMoveY -= ffMoveY.toInt()
+        }
+    }
+
+    // the phone's own terminal (the TV mirror runs there)
+    private fun ffServer() = localServer() ?: settings.servers().firstOrNull { it.host == "127.0.0.1" || it.host == "localhost" }
+
+    private fun ffRemote() {
+        if (Session.ffKeys) {
+            Session.ffKeys = false
+            if (Session.overlay == Panels.FIREFOX) panelClose()
+            trackpadMode()
+            note("Firefox remote off: the keyboard is back (Firefox stays on the TV; Alt+Shift+F stops it)")
+            return
+        }
+        val s = ffServer() ?: return note("Firefox on the TV needs the phone's own terminal (127.0.0.1)")
+        if (Session.tvKeys) {
+            Session.tvKeys = false
+            tvHide("")
+        }
+        Session.ffKeys = true
+        ffStatus = "starting Firefox on the TV…"
+        ffShow()
+        trackpadMode()
+        Thread {
+            val b = Bootstrap(vault)
+            val r = runCatching { b.runShared(s.host, s.port, s.user, Tabs.tv("")) }
+            // the mirror writes its run's key once it serves (a few seconds after a start)
+            var key = ""
+            for (i in 0 until 30) {
+                key = runCatching { b.runShared(s.host, s.port, s.user, "cat \$HOME/vizio/phone/.key 2>/dev/null") }
+                    .getOrDefault("").trim()
+                if (key.isNotEmpty() && runCatching { ffHttp("/health", null, "") }.getOrDefault(0) == 200) break
+                Thread.sleep(1000)
+            }
+            work.post {
+                ffKey = key
+                ffStatus = when {
+                    r.isFailure -> "couldn't start it: " + Bootstrap.plain(r.exceptionOrNull()!!, s.host, s.port)
+                    key.isEmpty() -> "Firefox isn't answering yet (is the TV on?)"
+                    else -> "Firefox on the TV: type, click, scroll"
+                }
+                if (Session.overlay == Panels.FIREFOX) ffDraw()
+            }
+        }.start()
+    }
+
+    private fun ffStop() {
+        val s = ffServer() ?: return
+        if (Session.ffKeys) {
+            Session.ffKeys = false
+            if (Session.overlay == Panels.FIREFOX) panelClose()
+            trackpadMode()
+        }
+        note("Firefox on the TV: stopping")
+        Thread { runCatching { Bootstrap(vault).runShared(s.host, s.port, s.user, Tabs.tvStop()) } }.start()
+    }
+
+    private fun ffShow() {
+        if (Session.blank) display(true, "firefox remote")
+        if (Session.tunes) tunesSet(false)
+        if (Session.pointer) pointerOff()
+        Session.overlay = Panels.FIREFOX
+        work.removeCallbacks(noteEnd)
+        forceApply()
+        ffDraw()
+        Session.changed()
+    }
+
+    private fun ffDraw() {
+        if (glassesWith == null) return
+        val items = listOf(
+            "▌▌ $ffStatus" to 1,
+            "" to 0,
+            " › Typing, Enter, Backspace, Tab, the arrows   go to Firefox" to 0,
+            " › Ctrl+A, C, V, X, Z, L, T, W, F ...           Firefox's own" to 0,
+            " › Esc                                          Back" to 0,
+            " › Trackpad: move · click taps · two fingers    its pointer, scroll" to 0,
+            " › Alt+Shift+F                                  stop Firefox on the TV" to 0,
+        )
+        val title = "VOX//FIREFOX ON THE TV"
+        val close = "Alt+F: keyboard back"
+        if (settings.show == Settings.SCREEN) {
+            val st = Native.screenStats()
+            if (st[5] <= 0 || st[6] <= 0) return
+            val art = Panels.frameArt(st[5], st[6], title, close, items, "")
+            Native.overlay(null, null, false)
+            Native.screenOverlay(art.pixels, art.w, art.h, art.x, art.y)
+            Session.overlayGen++
+            screen?.poke()
+            remote?.poke()
+        } else {
+            val g = region()
+            val cols = if (g[2] > 0) g[0] / g[2] else settings.cols
+            val rows = if (g[3] > 0) g[1] / g[3] else settings.rows
+            val c = Panels.frameLines(cols, rows, title, close, items, "")
+            Native.screenOverlay(null, 0, 0, 0, 0)
+            Native.overlay(c.lines.toTypedArray(), c.marks.toIntArray(), true)
+        }
+    }
+
+    // One action to the mirror, in order, off the work thread; a key refused (the mirror started again: a new key) is
+    // read again once.
+    private fun ffPost(json: String) {
+        ffPool.execute {
+            var code = runCatching { ffHttp("/pad", json, ffKey) }.getOrDefault(-1)
+            if (code == 403) {
+                val s = ffServer()
+                if (s != null) ffKey = runCatching { Bootstrap(vault).runShared(s.host, s.port, s.user,
+                    "cat \$HOME/vizio/phone/.key 2>/dev/null") }.getOrDefault("").trim()
+                code = runCatching { ffHttp("/pad", json, ffKey) }.getOrDefault(-1)
+            }
+            if (code != 204 && code != 200) work.post {
+                val why = if (code == -1) "Firefox isn't running (Alt+F twice starts it)" else "Firefox refused that ($code)"
+                if (ffStatus != why) {
+                    ffStatus = why
+                    if (Session.overlay == Panels.FIREFOX) ffDraw()
+                }
+            }
+        }
+    }
+
+    private fun ffHttp(path: String, body: String?, key: String): Int {
+        val c = java.net.URL("http://127.0.0.1:8772$path").openConnection() as java.net.HttpURLConnection
+        c.connectTimeout = 1500
+        c.readTimeout = 4000
+        try {
+            if (body != null) {
+                c.requestMethod = "POST"
+                c.doOutput = true
+                c.setRequestProperty("X-Key", key)
+                c.outputStream.use { it.write(body.toByteArray()) }
+            }
+            return c.responseCode
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    // The trackpad on Firefox: the pointer glides (TV pixels, ~30 moves a second), a click taps, a right click is
+    // Back, the wheel and two-finger swipes scroll a page at a time.
+    private fun ffTrackpad(kind: Int, dx: Float, dy: Float) {
+        when (kind) {
+            VoxKeys.Trackpad.MOVE, VoxKeys.Trackpad.DRAG -> {
+                val k = glide(dx, dy) * 2.5f // the TV's 1600 pixels across against the glasses' 640
+                if (ffMoveX == 0f && ffMoveY == 0f) work.postDelayed(ffFlush, 33)
+                ffMoveX += dx * k
+                ffMoveY += dy * k
+            }
+            VoxKeys.Trackpad.CLICK -> ffPost("{\"op\":\"tap\"}")
+            VoxKeys.Trackpad.RIGHT -> ffPost("{\"op\":\"key\",\"code\":4,\"meta\":0}")
+            VoxKeys.Trackpad.WHEEL -> if (dy != 0f) ffPost("{\"op\":\"scroll\",\"dir\":\"${if (dy > 0) "up" else "down"}\"}")
+            VoxKeys.Trackpad.SCROLL -> {
+                ffSwipe += dy
+                if (kotlin.math.abs(ffSwipe) >= 120f) {
+                    ffPost("{\"op\":\"scroll\",\"dir\":\"${if (ffSwipe > 0) "up" else "down"}\"}")
+                    ffSwipe = 0f
+                }
+            }
+        }
     }
 
     // A tab action (Tabs.command) in the server in use, over SSH beside mosh, off the work thread.

@@ -47,6 +47,16 @@ object Keyboard {
             Native.keyEvent(HID, mods or (if (e.isShiftPressed) SHIFT else 0), it)
             return true
         }
+        // Right Alt as AltGr: a character the layout gives with it (Vox's layout: \ on Right Alt + /) goes as that
+        // character, without Alt.
+        if (e.metaState and KeyEvent.META_ALT_RIGHT_ON != 0 && !e.isCtrlPressed) {
+            val g = e.getUnicodeChar(e.metaState)
+            val noAlt = e.getUnicodeChar(e.metaState and KeyEvent.META_ALT_MASK.inv())
+            if (g > 0 && g != noAlt && g and KeyCharacterMap.COMBINING_ACCENT == 0) {
+                Native.keyEvent(UNICODE, mods and ALT.inv(), g)
+                return true
+            }
+        }
         // The character without Ctrl, Alt and Meta (they go as modifier bits); Shift and the layout stay applied.
         val plain = e.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK or KeyEvent.META_META_MASK).inv()
         val c = e.getUnicodeChar(plain)

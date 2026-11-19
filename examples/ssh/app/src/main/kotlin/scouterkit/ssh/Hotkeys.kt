@@ -249,6 +249,31 @@ object Hotkeys {
             hub("hubkey:" + if (e.isShiftPressed) letter.uppercase() else letter)
             return true
         }
+        // Firefox on the TV (Alt+F): every key is Firefox's (Android key codes with their Ctrl / Shift, typed characters
+        // as text), Esc is Back; Alt shortcuts go on as ever (Alt+F gives the keyboard back).
+        if (Session.ffKeys && !e.isAltPressed && !e.isMetaPressed) {
+            if (KeyEvent.isModifierKey(e.keyCode)) return true
+            if (e.action != KeyEvent.ACTION_DOWN) return true
+            fun ff(what: String) = ScouterService.send(context, ScouterService.ACTION_PANEL, "do" to what)
+            val special = when (e.keyCode) {
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> KeyEvent.KEYCODE_ENTER
+                KeyEvent.KEYCODE_ESCAPE -> KeyEvent.KEYCODE_BACK
+                KeyEvent.KEYCODE_DEL, KeyEvent.KEYCODE_FORWARD_DEL, KeyEvent.KEYCODE_TAB, KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_MOVE_HOME,
+                KeyEvent.KEYCODE_MOVE_END -> e.keyCode
+                else -> 0
+            }
+            val meta = (if (e.isCtrlPressed) KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON else 0) or
+                (if (e.isShiftPressed) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0)
+            val c = e.getUnicodeChar(e.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_META_MASK).inv())
+            when {
+                special != 0 -> ff("ffkey:$special:$meta")
+                e.isCtrlPressed -> ff("ffkey:${e.keyCode}:$meta") // Ctrl+A, C, V ... as keys
+                c >= 32 && c and android.view.KeyCharacterMap.COMBINING_ACCENT == 0 -> ff("ffchar:$c")
+            }
+            return true
+        }
         // The TV remote on (Alt+Y): the keyboard is the TV's remote (Vizio.LAYOUT); Alt shortcuts go on as ever.
         if (Session.tvKeys && !e.isAltPressed && !e.isCtrlPressed && !e.isMetaPressed) {
             val down = e.action == KeyEvent.ACTION_DOWN
@@ -394,7 +419,7 @@ object Hotkeys {
             KeyEvent.KEYCODE_P -> "media:toggle"
             KeyEvent.KEYCODE_B -> "lowbat"
             KeyEvent.KEYCODE_Y -> "tv"
-            KeyEvent.KEYCODE_F -> "tvtab"
+            KeyEvent.KEYCODE_F -> if (e.isShiftPressed) "ffstop" else "ff" // Firefox on the TV, worked from here
             KeyEvent.KEYCODE_G -> "hub"
             KeyEvent.KEYCODE_E -> "captions"
             KeyEvent.KEYCODE_I -> "translate"

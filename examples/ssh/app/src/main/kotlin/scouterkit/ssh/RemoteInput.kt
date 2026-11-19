@@ -136,6 +136,19 @@ class RemoteInput(context: Context, val server: Settings.Server, private val onP
                 return true
             }
             if (KeyEvent.isModifierKey(e.keyCode)) return true
+            // Right Alt as AltGr: a character the layout gives with it (Vox's layout: \ on Right Alt + /) goes as that
+            // character, without Alt.
+            if (e.metaState and KeyEvent.META_ALT_RIGHT_ON != 0 && !e.isCtrlPressed && SYMS[e.keyCode] == null) {
+                val g = e.getUnicodeChar(e.metaState)
+                if (g > 0 && g != e.getUnicodeChar(e.metaState and KeyEvent.META_ALT_MASK.inv()) &&
+                    g and KeyCharacterMapCombining == 0) {
+                    if (e.action == KeyEvent.ACTION_DOWN) {
+                        superAlone = false
+                        input.send("k 0 ${if (g in 0x20..0x7E || g in 0xA0..0xFF) g else 0x1000000 or g}")
+                    }
+                    return true
+                }
+            }
             val sym = SYMS[e.keyCode] ?: e.getUnicodeChar(0).takeIf { it > 0 && it and KeyCharacterMapCombining == 0 }?.let {
                 if (it in 0x20..0x7E || it in 0xA0..0xFF) it else 0x1000000 or it
             } ?: return false

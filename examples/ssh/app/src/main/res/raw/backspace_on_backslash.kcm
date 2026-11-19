@@ -1,7 +1,16 @@
-# Vox: Backspace on the big \ key, \ on the small Backspace key (the two swapped, as on HHKB keyboards).
-# An overlay on the keyboard's usual layout: only these two keys change. Pick it in Android's settings: Physical
-# keyboard > (the keyboard) > Vox: Backspace on the \ key. Linux key codes: 43 KEY_BACKSLASH, 14 KEY_BACKSPACE.
+# Vox: Backspace on both the big \ key and the small Backspace key; \ itself on Right Alt + / (and | on
+# Right Alt + Shift + /). An overlay on the keyboard's usual layout: only these keys change. Pick it in Android's
+# settings: Physical keyboard > (the keyboard) > Vox: Backspace on the \ key. Linux key codes: 43 KEY_BACKSLASH,
+# 14 KEY_BACKSPACE.
 type OVERLAY
 
 map key 43 DEL
-map key 14 BACKSLASH
+map key 14 DEL
+
+key SLASH {
+    label:                              '/'
+    base:                               '/'
+    shift:                              '?'
+    ralt:                               '\\'
+    ralt+shift:                         '|'
+}
