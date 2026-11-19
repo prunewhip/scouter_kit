@@ -139,14 +139,17 @@ this phone's Ubuntu and Termux, mosh's ports and *Forget its host key*).
 - **A server's screen** (a laptop's): over SSH, with the same key, the app runs `vox-screen WIDTH HEIGHT FPS`
   there (looked for in `~/.local/bin`, `~/bin` and `/usr/local/bin` too), which must write baseline JPEG images one after another to stdout (each the whole desktop inside
   WIDTH x HEIGHT) until stdout closes. They go through the same pipeline as the phone's screen. The width asked
-  for is on the Screen tab (640, 960, 1280). Another source in front, the server's screen stays connected (its
+  for is on the Screen tab (640, 960, 1280). The app also passes `VOX_FORMAT=png VOX_SIZE=WxH` (the glasses'
+  picture): a helper that honours them sends lossless grey PNGs shrunk once to fit that picture, pixel for pixel
+  on the glasses (sharper text than JPEGs shrunk twice). `server/vox-screen` does both (GStreamer, already on an
+  Ubuntu desktop): copy it to `~/.local/bin` there. Another source in front, the server's screen stays connected (its
   newest image waits undecoded) for 5 minutes, so switching back shows it at once.
   While it shows, the keyboard and the trackpad work that desktop (`RemoteInput.kt`): a second SSH command runs a
   small Python program there that types and points through X11's XTEST (Python 3 and libXtst, already on an
   Ubuntu desktop; X11 only, not Wayland). Keys go with their modifiers as chords (nothing stays held if the glasses
   switch away); the pointer moves at once on the glasses and follows the laptop's own mouse; click, right click,
-  drag, both wheels. Vox's Alt shortcuts and Ctrl+Left (back to that server's terminal) stay Vox's; Alt+K keeps the
-  keys on the phone.
+  drag, both wheels. Vox's Alt shortcuts stay Vox's (Alt+Up: that server's terminal); Ctrl shortcuts are the
+  desktop's own (1.02: Ctrl+Left no longer leaves for the terminal); Alt+K keeps the keys on the phone.
 - **Transitions** (*Transitions*, Terminal tab, *On the glasses*, on by default; `native/fx.hpp`, `Fx.kt`): a switch plays on the
   glasses in about half a second. The old picture goes the moment it is asked for (about 0.15 s), a label says
   where the glasses are going ("LAPTOP // TERMINAL"), and the new picture comes in once its pixels are on the

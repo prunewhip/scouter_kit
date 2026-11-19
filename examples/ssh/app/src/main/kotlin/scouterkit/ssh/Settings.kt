@@ -63,7 +63,7 @@ class Settings(context: Context) {
     var screenInvertPct: Int
         get() = prefs.getInt("screen_invert_pct", if (screenInvert) 100 else 0)
         set(v) = prefs.edit().putInt("screen_invert_pct", v).apply()
-    var screenGamma: Int by Number("screen_gamma", 100)
+    var screenGamma: Int by Number("screen_gamma", 75) // < 100: midtones lifted (thin text strokes brighter)
     var screenThreshold: Int by Number("screen_threshold", 128)
     var screenDither: Boolean
         get() = prefs.getBoolean("screen_dither", false)
@@ -89,7 +89,7 @@ class Settings(context: Context) {
     // (0 ... 100) and sharpened.
     var screenRotate: Int by Number("screen_rotate", 0)
     var screenZoom: Int by Number("screen_zoom", 100)
-    var screenContrast: Int by Number("screen_contrast", 60)
+    var screenContrast: Int by Number("screen_contrast", 100)
     var screenSharpen: Boolean
         get() = prefs.getBoolean("screen_sharpen", true)
         set(v) = prefs.edit().putBoolean("screen_sharpen", v).apply()
@@ -158,12 +158,23 @@ class Settings(context: Context) {
     // Once (1.02): 16 greys (4-bit) for everything, the screen's setting and every look kept (per app and each
     // source's default), as the user asked; a look's other settings stay.
     fun migrate() {
-        if (prefs.getBoolean("migrated_102", false)) return
-        screenLevels = 16
-        val all = runCatching { org.json.JSONObject(looks) }.getOrDefault(org.json.JSONObject())
-        for (k in all.keys().asSequence().toList()) all.optJSONObject(k)?.put("levels", 16)
-        looks = all.toString()
-        prefs.edit().putBoolean("migrated_102", true).putBoolean("migrated_04", true).apply()
+        if (!prefs.getBoolean("migrated_102", false)) {
+            screenLevels = 16
+            val all = runCatching { org.json.JSONObject(looks) }.getOrDefault(org.json.JSONObject())
+            for (k in all.keys().asSequence().toList()) all.optJSONObject(k)?.put("levels", 16)
+            looks = all.toString()
+            prefs.edit().putBoolean("migrated_102", true).putBoolean("migrated_04", true).apply()
+        }
+        // Once (1.03): text that holds on the lens: full contrast (a page's background to black, its text to white)
+        // and midtones lifted, in the setting and every look kept.
+        if (!prefs.getBoolean("migrated_103", false)) {
+            screenContrast = 100
+            screenGamma = 75
+            val all = runCatching { org.json.JSONObject(looks) }.getOrDefault(org.json.JSONObject())
+            for (k in all.keys().asSequence().toList()) all.optJSONObject(k)?.apply { put("contrast", 100); put("gamma", 75) }
+            looks = all.toString()
+            prefs.edit().putBoolean("migrated_103", true).apply()
+        }
     }
 
     // The look-up view (LookUp): the fade when the terminal comes and goes (ms, 0: none), and the header above the

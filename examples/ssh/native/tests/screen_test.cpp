@@ -193,6 +193,16 @@ int main() {
   for (int i = 0; i < 100; i++) ramp[i] = uint8_t(100 + i);
   ssh::Stretch(&ramp, 100, {0, 0, 100, 1}, 100);
   CHECK(ramp[0] < 10 && ramp[99] > 245);
+  { // a dark theme: the grey background (32) black, its grey text (190) near white, the edges between kept
+    std::vector<uint8_t> page(1000, 32);
+    for (int i = 0; i < 1000; i += 4) page[size_t(i)] = 190, page[size_t(i) + 1] = 110;
+    ssh::Stretch(&page, 1000, {0, 0, 1000, 1}, 100);
+    CHECK(page[2] == 0 && page[0] > 240 && page[1] > 60 && page[1] < 180);
+    std::vector<uint8_t> light(1000, 240); // a light page: its background white (black once inverted)
+    for (int i = 0; i < 1000; i += 4) light[size_t(i)] = 60;
+    ssh::Stretch(&light, 1000, {0, 0, 1000, 1}, 100);
+    CHECK(light[2] == 255 && light[0] < 10);
+  }
   std::vector<uint8_t> edge = {100, 100, 200, 200, 100, 100, 200, 200, 100, 100, 200, 200};
   ssh::Sharpen(&edge, 4, {0, 0, 4, 3});
   CHECK(edge[5] < 100 && edge[6] > 200);

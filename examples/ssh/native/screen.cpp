@@ -289,6 +289,14 @@ void Stretch(std::vector<uint8_t> *p, int pw, Rect c, int amount) {
       break;
     }
   }
+  // A page's background (the commonest grey, a quarter of the picture or more) goes to the end it is near: a dark
+  // theme's grey to black (unlit on the glasses), a light page's to white (black once inverted), the text the other
+  // way; antialiased text keeps its in-between greys.
+  int mode = int(std::max_element(hist, hist + 256) - hist);
+  if (hist[mode] * 4 >= n) {
+    if (mode < 128) lo = std::max(lo, std::min(mode + 8, 255));
+    else hi = std::min(hi, std::max(mode - 8, 0));
+  }
   if (hi - lo < 16) return; // a flat picture: nothing to stretch
   int a = std::min(amount, 100);
   uint8_t lut[256];

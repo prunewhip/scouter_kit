@@ -107,7 +107,8 @@ Rect Shows(int w, int h, const ScreenOptions &, int pw, int ph, int *ow, int *oh
 // the picture went (the content: what Stretch, Sharpen and Tone change).
 Rect Fit(std::vector<uint8_t> *dst, int pw, int ph, const std::vector<uint8_t> &src, int sw, Rect r, Rect d, bool keep);
 
-// Stretches the levels inside c (of a pw-wide image) toward its 2nd and 98th percentiles; amount 0 ... 100.
+// Stretches the levels inside c (of a pw-wide image) toward its 2nd and 98th percentiles, and a background (the
+// commonest grey, a quarter of the picture or more) to black when dark or white when light; amount 0 ... 100.
 void Stretch(std::vector<uint8_t> *p, int pw, Rect c, int amount);
 
 // An unsharp mask (3 x 3 box, strength 1) inside c: edges, such as text, come out crisper.
