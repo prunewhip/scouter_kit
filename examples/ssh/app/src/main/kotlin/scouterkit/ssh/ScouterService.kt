@@ -4407,6 +4407,7 @@ class ScouterService : Service() {
     // stops it) or always (Settings.voiceAlways: phrases that start with "Vox").
     private fun listen(once: Boolean) {
         if (carListener != null) return // Car mode has the microphone
+        if (vc.listening) return // voice control is listening already: it takes every phrase
         if (capListener != null) return voiceSay("$MIC live captions have the microphone")
         if (once && Session.voiceMode) return voiceModeSet(false) // the listen gesture (or key) ends voice mode
         if (listener != null || voiceLoading) {
@@ -4580,6 +4581,7 @@ class ScouterService : Service() {
     // Always listening: on while the glasses are up and the setting is on (not again within 30 s of a failure).
     private fun voiceAlways() {
         if (!settings.voiceAlways || listener != null || carListener != null || voiceLoading || ended || Session.glasses != "ready") return
+        if (vc.listening) return // voice control has the microphone (two readers would each get part of the sound)
         if (Session.captions.isNotEmpty()) return // live captions have the microphone
         if (!VoiceModel.available || !VoiceModel.ready(this)) return
         if (SystemClock.elapsedRealtime() - voiceFailedAt < 30000) return
@@ -4650,13 +4652,16 @@ class ScouterService : Service() {
             voiceDo(m)
             return m.label
         }
+        // Someone else has the microphone: why (a reason), "" when it is being given up (try again shortly: the
+        // glasses' microphone has one reader, and the one stopping turns it off as it goes), null free.
         override fun micBusy(): String? = when {
             carListener != null -> "Car mode has the microphone"
             capListener != null -> "live captions have the microphone"
-            else -> {
-                if (listener != null) stopListening()
-                null
+            listener != null || voiceLoading -> {
+                stopListening()
+                ""
             }
+            else -> null
         }
         override fun vault(): Vault = this@ScouterService.vault
         override fun claudeServer(): Settings.Server? = settings.servers().firstOrNull { it.local } ?: settings.active()
@@ -4682,8 +4687,10 @@ class ScouterService : Service() {
             }
         }
         override fun onState() {
+            val was = Session.voiceControl
             Session.voiceControl = vc.on
             Session.changed()
+            if (was && !vc.on) work.postDelayed({ voiceAlways() }, 1500) // "Vox …" listening again, if it is on
         }
     }
     private var carBlanked = false // Car mode turned the glasses' display off

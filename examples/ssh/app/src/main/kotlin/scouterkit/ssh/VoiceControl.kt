@@ -58,6 +58,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
 
     var on = false // voice control mode
         private set
+    val listening get() = listener != null || on // the microphone is voice control's
     private var ptt = false // a push to talk under way
     private var typing = false
     private var zoom: VcGrammar.Cell? = null
@@ -170,10 +171,14 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         val problem = when {
             !VoiceModel.available -> "voice is not in this build"
             !LiveModel.ready(ctx) && !VoiceModel.ready(ctx) -> "no speech model yet: Vox › Voice tab, download it"
-            busy != null -> busy
+            busy != null && busy.isNotEmpty() -> busy
             else -> null
         }
         if (problem != null) return fail(problem)
+        if (busy == "") { // the other listener is letting the microphone go: a moment, then ours
+            host.work.postDelayed({ if ((on || ptt) && listener == null && status == "STARTING") listen(once) }, 700)
+            return
+        }
         val l = Listener(once)
         listener = l
         l.start()
