@@ -66,18 +66,18 @@ object Dashboard {
     class Layout(val tabs: Boolean, val widgets: List<Widget>)
 
     fun layout(settings: Settings, style: String = settings.dashStyle): Layout = when (style) {
-        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(PHONE), Widget(BATTERY)))
-        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(PHONE), Widget(BATTERY)))
-        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(PHONE), Widget(BATTERY)))
+        "day" -> Layout(true, listOf(Widget(CLOCK), Widget(WEATHER), Widget(CALENDAR), Widget(BATTERY)))
+        "game" -> Layout(true, listOf(Widget(CLOCK), Widget(SPORTS), Widget(NOTES), Widget(BATTERY)))
+        "media" -> Layout(true, listOf(Widget(CLOCK), Widget(MEDIA), Widget(BATTERY)))
         "tunes" -> Layout(false, listOf(Widget(MEDIA), Widget(TUNES, 2), Widget(CLOCK)))
-        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(PHONE), Widget(BATTERY)))
+        "everything" -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(MEDIA), Widget(BATTERY)))
         "focus" -> Layout(false, listOf(Widget(CLOCK), Widget(NOTES, 2)))
-        "minimal" -> Layout(false, listOf(Widget(CLOCK), Widget(PHONE), Widget(BATTERY)))
+        "minimal" -> Layout(false, listOf(Widget(CLOCK), Widget(BATTERY)))
         "custom" -> custom(settings)
         // Only the tab bar (over a screen on the glasses: the phone's, a server's).
         "tabsonly" -> Layout(true, emptyList())
-        // The phone's battery as a number (PHONE) beside the glasses' (BATTERY) in every layout with batteries.
-        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(PHONE), Widget(BATTERY)))
+        // The phone's battery is the top row of BATTERY (PHONE over L and R) in every layout with batteries.
+        else -> Layout(true, listOf(Widget(CLOCK), Widget(NOTES), Widget(BATTERY)))
     }
 
     // The user's own layout (Settings.dashLayout): {"tabs": true, "widgets": [{"type": "clock", "weight": 1}, ...]}.
@@ -259,7 +259,7 @@ object Dashboard {
             if (busy) overlay = r
             else when (wd.type) {
                 CLOCK -> clock(context, c, r)
-                BATTERY -> batteries(c, r, line, fill)
+                BATTERY -> batteries(context, c, r, line, fill)
                 PHONE -> phoneBattery(context, c, r, line, fill)
                 NOTES -> notes(c, r, hits, hover, mark, fill, settings)
                 MEDIA -> media(c, r, hits, hover, mark, fill, line)
@@ -376,7 +376,7 @@ object Dashboard {
         BATTERY -> {
             val pct = paint(rowH * 0.2f, 13, MEDIUM)
             val letter = paint(rowH * 0.17f, 8, CONDENSED)
-            pct.measureText("100%+") + 4f + 30f + 4f + letter.measureText("L")
+            pct.measureText("100%+") + maxOf(4f + 30f + 4f + letter.measureText("L"), letter.measureText("PHONE") + 8f)
         }
         PHONE -> paint(rowH * 0.3f, 15, MEDIUM).measureText("100%+") + 30f + 8f
         WEATHER -> {
@@ -611,16 +611,26 @@ object Dashboard {
         c.drawText(date, r.left + 1f, r.top + rowH * 0.92f, paint(rowH * 0.17f, 10, CONDENSED, 0.2f))
     }
 
-    // Each arm's battery, small: a letter, a bar, the level.
-    private fun batteries(c: Canvas, r: RectF, line: Paint, fill: Paint) {
+    // The batteries, small, three rows in one column: the phone's (PHONE and its level), then each arm's (a letter,
+    // a bar, the level); every level right-aligned in one size, so the column keeps the dashboard's margins.
+    private fun batteries(context: Context, c: Canvas, r: RectF, line: Paint, fill: Paint) {
         val rowH = r.height()
         val bw = 30f
-        val bh = maxOf(6f, rowH * 0.13f)
+        val bh = maxOf(6f, rowH * 0.12f)
         val pct = paint(rowH * 0.2f, 13, MEDIUM).apply { textAlign = Paint.Align.RIGHT }
         val letter = paint(rowH * 0.17f, 8, CONDENSED)
+        val bm = context.getSystemService(android.os.BatteryManager::class.java)
+        val phone = bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)?.takeIf { it in 0..100 } ?: -1
+        val phoneCy = r.top + rowH * 0.2f
+        c.drawText("PHONE", r.left, phoneCy + letter.textSize * 0.35f, paint(rowH * 0.17f, 8, CONDENSED, 0.15f))
+        val pp = paint(rowH * 0.2f, if (phone in 0..15) 15 else 13, MEDIUM).apply { textAlign = Paint.Align.RIGHT }
+        c.drawText(if (phone >= 0) "$phone%" + if (bm?.isCharging == true) "+" else "" else "–", r.right, phoneCy + pp.textSize * 0.36f, pp)
+        // a hairline under the phone's row: the glasses' two below it
+        line.color = grey(3)
+        c.drawLine(r.left, r.top + rowH * 0.36f, r.right, r.top + rowH * 0.36f, line)
         val b = Session.battery
         for (i in 0..1) {
-            val cy = r.top + rowH * (if (i == 0) 0.32f else 0.74f)
+            val cy = r.top + rowH * (if (i == 0) 0.53f else 0.85f)
             val level = b.getOrElse(i) { -1 }
             c.drawText(if (i == 0) "L" else "R", r.left, cy + letter.textSize * 0.35f, letter)
             val bx = r.left + letter.measureText("L") + 4f
