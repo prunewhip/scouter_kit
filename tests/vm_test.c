@@ -1243,7 +1243,7 @@ static void test_memory(void)
 static void test_host_rules(void)
 {
 	static const uint8_t program_only[] = {JMP, RET, HALT, BEQ, BNE, BLTU, BGEU, BLTS, BGES, WAIT_EVENT};
-	static const uint8_t invalid[] = {0x00, 0x05, 0x0F, 0x1E, 0x1F, 0x28, 0x2F, 0x3B, 0x3F, 0x46, 0x4F, 0x58, 0x60, 0x80, 0xFF};
+	static const uint8_t invalid[] = {0x00, 0x05, 0x0F, 0x1E, 0x1F, 0x28, 0x2F, 0x3B, 0x3F, 0x46, 0x4F, 0x59, 0x60, 0x80, 0xFF};
 	static const char *cut[] = {"11 31", "11 3f f0 20 01 30", "01 00 50 00 05 aa aa", "02 00 50 00 04 00 03 aa",
 				    "50 ff ff ff f0 38 00", "31 00 80"};
 	static const char *pad[] = {"42 f1 28 00", "40 01", "50 00 00 00 01"};

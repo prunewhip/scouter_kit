@@ -193,6 +193,29 @@ static struct mgmt_callback smp_rx_cb = {
 	.event_id = MGMT_EVT_OP_CMD_RECV,
 };
 
+#if defined(CONFIG_G1_LOCK_FLASH)
+#include <pm_config.h>
+/* nRF5340 app core: 64 SPU flash regions of 16 KB. Regions 62 and 63 stay writable (CONFIG_G1_LOCK_FLASH). */
+#define LOCK_REGION 0x4000u
+#define LOCK_KEEP 2u
+BUILD_ASSERT(PM_SETTINGS_STORAGE_ADDRESS >= (64u - 1u) * LOCK_REGION, "settings must be in the last region");
+BUILD_ASSERT(PM_G1_STORAGE2_ADDRESS >= (64u - 1u) * LOCK_REGION, "g1_storage2 must be in the last region");
+BUILD_ASSERT(PM_MCUBOOT_PRIMARY_ADDRESS + PM_MCUBOOT_PRIMARY_SIZE - 0x1000u >= (64u - LOCK_KEEP) * LOCK_REGION,
+	     "the primary slot's trailer must be in a writable region");
+
+static void lock_flash(void)
+{
+	const uint32_t perm = SPU_FLASHREGION_PERM_EXECUTE_Msk | SPU_FLASHREGION_PERM_READ_Msk |
+			      SPU_FLASHREGION_PERM_SECATTR_Msk | SPU_FLASHREGION_PERM_LOCK_Msk;
+
+	for (uint32_t r = 0; r < 64u - LOCK_KEEP; r++) {
+		NRF_SPU->FLASHREGION[r].PERM = perm;
+	}
+	LOG_INF("flash 0x0-0x%x read + execute only until reset (region 0: 0x%x)", (64u - LOCK_KEEP) * LOCK_REGION,
+		(unsigned)NRF_SPU->FLASHREGION[0].PERM);
+}
+#endif
+
 int main(void)
 {
 	int err;
@@ -207,6 +230,9 @@ int main(void)
 	mgmt_callback_register(&smp_reset_cb);
 	mgmt_callback_register(&smp_rx_cb);
 	board_init();
+#if defined(CONFIG_G1_LOCK_FLASH)
+	lock_flash(); /* before anything from outside (Bluetooth, the case link) runs */
+#endif
 	snprintf(name, sizeof(name), "G1v0%s_%c", safe_level() ? "S" : "", board_role() ? 'L' : 'R');
 	if (safe_level() < 2) {
 		pmic_start();

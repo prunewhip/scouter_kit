@@ -50,6 +50,17 @@ config G1_FAST_DECODE
 	  The decoders are CPU-bound; at 128 MHz a busy frame decodes in about half the time. The clock
 	  returns to 64 MHz (stock) when the instruction ends.
 
+config G1_LOCK_FLASH
+	bool "Lock the internal flash read + execute only until reset (bootloader and app code)"
+	default y
+	help
+	  At boot, before Bluetooth starts, the SPU makes every 16 KB flash region below the last two
+	  read + execute only and locks that until the next reset: no code running later (a VM bug, a
+	  crafted packet) can rewrite MCUboot or plant itself in the app's flash. The last two regions
+	  stay writable: the primary slot's trailer (an SMP image confirm) and the settings (bonds,
+	  g1_storage2). Updates are unaffected: they go to the external flash and MCUboot copies them
+	  at reset, before the lock.
+
 config G1_UPDATE_IN_CASE_ONLY
 	bool "Accept SMP image uploads and erases only in the case"
 	default y

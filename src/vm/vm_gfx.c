@@ -1431,3 +1431,230 @@ int vm_videox_sprite_at(const uint8_t *a, const struct vm_videox *x, int32_t px,
 	}
 	return (ink >> (15 - c) & 1) ? 15 : 0;
 }
+
+/* ---- VIDEOT (§3.9) ---- */
+
+enum { VT_SKIP = 0, VT_MVZ = 3, VT_MVS = 7, VT_MVM = 9, VT_CBP = 25, VT_NZ = 28, VT_EOB = 76, VT_GT1 = 92,
+       VT_MAG = 96 }; /* ... 128 = VM_VT_PROBS */
+static const uint8_t vt_zig[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
+
+int vm_videot_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
+{
+	uint32_t w = v[1], h = v[2], src = v[5], n = v[6], st = v[7];
+	int64_t fr = v[0], fend = fr + (int64_t)w * h, s0 = src, s1 = (int64_t)src + n, t0 = st,
+		t1 = (int64_t)st + VM_VIDEOT_STATE;
+
+	if (w < 8 || w > VM_VIDEOT_MAXW || (w & 7) || h < 8 || h > VM_VIDEOT_MAXH || (h & 7)) {
+		*detail = w < 8 || w > VM_VIDEOT_MAXW || (w & 7) ? w : h;
+		return VM_E_ARG;
+	}
+	if (fend > ARENA || s1 > ARENA || t1 > ARENA) {
+		*detail = fend > ARENA ? v[0] : s1 > ARENA ? src : st;
+		return VM_E_ARENA;
+	}
+	if (overlap(fr, fend, s0, s1) || overlap(fr, fend, t0, t1) || overlap(s0, s1, t0, t1)) {
+		*detail = overlap(fr, fend, s0, s1) ? src : st;
+		return VM_E_ARENA;
+	}
+	if (n < 2 || a[src] > 7 || a[src + 1] == 0 || a[src + 1] > 63) {
+		*detail = n < 2 ? n : a[src] > 7 ? 0 : 1;
+		return VM_E_FORMAT;
+	}
+	return 0;
+}
+
+V_INLINE uint32_t rc_raw(struct rc *r)
+{
+	uint32_t b;
+
+	r->range >>= 1;
+	b = r->code >= r->range;
+	if (b) {
+		r->code -= r->range;
+	}
+	while (r->range < 1u << 24) {
+		r->range <<= 8;
+		r->code = r->code << 8 | (r->p < r->end ? *r->p++ : 0);
+	}
+	return b;
+}
+
+/* v >= 0: unary on models m...m + 7 up to 8, then Exp-Golomb in raw bits (at most 15 leading zeros) */
+static uint32_t vt_uval(struct rc *r, uint32_t m)
+{
+	uint32_t v, k = 0, x = 1;
+
+	for (v = 0; v < 8; v++) {
+		if (!rc_bit(r, m + v)) {
+			return v;
+		}
+	}
+	while (k < 15 && !rc_raw(r)) {
+		k++;
+	}
+	for (uint32_t i = 0; i < k; i++) {
+		x = x << 1 | rc_raw(r);
+	}
+	return 8 + x - 1;
+}
+
+/* 2-D 4 x 4 Hadamard, unnormalised (gain 16 both ways): the inverse is the same divided by 16, rounded */
+static void vt_wht(const int32_t *in, int32_t *out)
+{
+	int32_t t[16];
+
+	for (int i = 0; i < 4; i++) {
+		int32_t p = in[i * 4], q = in[i * 4 + 1], u = in[i * 4 + 2], s = in[i * 4 + 3];
+
+		t[i * 4] = p + q + u + s;
+		t[i * 4 + 1] = p + q - u - s;
+		t[i * 4 + 2] = p - q - u + s;
+		t[i * 4 + 3] = p - q + u - s;
+	}
+	for (int j = 0; j < 4; j++) {
+		int32_t p = t[j], q = t[4 + j], u = t[8 + j], s = t[12 + j];
+
+		out[j] = p + q + u + s;
+		out[4 + j] = p + q - u - s;
+		out[8 + j] = p - q - u + s;
+		out[12 + j] = p - q + u - s;
+	}
+}
+
+static int32_t vt_clamp(int32_t v, int32_t lo, int32_t hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
+void vm_videot_decode(uint8_t *a, const uint32_t *v, vm_band_fn *band, void *ctx)
+{
+	static const uint8_t bayer[4] = {0, 2, 3, 1};
+	const uint32_t w = v[1], h = v[2], mw = w / 8, mh = h / 8, src = v[5], n = v[6];
+	uint8_t *fr = a + v[0], *st = a + v[7], *top = st + VM_VT_TOP, *hist = st + VM_VT_HIST, *cur = st + VM_VT_CUR;
+	const uint32_t flags = a[src], step = 4u * a[src + 1];
+	struct rc r;
+
+	if (flags & 1) {
+		for (uint32_t i = 0; i < VM_VT_PROBS; i++) {
+			st[2 * i] = 0;
+			st[2 * i + 1] = 8;
+		}
+	}
+	for (uint32_t k = 0; k < 2; k++) {
+		for (uint32_t x = 0; x < 256; x++) {
+			uint32_t l0 = (x * 60 + 255 * bayer[2 * k] + 127) / 1020, l1 = (x * 60 + 255 * bayer[2 * k + 1] + 127) / 1020;
+
+			st[VM_VT_LUT + 256 * k + x] = (uint8_t)((l0 > 15 ? 15 : l0) << 4 | (l1 > 15 ? 15 : l1));
+		}
+	}
+	memset(top, 0, VM_VIDEOT_MAXW / 8);
+	r.range = 0xFFFFFFFFu;
+	r.code = 0;
+	r.p = a + src + 2;
+	r.end = a + src + n;
+	r.prob = st;
+	for (int i = 0; i < 4; i++) {
+		r.code = r.code << 8 | (r.p < r.end ? *r.p++ : 0);
+	}
+	for (uint32_t by = 0; by < mh; by++) {
+		int32_t pmx = 0, pmy = 0;
+		uint32_t lskip = 0, x0 = w, x1 = 0;
+
+		for (uint32_t bx = 0; bx < mw; bx++) {
+			int32_t mv[2] = {0, 0}, res[4][16];
+			uint32_t cb[4] = {0, 0, 0, 0}, skip = rc_bit(&r, VT_SKIP + (bx ? lskip : 0) + top[bx]);
+
+			if (!skip) {
+				if (!(flags & 4)) {
+					int32_t pm[2] = {pmx, pmy};
+
+					for (uint32_t c = 0; c < 2; c++) {
+						int32_t d = 0;
+
+						if (rc_bit(&r, VT_MVZ + 2 * c + (pm[c] != 0))) {
+							uint32_t neg = rc_bit(&r, VT_MVS + c), m = 1 + vt_uval(&r, VT_MVM + 8 * c);
+
+							d = (int32_t)(m > 15 ? 15 : m);
+							d = neg ? -d : d;
+						}
+						mv[c] = vt_clamp(pm[c] + d, -7, 7);
+					}
+				}
+				for (uint32_t b = 0; b < 4; b++) {
+					int32_t coef[16] = {0};
+					uint32_t nnz = 0;
+
+					cb[b] = rc_bit(&r, VT_CBP + (b == 0 ? 0 : b == 3 ? 2 : 1));
+					if (!cb[b]) {
+						continue;
+					}
+					for (uint32_t i = 0; i < 16; i++) {
+						uint32_t neg, m = 1, cls = i / 4;
+
+						if (!rc_bit(&r, VT_NZ + 3 * i + (nnz < 2 ? nnz : 2))) {
+							continue;
+						}
+						nnz++;
+						neg = rc_raw(&r);
+						if (rc_bit(&r, VT_GT1 + cls)) {
+							m = 2 + vt_uval(&r, VT_MAG + 8 * cls);
+							m = m > 2047 ? 2047 : m;
+						}
+						coef[vt_zig[i]] = (neg ? -(int32_t)m : (int32_t)m) * (int32_t)step;
+						if (rc_bit(&r, VT_EOB + i)) {
+							break;
+						}
+					}
+					vt_wht(coef, res[b]);
+				}
+			}
+			for (uint32_t y = 0; y < 8; y++) {
+				for (uint32_t x = 0; x < 8; x++) {
+					uint32_t b = (y / 4) * 2 + x / 4;
+					int32_t p = 128, d = 0;
+
+					if (!(flags & 4)) {
+						int32_t X = vt_clamp((int32_t)(bx * 8 + x) + mv[0], 0, (int32_t)w - 1);
+						int32_t Y = vt_clamp((int32_t)(by * 8 + y) + mv[1], 0, (int32_t)h - 1);
+
+						/* rows above this band: as they were (the band above is in the frame already) */
+						p = Y < (int32_t)(by * 8) ? hist[(uint32_t)(Y - (int32_t)(by * 8 - 8)) * w + (uint32_t)X]
+									  : fr[(uint32_t)Y * w + (uint32_t)X];
+					}
+					if (cb[b]) {
+						d = (res[b][(y % 4) * 4 + x % 4] + 8) >> 4;
+					}
+					cur[y * w + bx * 8 + x] = (uint8_t)vt_clamp(p + d, 0, 255);
+				}
+			}
+			if (!skip || (flags & 4)) {
+				x0 = bx * 8 < x0 ? bx * 8 : x0;
+				x1 = bx * 8 + 8;
+			}
+			top[bx] = (uint8_t)skip;
+			lskip = skip;
+			pmx = skip ? 0 : mv[0];
+			pmy = skip ? 0 : mv[1];
+		}
+		if (by + 1 < mh) {
+			memcpy(hist, fr + by * 8 * w, 8 * w);
+		}
+		memcpy(fr + by * 8 * w, cur, 8 * w);
+		if (flags & 2) {
+			x0 = 0;
+			x1 = w;
+		}
+		band(ctx, by, x0 < x1 ? x0 : 0, x0 < x1 ? x1 : 0);
+	}
+}
+
+void vm_videot_row(const uint8_t *a, const uint32_t *v, uint32_t y, uint32_t k, uint32_t x0, uint32_t x1,
+		   uint8_t *out)
+{
+	const uint8_t *row = a + v[0] + y * v[1], *lut = a + v[7] + VM_VT_LUT + 256 * k;
+
+	for (uint32_t x = x0; x < x1; x++) {
+		out[x - x0] = lut[row[x]];
+	}
+}
+

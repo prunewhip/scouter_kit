@@ -168,6 +168,7 @@ enum Op : uint8_t {
   OP_LINE = 0x54,
   OP_VIDEO = 0x55,
   OP_VIDEOX = 0x57,
+  OP_VIDEOT = 0x58,
   OP_ASSET_LOAD = 0x56,
 };
 
@@ -243,7 +244,8 @@ int Operands(uint8_t op) {
   case OP_LINE: return 7;
   case OP_BLIT: return 12;
   case OP_GLYPHS: return 9;
-  case OP_DRAW: return 8;
+  case OP_DRAW:
+  case OP_VIDEOT: return 8;
   case OP_VIDEO:
   case OP_VIDEOX: return 10;
   case OP_ASSET_LOAD: return 4;
@@ -265,7 +267,7 @@ const char *OpName(uint8_t op) {
       {OP_NOTIFY, "NOTIFY"}, {OP_SYS_READ, "SYS_READ"},   {OP_SYS_WRITE, "SYS_WRITE"},
       {OP_FILL, "FILL"},     {OP_BLIT, "BLIT"},           {OP_GLYPHS, "GLYPHS"},
       {OP_DRAW, "DRAW"},     {OP_LINE, "LINE"},           {OP_VIDEO, "VIDEO"},
-      {OP_VIDEOX, "VIDEOX"}, {OP_ASSET_LOAD, "ASSET_LOAD"}};
+      {OP_VIDEOX, "VIDEOX"}, {OP_VIDEOT, "VIDEOT"}, {OP_ASSET_LOAD, "ASSET_LOAD"}};
   auto it = names.find(op);
   if (it != names.end()) return it->second;
   if (op >= OP_ADD && op <= OP_SAR) return "arithmetic";
@@ -567,6 +569,7 @@ void Program::Op(uint8_t opcode, std::initializer_list<ArenaWord> operands, Labe
   std::vector<ArenaWord> ops(operands);
   if (policy_start_ >= 0 && (opcode == OP_DRAW || opcode == OP_VIDEO || opcode == OP_VIDEOX))
     ops[4] = PolicyX(ops[4]); // dst_x, x
+  if (policy_start_ >= 0 && opcode == OP_VIDEOT) ops[3] = PolicyX(ops[3]);
   std::vector<uint8_t> head;
   PutIns(head, opcode, ops.data(), k, 0);
   if (!HasTarget(opcode)) {
@@ -684,6 +687,11 @@ void Program::VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord 
   Op(OP_VIDEOX, {bitmap, stride, w, h, x, y, levels, src, n, state});
 }
 
+void Program::VideoT(ArenaWord frame, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y, ArenaWord src, ArenaWord n,
+                     ArenaWord state) {
+  Op(OP_VIDEOT, {frame, w, h, x, y, src, n, state});
+}
+
 void Program::AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n) {
   Op(OP_ASSET_LOAD, {id, dst, off, n});
 }
@@ -759,6 +767,49 @@ struct RangeEncoder {
   }
 };
 
+// ---- VIDEOT (VM.md §3.9): the arm's decoder (vm_videot_decode) exactly, plus the choices ----
+namespace vt {
+enum : uint32_t { kSkip = 0, kMvz = 3, kMvs = 7, kMvm = 9, kCbp = 25, kNz = 28, kEob = 76, kGt1 = 92, kMag = 96,
+                  kProbs = 128 };
+constexpr uint8_t kZig[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
+
+void Wht(const int32_t *in, int32_t *out) {
+  int32_t t[16];
+  for (int i = 0; i < 4; i++) {
+    int32_t p = in[i * 4], q = in[i * 4 + 1], u = in[i * 4 + 2], s = in[i * 4 + 3];
+    t[i * 4] = p + q + u + s, t[i * 4 + 1] = p + q - u - s, t[i * 4 + 2] = p - q - u + s, t[i * 4 + 3] = p - q + u - s;
+  }
+  for (int j = 0; j < 4; j++) {
+    int32_t p = t[j], q = t[4 + j], u = t[8 + j], s = t[12 + j];
+    out[j] = p + q + u + s, out[4 + j] = p + q - u - s, out[8 + j] = p - q - u + s, out[12 + j] = p - q + u - s;
+  }
+}
+
+struct Coder {
+  RangeEncoder &rc;
+  void Bit(uint32_t i, bool b) { rc.Bit(i, b); }
+  void Raw(bool b) {
+    rc.range >>= 1;
+    if (b) rc.low += rc.range;
+    while (rc.range < 1u << 24) {
+      rc.range <<= 8;
+      rc.ShiftLow();
+    }
+  }
+  void UVal(uint32_t m, uint32_t v) { // unary to 8, then Exp-Golomb (the arm's vt_uval)
+    for (uint32_t i = 0; i < 8; i++) {
+      Bit(m + i, v > i);
+      if (v <= i) return;
+    }
+    uint32_t x = v - 8 + 1, k = 0;
+    while (x >> (k + 1)) k++;
+    for (uint32_t i = 0; i < k; i++) Raw(false);
+    Raw(true);
+    for (uint32_t i = k; i-- > 0;) Raw((x >> i) & 1);
+  }
+};
+} // namespace vt
+
 uint32_t AboveClass(uint32_t b1, uint32_t w, uint32_t code) {
   if (b1 >= w) return 6;
   if (code == 0) return 0;
@@ -787,9 +838,12 @@ uint32_t Transitions(const uint8_t *row, uint32_t w, uint16_t *t) {
 
 } // namespace
 
-VideoEncoder::VideoEncoder(int width, int height)
+VideoEncoder::VideoEncoder(int width, int height) : VideoEncoder(width, height, kPanelW) {}
+
+VideoEncoder::VideoEncoder(int width, int height, int max_width)
     : w_(width), h_(height), nb_(width > 0 ? (width + 7) / 8 : 0), p_(kVProbs, 2048) {
-  if (w_ >= 1 && w_ <= kVideoMaxW && h_ >= 1 && h_ <= kPanelH) prev_.assign(size_t(nb_) * size_t(h_), 0);
+  if (w_ >= 1 && w_ <= std::min(max_width, kVideoMaxW) && h_ >= 1 && h_ <= kPanelH)
+    prev_.assign(size_t(nb_) * size_t(h_), 0);
 }
 
 bool VideoEncoder::Move(int y0, int rows, int dy) {
@@ -824,13 +878,127 @@ bool VideoEncoder::MoveRect(int x, int y, int w, int h, int dx, int dy) {
   return true;
 }
 
+TransformVideoEncoder::TransformVideoEncoder(int width, int height)
+    : w_(width), h_(height), ref_(size_t(std::max(width, 0)) * size_t(std::max(height, 0)), 128),
+      p_(vt::kProbs, 2048) {}
+
+std::vector<uint8_t> TransformVideoEncoder::Encode(std::span<const uint8_t> luma, int q, bool redraw,
+                                                   size_t max_bytes) {
+  const int w = w_, h = h_, mw = w / 8, mh = h / 8;
+  if (w < 8 || w > 320 || w % 8 || h < 8 || h > 240 || h % 8 || q < 1 || q > 63 ||
+      luma.size() < size_t(w) * size_t(h))
+    return {};
+  const bool flat = !started_;
+  const uint32_t flags = (flat ? 1u : 0u) | (redraw ? 2u : 0u) | (flat ? 4u : 0u);
+  const int32_t step = 4 * q;
+  std::vector<uint16_t> probs = flat ? std::vector<uint16_t>(vt::kProbs, 2048) : p_;
+  std::vector<uint8_t> out = {uint8_t(flags), uint8_t(q)}, rec(size_t(w) * size_t(h));
+  RangeEncoder rc{probs.data(), out};
+  vt::Coder co{rc};
+  std::vector<uint8_t> top(size_t(mw), 0);
+  for (int by = 0; by < mh; by++) {
+    int pmx = 0, pmy = 0;
+    bool lskip = false;
+    for (int bx = 0; bx < mw; bx++) {
+      auto at = [&](const std::vector<uint8_t> &f, int x, int y) {
+        return int32_t(f[size_t(std::clamp(y, 0, h - 1)) * size_t(w) + size_t(std::clamp(x, 0, w - 1))]);
+      };
+      auto cur = [&](int x, int y) { return int32_t(luma[size_t(y) * size_t(w) + size_t(x)]); };
+      // motion: +-7 around nothing, the left block's vector favoured (it codes in fewer bits)
+      int mx = 0, my = 0;
+      if (!flat) {
+        int best = INT32_MAX;
+        for (int dy = -7; dy <= 7; dy++)
+          for (int dx = -7; dx <= 7; dx++) {
+            int sad = (std::abs(dx - pmx) + std::abs(dy - pmy)) * 4;
+            for (int y = 0; y < 8 && sad < best; y++)
+              for (int x = 0; x < 8; x++)
+                sad += std::abs(cur(bx * 8 + x, by * 8 + y) - at(ref_, bx * 8 + x + dx, by * 8 + y + dy));
+            if (sad < best) best = sad, mx = dx, my = dy;
+          }
+      }
+      int32_t pred[64], lev[4][16], res[4][16];
+      bool cb[4] = {}, any = false;
+      for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) pred[y * 8 + x] = flat ? 128 : at(ref_, bx * 8 + x + mx, by * 8 + y + my);
+      for (int b = 0; b < 4; b++) {
+        int32_t in[16], c[16];
+        for (int i = 0; i < 16; i++) {
+          int y = (b / 2) * 4 + i / 4, x = (b % 2) * 4 + i % 4;
+          in[i] = cur(bx * 8 + x, by * 8 + y) - pred[y * 8 + x];
+        }
+        vt::Wht(in, c);
+        for (int i = 0; i < 16; i++) { // the arm multiplies a level by step: rounded with a dead zone of a third
+          int32_t m = std::min<int32_t>((std::abs(c[i]) + step / 3) / step, 2047);
+          lev[b][i] = c[i] < 0 ? -m : m;
+          cb[b] = cb[b] || m;
+        }
+        any = any || cb[b];
+      }
+      bool skip = !any && mx == 0 && my == 0;
+      co.Bit(vt::kSkip + (bx ? lskip : 0) + top[size_t(bx)], skip);
+      if (!skip) {
+        if (!flat) {
+          int pm[2] = {pmx, pmy}, mv[2] = {mx, my};
+          for (int c = 0; c < 2; c++) {
+            int d = mv[c] - pm[c];
+            co.Bit(vt::kMvz + 2 * uint32_t(c) + (pm[c] != 0), d != 0);
+            if (d) {
+              co.Bit(vt::kMvs + uint32_t(c), d < 0);
+              co.UVal(vt::kMvm + 8 * uint32_t(c), uint32_t(std::abs(d) - 1));
+            }
+          }
+        }
+        for (int b = 0; b < 4; b++) {
+          co.Bit(vt::kCbp + (b == 0 ? 0 : b == 3 ? 2 : 1), cb[b]);
+          if (!cb[b]) continue;
+          int last = 0;
+          for (int i = 0; i < 16; i++)
+            if (lev[b][vt::kZig[i]]) last = i;
+          uint32_t nnz = 0;
+          int32_t coef[16] = {};
+          for (int i = 0; i <= last; i++) {
+            int32_t l = lev[b][vt::kZig[i]];
+            co.Bit(vt::kNz + 3 * uint32_t(i) + std::min(nnz, 2u), l != 0);
+            if (!l) continue;
+            nnz++;
+            co.Raw(l < 0);
+            uint32_t m = uint32_t(std::abs(l)), cls = uint32_t(i) / 4;
+            co.Bit(vt::kGt1 + cls, m > 1);
+            if (m > 1) co.UVal(vt::kMag + 8 * cls, m - 2);
+            coef[vt::kZig[i]] = l * step;
+            co.Bit(vt::kEob + uint32_t(i), i == last);
+          }
+          vt::Wht(coef, res[b]);
+        }
+      }
+      for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+          int b = (y / 4) * 2 + x / 4;
+          int32_t d = cb[b] && !skip ? (res[b][(y % 4) * 4 + x % 4] + 8) >> 4 : 0;
+          rec[size_t(by * 8 + y) * size_t(w) + size_t(bx * 8 + x)] = uint8_t(std::clamp(pred[y * 8 + x] + d, 0, 255));
+        }
+      top[size_t(bx)] = skip;
+      lskip = skip;
+      pmx = skip ? 0 : mx;
+      pmy = skip ? 0 : my;
+    }
+  }
+  rc.Finish();
+  if (out.size() > max_bytes) return {};
+  ref_ = std::move(rec);
+  p_ = std::move(probs);
+  started_ = true;
+  return out;
+}
+
 PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes, Coding coding)
     : w_(width), h_(height), n_(planes), coding_(coding) {
   if (w_ < 1 || w_ > kVideoMaxW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
     n_ = 0;
     return;
   }
-  for (int p = 0; p < n_; p++) enc_.emplace_back(w_, h_);
+  for (int p = 0; p < n_; p++) enc_.emplace_back(w_, h_, kVideoMaxW); // VIDEOX planes may be wider (a canvas)
   last_.assign(size_t(w_) * size_t(h_), 0);
   pp_.assign(size_t(n_), std::vector<uint16_t>(kPixelState / 2, 2048));
 }
@@ -2487,6 +2655,13 @@ public:
     bool restore = l.known;
     ApplyHello(arm, hello);
     l.known = true;
+    // A new session: the arm may have rebooted, its clock started again from 0. The clock samples of before would
+    // still win (a short round trip ages slowly) and put every due time off by the old uptime: a black panel until
+    // they aged out (~30 s). Only this session's samples count (the setup's pings come before READY).
+    if (r.epoch != l.epoch) {
+      l.samples.clear();
+      l.clock_error_us = -1;
+    }
     l.epoch = r.epoch;
     l.epoch_seen = r.epoch;
     l.rx_next = Get16(hello + 20);

@@ -23,6 +23,10 @@ add_test(NAME vm COMMAND vm_test)
 add_executable(videox_test ${SCOUTER_KIT}/tests/videox_test.cpp)
 target_link_libraries(videox_test PRIVATE scouter_kit Threads::Threads)
 add_test(NAME videox COMMAND videox_test)
+# VIDEOT (g1v0 0.5.68+): the transform-video encoder against the core's decoder, bit for bit; random records
+add_executable(videot_test ${SCOUTER_KIT}/tests/videot_test.cpp)
+target_link_libraries(videot_test PRIVATE scouter_kit Threads::Threads)
+add_test(NAME videot COMMAND videot_test)
 add_executable(videox_fuzz ${SCOUTER_KIT}/tests/videox_fuzz.c ${SCOUTER_KIT}/src/vm/vm_gfx.c)
 add_test(NAME videox_fuzz COMMAND videox_fuzz 50000)
 # strict C11 (as the VM core's own builds): with GNU extensions glibc declares getw, which vm_test defines

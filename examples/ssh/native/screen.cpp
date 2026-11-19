@@ -621,6 +621,18 @@ static bool HasPixelVideo() {
   return any;
 }
 
+// ... and 0.5.68 or later: VIDEOT (transform-coded video).
+static bool HasVideoT() {
+  bool any = false;
+  for (g1::Arm *a : {&g1::left, &g1::right}) {
+    auto st = a->GetState();
+    if (!st.present) continue;
+    if (!st.connected || st.firmware_major * 10000 + st.firmware_minor * 100 + st.firmware_patch < 568) return false;
+    any = true;
+  }
+  return any;
+}
+
 // ... and 0.5.66 or later: VIDEOX block moves and the sprite.
 static bool HasVideoX66() {
   bool any = false;
@@ -911,7 +923,28 @@ bool ScreenMirror::StartVideoX(int planes) {
     v.room = room;
     return true;
   };
+  // VIDEOT (0.5.68+, 16 greys): its half-size frame and state first, so moving pictures keep it; the planes' record
+  // room gives way to it (a 16-grey page is ~8 KB), and without room for both the planes come first.
+  int64_t tf = -1, tst = -1;
+  int tw = std::min(320, ((w_ + 1) / 2 + 7) & ~7), th = std::min(240, ((h_ + 1) / 2 + 7) & ~7);
+  if (planes == 4 && HasVideoT()) {
+    tf = g1::Alloc(uint32_t(tw * th));
+    tst = tf >= 0 ? g1::Alloc(g1::TransformVideoEncoder::kState) : -1;
+    if (tst < 0 && tf >= 0) {
+      g1::Free(g1::Address(tf));
+      tf = -1;
+    }
+  }
   bool got = take(planes, kRecordMaxX);
+  if (!got && tst >= 0)
+    for (uint32_t room : {kRecordMaxX / 2, kRecordMaxX / 4})
+      if ((got = take(planes, room))) break;
+  if (!got && tst >= 0) {
+    LOG("screen: no room for transform-coded video beside 16 greys (arena free %d)", sk::free_memory);
+    g1::Free(g1::Address(tst));
+    g1::Free(g1::Address(tf));
+    tf = tst = -1;
+  }
   if (!got) Spare();
   for (int p = planes; p >= 2 && !got; p--)
     for (uint32_t room : {kRecordMaxX, kRecordMaxX / 2, kRecordMaxX / 4})
@@ -966,6 +999,18 @@ bool ScreenMirror::StartVideoX(int planes) {
       LOG("screen: no room for the motion stream (arena free %d)", sk::free_memory);
     }
   }
+  // VIDEOT: the half-size 8-bit frame (rounded up to whole 8 x 8 blocks) and its state, reserved above.
+  if (tst >= 0 && v.planes == 4) {
+    v.parts.push_back(tf);
+    v.parts.push_back(tst);
+    v.tw = tw;
+    v.th = th;
+    v.tframe = uint32_t(tf);
+    v.tstate = uint32_t(tst);
+  } else if (tst >= 0) {
+    g1::Free(g1::Address(tst));
+    g1::Free(g1::Address(tf));
+  }
   const int n = (1 << v.planes) - 1; // steps between black and full
   std::vector<uint8_t> map(16, 0);
   for (int k = 0; k <= n; k++) map[size_t(k ^ (k >> 1))] = uint8_t((k * 15 + n / 2) / n);
@@ -1000,6 +1045,14 @@ bool ScreenMirror::StartVideoX(int planes) {
                g1::ArenaWord(v.buf / 4 + 2), p.Const(v.mstate_tab));
       p.Ret();
     }
+    g1::Address tcall = 0; // VIDEOT at half size
+    if (v.tw) {
+      tcall = p.Here();
+      p.SleepUntil(g1::ArenaWord(v.buf / 4));
+      p.VideoT(p.Const(v.tframe), p.Const(uint32_t(v.tw)), p.Const(uint32_t(v.th)), p.Const(uint32_t(px)),
+               p.Const(uint32_t(py)), p.Const(v.buf + kHeader), g1::ArenaWord(v.buf / 4 + 2), p.Const(v.tstate));
+      p.Ret();
+    }
     std::string why;
     if (!p.Valid(&why)) {
       error_ = "the VIDEOX code: " + why;
@@ -1026,6 +1079,7 @@ bool ScreenMirror::StartVideoX(int planes) {
     v.call[size_t(i)] = at;
     v.hidden[size_t(i)] = hidden;
     v.callm[size_t(i)] = motion;
+    v.callt[size_t(i)] = tcall;
     v.epochs[size_t(i)] = arm.GetState().epoch_changes;
   }
   if (v.mw) {
@@ -1034,6 +1088,14 @@ bool ScreenMirror::StartVideoX(int planes) {
     v.mredraw = true;
     v.in_motion = false;
     LOG("screen: motion stream %d x %d, pixel coded, drawn at scale 2", v.mw, v.mh);
+  }
+  if (v.tw) {
+    v.tenc = std::make_unique<g1::TransformVideoEncoder>(v.tw, v.th);
+    v.tluma.assign(size_t(v.tw) * size_t(v.th), 0);
+    v.tlast.clear();
+    v.tq = 40;
+    v.tredraw = true;
+    LOG("screen: moving pictures as transform-coded video %d x %d (drawn at scale 2, dithered)", v.tw, v.th);
   }
   v.penc = std::make_unique<g1::PlaneVideoEncoder>(w_, h_, v.planes);
   tuned_budget_ = kMotionBudget;
@@ -1082,6 +1144,7 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g
   }
   v.redraw = false;
   v.in_motion = false;
+  v.tredraw = true; // the planes' picture is on the panel now: the next VIDEOT record draws every band
   v.k++;
   v.sent = int(msg.size());
   v.shown = v.pix;
@@ -1090,6 +1153,55 @@ bool ScreenMirror::SendVideoX(size_t max_bytes, g1::RowMove m, bool pix_ready, g
 
 // frame_ (made at detail 2: 2 x 2 blocks) as a motion-stream record: half size, 4 greys, pixel coded, drawn at
 // scale 2; the first after still pictures redraws every row (the panel shows the full stream's picture).
+// The picture (base_, toned as Tone without its levels: the codec keeps 8 bits) at half size as a VIDEOT record to
+// both arms. The quantiser follows the moving frames' budget: up when a record is over it, down while well under.
+bool ScreenMirror::SendVideoT(const ScreenOptions &o, size_t budget) {
+  Video &v = video_;
+  int a = std::clamp(o.invert, 0, 100);
+  double g = std::clamp(o.gamma, 20, 500) / 100.0;
+  uint8_t lut[256];
+  for (int x = 0; x < 256; x++) {
+    int f = x + (255 - 2 * x) * a / 100;
+    lut[x] = uint8_t(g == 1.0 ? f : int(std::pow(f / 255.0, g) * 255.0 + 0.5));
+  }
+  for (int y = 0; y < v.th; y++)
+    for (int x = 0; x < v.tw; x++) {
+      int sx = 2 * x, sy = 2 * y, sum = 0, cnt = 0;
+      for (int k = 0; k < 4; k++) {
+        int px = sx + (k & 1), py = sy + (k >> 1);
+        if (px < w_ && py < h_) sum += lut[base_[size_t(py) * size_t(w_) + size_t(px)]], cnt++;
+      }
+      v.tluma[size_t(y) * size_t(v.tw) + size_t(x)] = uint8_t(cnt ? (sum + cnt / 2) / cnt : 0);
+    }
+  if (!v.tredraw && v.tluma == v.tlast) return false; // nothing new
+  std::vector<uint8_t> rec;
+  for (int tries = 0; tries < 4 && rec.empty(); tries++) {
+    rec = v.tenc->Encode(v.tluma, v.tq, v.tredraw, std::min<size_t>(v.room, std::max<size_t>(budget * 2, 2048)));
+    if (rec.empty()) v.tq = std::min(63, v.tq + v.tq / 3 + 1);
+  }
+  if (rec.empty()) return false;
+  if (rec.size() > budget) v.tq = std::min(63, v.tq + std::max(1, v.tq / 8));
+  else if (rec.size() * 10 < budget * 7 && v.tq > 6) v.tq--;
+  int64_t lead = std::min<int64_t>(v.lead + int64_t(rec.size()) * 1000000 / 40000, 1000000);
+  std::vector<uint8_t> msg(kHeader + rec.size());
+  Put32(msg, 4, v.k);
+  Put32(msg, 8, uint32_t(rec.size()));
+  std::memcpy(msg.data() + kHeader, rec.data(), rec.size());
+  for (int i = 0; i < 2; i++) {
+    g1::Arm &arm = i == 0 ? g1::left : g1::right;
+    if (!arm.GetState().present) continue;
+    Put32(msg, 0, arm.DeviceTime(lead));
+    arm.WriteArena(v.buf, msg);
+    arm.Call(v.callt[size_t(i)]);
+  }
+  v.tlast = v.tluma;
+  v.tredraw = false;
+  v.redraw = true; // the planes' picture is no longer on the panel: its next record draws every row
+  v.k++;
+  v.sent = int(msg.size());
+  return true;
+}
+
 bool ScreenMirror::SendMotion(size_t max_bytes) {
   Video &v = video_;
   for (int y = 0; y < v.mh; y++)
@@ -1938,6 +2050,14 @@ int ScreenMirror::FrameVideoX(const ScreenOptions &o, Rect c, bool still) {
       }
     }
     exact_ = frame_;
+    if (now < moving_until_us_ && v.tw) {
+      size_t budget = std::min<size_t>(v.room, Tune());
+      if (SendVideoT(o, budget)) {
+        Count(video_.sent, 2);
+        return kLater; // the exact picture follows once it holds still
+      }
+      return v.tlast == v.tluma ? kLater : kBusy;
+    }
     if (now < moving_until_us_ && v.mw) {
       Make(o, c, 2);
       Compose();

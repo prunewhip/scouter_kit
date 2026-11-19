@@ -180,6 +180,9 @@ public:
   // VIDEOX (VM.md §3.8, g1v0 0.5.62+): planes from bitmap, levels = the level map's address.
   void VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
               ArenaWord levels, ArenaWord src, ArenaWord n, ArenaWord state);
+  // g1v0 0.5.68+ (VM.md §3.9): transform-coded 8-bit video at twice its size.
+  void VideoT(ArenaWord frame, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y, ArenaWord src, ArenaWord n,
+              ArenaWord state);
   // Bytes off ... off + n - 1 of the stored asset whose 16-byte ID is at
   // address id, to dst (VM.md §2.4).
   void AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n);
@@ -237,6 +240,8 @@ constexpr uint32_t kVideoState = 1596;
 class VideoEncoder {
  public:
   VideoEncoder(int width, int height); // 1...640 x 1...480, else Encode fails
+  // max_width: the arm's limit for the stream (640: VIDEO; 2048: a VIDEOX plane, 0.5.66+).
+  VideoEncoder(int width, int height, int max_width);
   // pixels: width x height bytes, row by row, nonzero = ink (pixels past the
   // end of a shorter span are 0). redraw: the arm draws every row, not only
   // the changed ones (the panel lost its image). Empty, and the encoder
@@ -323,6 +328,33 @@ class PlaneVideoEncoder {
   bool pstarted_ = false;
   std::vector<uint8_t> PixelPlane(const std::vector<uint8_t> &cur, const std::vector<uint8_t> &prev, int p,
                                   bool redraw, std::vector<uint16_t> &probs) const;
+};
+
+// VIDEOT (VM.md §3.9, g1v0 0.5.68+): natural video as 8-bit pictures (each pixel drawn as 2 x 2 panel pixels with an
+// ordered dither: ~61 apparent greys), coded as 8 x 8 blocks with a motion vector each and 4 x 4 Walsh-Hadamard
+// residuals, against what the arm's frame holds (closed loop: the encoder keeps exactly the arm's picture). On real
+// camera video ~1.9 KB a frame at 29 dB (256 x 240) where 4-grey planes take ~2.6 KB at 19 dB.
+class TransformVideoEncoder {
+ public:
+  static constexpr uint32_t kState = 5928; // the arm's state bytes (VM_VIDEOT_STATE)
+  TransformVideoEncoder(int width, int height); // multiples of 8, 8...320 x 8...240, else Encode fails
+  // luma: width x height bytes (0 black ... 255), row by row. q 1...63: the quantiser (larger: fewer bytes, coarser).
+  // The first record (and the first after Reset) is coded from flat grey and resets the arm's model. redraw: every
+  // band drawn (the panel was cleared or showed something else). Empty, and the encoder unchanged, for a bad size or
+  // q, or a record over max_bytes.
+  std::vector<uint8_t> Encode(std::span<const uint8_t> luma, int q, bool redraw = false,
+                              size_t max_bytes = SIZE_MAX);
+  void Reset() { started_ = false; }
+  // What the arm's frame holds after the last record went (its decoder's output, exactly).
+  const std::vector<uint8_t> &Picture() const { return ref_; }
+  int Width() const { return w_; }
+  int Height() const { return h_; }
+
+ private:
+  int w_, h_;
+  bool started_ = false;
+  std::vector<uint8_t> ref_;
+  std::vector<uint16_t> p_;
 };
 
 // Arena memory, the same on both arms and shared with the fonts and bitmaps

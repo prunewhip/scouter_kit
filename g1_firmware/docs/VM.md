@@ -94,6 +94,7 @@ in programs.
 | 0x55 | `VIDEO` | 10 | | 6 + 2e | H | §3.7 |
 | 0x56 | `ASSET_LOAD` | id, dst, off, n | | 3 + 2e | H | bytes off…off + n − 1 of the stored asset whose ID is at id to dst (§2.4) |
 | 0x57 | `VIDEOX` | 10 | | 6 + 2e | H | §3.8 (g1v0 0.5.62+) |
+| 0x58 | `VIDEOT` | 8 | | 5 + 2e | H | §3.9 (g1v0 0.5.68+) |
 
 Every other opcode is invalid (error 2). 0x00 is never an instruction, so running into zeroed memory
 stops at once. Host code (the bytes of a packet) uses the instructions marked H; stored code reached from
@@ -401,6 +402,47 @@ for the same pixels (bound: about 1 s per plane at 64 MHz; g1v0 0.5.62 runs `VID
 The library's `PlaneVideoEncoder` makes the records and `FindMove` finds a scroll; one 640 × 480 page of grey
 text at 16 levels takes ~7.5 KB, the same page scrolled 37 rows ~4.4 KB (`tests/videox_records.cpp`); in Vox's
 mirror a 540 × 471 page scrolled 40 rows takes 811 bytes instead of 8465.
+
+### 3.9 VIDEOT frame, w, h, x, y, src, n, state (g1v0 0.5.68+)
+Natural video (camera, films, games) as 8-bit pictures, transform coded with motion, drawn at twice their size.
+`frame` is the last picture, w × h bytes (0 black … 255), row by row, updated in place; w and h are multiples of 8,
+8 ≤ w ≤ 320, 8 ≤ h ≤ 240 (error 5, detail the value). `state` is `VIDEOT_STATE` = 5928 bytes: the model (128 u16
+probabilities at offset 0), a skip flag per block column (256), the dither table (296: 2 × 256 bytes), the band above
+as it was (808: 8 × 320 bytes) and the band being decoded (3368: 8 × 320). Checked before anything changes: the sizes;
+the frame, the record and the state inside the arena and not overlapping (error 3, detail the address); n ≥ 2, flags
+≤ 7 and 1 ≤ q ≤ 63 (error 4). Once the checks pass any bytes decode to some picture (every value is clamped): no
+error after a change.
+
+**Record.** u8 flags: bit 0 *reset* (every probability 2048 first), bit 1 *redraw* (every band drawn), bit 2 *flat*
+(every block predicted from grey 128, no motion vectors: a first picture); u8 q: the step is 4q; then range-coder bytes
+(the coder of §3.7, plus *raw* bits: range halved, no model). The picture is coded as 8 × 8 blocks, bands of 8 rows top
+down, left to right. Per block: *skip* = bit(0 + L + T) with L, T = 1 when the block to the left / above was skipped
+(0 outside); a skipped block keeps its pixels (flat: grey 128). Otherwise, unless flat, a motion vector: for c = x, y
+with p = the left block's vector component (0 for the first column or a skipped block): bit(3 + 2c + (p ≠ 0)) says
+it differs from p; then sign = bit(7 + c) and magnitude 1 + U(9 + 8c), clamped to 15; the vector p ± magnitude is
+clamped to −7 … 7. Then four 4 × 4 blocks (top left, top right, bottom left, bottom right): coded = bit(25 + 0, 1, 1, 2
+for blocks 0, 1, 2, 3); a coded block's levels in zigzag order (0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15):
+for i = 0 … 15: nonzero = bit(28 + 3i + min(k, 2)), k the nonzero levels so far; a nonzero level has a raw sign bit,
+magnitude 1, or 2 + U(96 + 8⌊i/4⌋) when bit(92 + ⌊i/4⌋) (clamped to 2047), and end = bit(76 + i) ends the block.
+U(m) is unary on models m … m + 7 up to 8, then Exp-Golomb in raw bits (at most 15 leading zeros).
+A coefficient is level × 4q; the residual is the 4 × 4 Walsh-Hadamard transform of the coefficients (rows then
+columns, ±1 entries in the order + + + +, + + − −, + − − +, + − + −), each value (r + 8) >> 4 (arithmetic). A pixel is
+clamp(prediction + residual, 0, 255), the prediction the frame's pixel at (x + vx, y + vy), coordinates clamped to
+the frame, as the frame was before this record (the decoder keeps the band above as it was: |vy| ≤ 7).
+
+**Drawing.** Each band is drawn when it is decoded (its pixels x0 … x1 − 1 that any block not skipped covers, all with
+the redraw or flat flag) and the panel is latched once at the end: frame pixel (c, r) is panel pixels x + 2c … x + 2c +
+1, y + 2r … y + 2r + 1 (clipped as `DRAW`), each min(15, (60v + 255b + 127) / 1020) with b = 0, 2 (even panel row,
+left and right) and 3, 1 (odd row): an ordered dither, 16 levels whose 2 × 2 average follows v within 2/255. As
+`VIDEO`: nothing changed, nothing drawn; error 7 in safe mode; it counts as a `DRAW` for §6.6; `now` is called every
+band; 128 MHz while it decodes. Bound: 1200 blocks of at most 64 coefficients (~0.8 s at 128 MHz for adversarial
+bytes; a real frame decodes in ~10–20 ms).
+
+The library's `TransformVideoEncoder` makes the records and keeps exactly the arm's picture (closed loop; `tests/
+videot_test.cpp` checks it bit for bit). On real camera video at 256 × 240: ~1.9 KB a frame at 29 dB (q 45), ~2.9 KB
+at 32 dB (q 30); Vox's motion mode with 4 grey planes took ~2.6 KB at 19 dB. Vox (0.5.68+) sends moving pictures this
+way at half size, the quantiser following the link's budget, and the exact 16-grey picture by `VIDEOX` once they hold
+still.
 
 ## 4. Fonts
 

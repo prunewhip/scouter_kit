@@ -13,7 +13,7 @@ enum op {
 	OP_SLEEP_UNTIL = 0x40, OP_WAIT_EVENT = 0x41, OP_RAISE = 0x42, OP_NOTIFY = 0x43,
 	OP_SYS_READ = 0x44, OP_SYS_WRITE = 0x45,
 	OP_FILL = 0x50, OP_BLIT = 0x51, OP_GLYPHS = 0x52, OP_DRAW = 0x53, OP_LINE = 0x54, OP_VIDEO = 0x55,
-	OP_ASSET_LOAD = 0x56, OP_VIDEOX = 0x57
+	OP_ASSET_LOAD = 0x56, OP_VIDEOX = 0x57, OP_VIDEOT = 0x58
 };
 
 /* where an instruction comes from */
@@ -141,6 +141,7 @@ static int shape(uint8_t op, struct shape *s)
 		s->k = 9;
 		return 1;
 	case OP_DRAW:
+	case OP_VIDEOT:
 		s->k = 8;
 		return 1;
 	case OP_VIDEO:
@@ -966,6 +967,98 @@ static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	return 0;
 }
 
+/* VIDEOT frame, w, h, x, y, src, n, state (§3.9): each band is drawn as soon as it is decoded (its 16 panel rows),
+ * so the panel's transfers run while the next band decodes; one latch at the end */
+struct videot_out {
+	struct vm *vm;
+	const uint32_t *v;
+	int64_t ox, oy, bx0, by0, bx1, by1;
+	int state; /* 0 nothing drawn yet, 1 drawing, -1 off the panel or the panel failed */
+};
+
+static void videot_band(void *c, uint32_t band, uint32_t x0, uint32_t x1)
+{
+	struct videot_out *o = (struct videot_out *)c;
+	struct vm *vm = o->vm;
+	const struct vm_host *h = vm->host;
+
+	h->now(h->ctx);
+	for (uint32_t r = band * 8; r < band * 8 + 8 && x0 < x1 && o->state >= 0; r++) {
+		for (uint32_t k = 0; k < 2 && o->state >= 0; k++) {
+			int64_t y = o->oy + 2 * (int64_t)r + k, a = o->ox + 2 * (int64_t)x0, b = o->ox + 2 * (int64_t)x1, off, sx0,
+				sx1;
+
+			if (y < 0 || y >= VM_PANEL_H) {
+				continue;
+			}
+			a = a < 0 ? 0 : a;
+			b = b > VM_PANEL_W ? VM_PANEL_W : b;
+			if (a >= b) {
+				continue;
+			}
+			if (o->state == 0) {
+				o->state = h->panel_begin(h->ctx, (int32_t)o->bx0, (int32_t)o->by0, (int32_t)(o->bx1 - o->bx0),
+							  (int32_t)(o->by1 - o->by0)) == 0 ? 1 : -1;
+				if (o->state < 0) {
+					break;
+				}
+			}
+			/* a panel pixel at an odd offset from ox is the right half of its frame pixel */
+			off = a - o->ox;
+			sx0 = off / 2;
+			sx1 = (b - o->ox + 1) / 2;
+			vm_videot_row(vm->arena, o->v, r, k, (uint32_t)sx0, (uint32_t)sx1, vm->row2);
+			if (off & 1) {
+				for (int64_t i = 0; i < sx1 - sx0; i++) {
+					vm->row[i] = (uint8_t)(vm->row2[i] << 4 | vm->row2[i + 1] >> 4);
+				}
+			} else {
+				memcpy(vm->row, vm->row2, (size_t)(sx1 - sx0));
+			}
+			if ((b - a) & 1) {
+				vm->row[(b - a) / 2] &= 0xF0; /* a 0 nibble after an odd last pixel (vm_host.panel_row) */
+			}
+			indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+			(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+		}
+	}
+}
+
+static int videot(struct vm *vm, const uint32_t *v, uint32_t *detail)
+{
+	const struct vm_host *h = vm->host;
+	struct videot_out o;
+	int err = vm_videot_check(vm->arena, v, detail);
+
+	if (err) {
+		return err;
+	}
+	if (vm->safe) {
+		return VM_E_SAFE;
+	}
+	o.vm = vm;
+	o.v = v;
+	o.ox = s32(v[3]);
+	o.oy = s32(v[4]);
+	o.bx0 = o.ox < 0 ? 0 : o.ox;
+	o.by0 = o.oy < 0 ? 0 : o.oy;
+	o.bx1 = o.ox + 2 * (int64_t)v[1] > VM_PANEL_W ? VM_PANEL_W : o.ox + 2 * (int64_t)v[1];
+	o.by1 = o.oy + 2 * (int64_t)v[2] > VM_PANEL_H ? VM_PANEL_H : o.oy + 2 * (int64_t)v[2];
+	o.state = o.bx0 < o.bx1 && o.by0 < o.by1 ? 0 : -1;
+	if (h->boost) {
+		h->boost(h->ctx, 1);
+	}
+	vm_videot_decode(vm->arena, v, videot_band, &o);
+	if (o.state == 1) {
+		h->panel_end(h->ctx);
+		vm->stats.draws++;
+	}
+	if (h->boost) {
+		h->boost(h->ctx, 0);
+	}
+	return 0;
+}
+
 /* ASSET_LOAD id, dst, off, n: bytes off..off+n-1 of the stored asset whose 16-byte ID is at id to dst; the
  * platform reads it (asset_read) after the arena ranges are checked */
 static int asset_load(struct vm *vm, const uint32_t *v, uint32_t *detail)
@@ -1136,6 +1229,9 @@ static int exec(struct vm *vm, struct vm_thread *t, int where, const struct ins 
 		break;
 	case OP_VIDEOX:
 		err = videox(vm, v, detail);
+		break;
+	case OP_VIDEOT:
+		err = videot(vm, v, detail);
 		break;
 	case OP_ASSET_LOAD:
 		err = asset_load(vm, v, detail);

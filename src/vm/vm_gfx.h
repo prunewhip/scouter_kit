@@ -126,6 +126,31 @@ void vm_videox_pairs(const uint8_t *arena, const uint32_t *v, uint8_t *pair);
 void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, const uint8_t *pair,
 		       uint32_t y, uint32_t x0, uint32_t x1, uint8_t *out);
 
+/* VIDEOT frame, w, h, x, y, src, n, state (§3.9, g1v0 0.5.68+): transform-coded 8-bit video drawn at twice its size
+ * (each pixel 2 x 2 panel pixels, 16 levels with a 2 x 2 ordered dither: ~61 apparent levels). frame: w x h bytes
+ * (w, h multiples of 8, 8...320 x 8...240), the last picture, updated in place; state: VM_VIDEOT_STATE bytes (the
+ * model, the band above as it was, the band being decoded, the dither table). The record: u8 flags (bit 0 reset the
+ * model, bit 1 redraw every band, bit 2 flat: predicted from grey 128, no motion), u8 q (1...63, the step is 4q),
+ * then range-coder bytes: per 8 x 8 block (rows of blocks top down) skip, a motion vector (|v| <= 7) and four 4 x 4
+ * Walsh-Hadamard blocks of residual. vm_videot_check checks everything first (errors 3, 4, 5; nothing changes);
+ * vm_videot_decode decodes band by band (8 rows) and calls band(ctx, b, x0, x1) when band b's pixels x0..x1-1
+ * changed (after it is in the frame); vm_videot_row makes one panel row (k = 0, 1) of frame row y, pixels
+ * x0..x1-1, one byte (two panel pixels) a pixel. Any bytes decode to some picture (every value is clamped): no
+ * error once the checks passed. */
+#define VM_VIDEOT_MAXW 320u
+#define VM_VIDEOT_MAXH 240u
+#define VM_VT_PROBS 128u
+#define VM_VT_TOP 256u                          /* u8 per block column: skipped in the band above */
+#define VM_VT_LUT 296u                          /* 2 x 256 bytes: a pixel's two panel pixels, rows k = 0, 1 */
+#define VM_VT_HIST 808u                         /* the band above as it was: 8 x w */
+#define VM_VT_CUR (VM_VT_HIST + 8u * VM_VIDEOT_MAXW) /* the band being decoded: 8 x w */
+#define VM_VIDEOT_STATE (VM_VT_CUR + 8u * VM_VIDEOT_MAXW)
+typedef void vm_band_fn(void *ctx, uint32_t band, uint32_t x0, uint32_t x1);
+int vm_videot_check(const uint8_t *arena, const uint32_t *v, uint32_t *detail);
+void vm_videot_decode(uint8_t *arena, const uint32_t *v, vm_band_fn *band, void *ctx);
+void vm_videot_row(const uint8_t *arena, const uint32_t *v, uint32_t y, uint32_t k, uint32_t x0, uint32_t x1,
+		   uint8_t *out);
+
 #ifdef __cplusplus
 }
 #endif

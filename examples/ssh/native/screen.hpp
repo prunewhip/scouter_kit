@@ -213,6 +213,7 @@ private:
                   scouter_kit::g1::BlockMove block = {});
   scouter_kit::g1::Sprite PointerSprite(); // the sprite fields for the next record (and where it then is)
   void LevelMap(bool coarse);              // the arms' level map: exact (16 greys) or the top two planes only
+  bool SendVideoT(const ScreenOptions &o, size_t budget); // base_ at half size as VIDEOT (moving): false, nothing sent
   bool SendMotion(size_t max_bytes); // frame_ (at detail 2) on the motion stream: false when larger than max_bytes
   int VideoReady();                                    // kShown when a record may go, else kBusy or kSame
   bool SendVideo(size_t max_bytes);                    // frame_ as a record: false when larger than max_bytes
@@ -305,6 +306,15 @@ private:
     std::unique_ptr<scouter_kit::g1::PlaneVideoEncoder> menc;
     std::vector<uint8_t> mpix;
     bool in_motion = false, mredraw = true;
+    // Transform-coded video (g1v0 0.5.68+, VIDEOT): moving pictures at half size as 8-bit pictures with motion
+    // vectors, drawn at scale 2 with a dither (16 greys, ~61 apparent): far better than 4 grey planes per byte
+    int tw = 0, th = 0;           // 0: none
+    uint32_t tframe = 0, tstate = 0;
+    std::array<uint32_t, 2> callt{};
+    std::unique_ptr<scouter_kit::g1::TransformVideoEncoder> tenc;
+    std::vector<uint8_t> tluma, tlast;
+    int tq = 40;                  // the quantiser, self-tuned to the moving frames' budget
+    bool tredraw = true;          // the next VIDEOT record draws every band (the panel showed the planes)
     // 0.5.66+: block moves, and the pointer as VIDEOX's sprite (64 bytes at sprite_at) instead of in the picture
     bool v66 = false;
     bool coarse_map = false; // auto greys moving: the level map reads only the top two planes (no stale low planes)

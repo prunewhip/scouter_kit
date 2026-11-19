@@ -562,19 +562,69 @@ int main() {
       int r = mm.Frame(held.data(), 540, 471, gs, go);
       return r == ssh::ScreenMirror::kShown && mm.stats().detail == 1;
     }, 5000));
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
-    {
+    auto wrong_mm = [&] {
       std::vector<uint8_t> pv;
       int pw = 0, ph = 0;
-      CHECK(mm.Preview(&pv, &pw, &ph));
+      if (!mm.Preview(&pv, &pw, &ph)) return -1;
       const uint8_t *pl = g1::emulator::Panel(0);
       int wrong = 0;
       for (int y = 0; y < ph; y++)
         for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
-      std::printf("greys auto 0.5.64: %d of %d pixels differ from the exact picture after the motion\n", wrong, pw * ph);
-      CHECK(wrong == 0);
-    }
+      return wrong;
+    };
+    CHECK(WaitFor([&] { return wrong_mm() == 0; }, 4000)); // the exact picture drawn (a full redraw)
+    std::printf("greys auto 0.5.64: %d of 254340 pixels differ from the exact picture after the motion\n", wrong_mm());
     mm.Stop();
+
+    // 0.5.68+: moving pictures as transform-coded video (VIDEOT: half size, 8 bits, dithered 16 levels); back to
+    // the still picture, every pixel exact again
+    g1::emulator::SetFirmware(5, 68);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 68; }, 10000));
+    {
+      ssh::ScreenMirror tm;
+      CHECK(tm.Start(100, 9, &error));
+      int tmoving = 0, tbytes = 0, levels_seen = 0;
+      for (int f = 0; f < 8; f++) {
+        auto vid = video(f);
+        int r = 0;
+        CHECK(WaitFor([&] { r = tm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+        if (f >= 2 && tm.stats().detail == 2) {
+          tmoving++;
+          tbytes = std::max(tbytes, tm.stats().bytes);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      {
+        bool seen[16] = {};
+        const uint8_t *pl = g1::emulator::Panel(0);
+        for (int y = 0; y < 471; y++)
+          for (int x = 100; x < 640; x++) seen[pl[size_t(y) * 640 + size_t(x)] & 15] = true;
+        for (bool b : seen) levels_seen += b;
+      }
+      std::printf("greys auto 0.5.68: %d moving frames as VIDEOT, largest %d bytes (0.5.62 path: %d), %d levels on "
+                  "the panel while moving\n", tmoving, tbytes, moving_bytes, levels_seen);
+      CHECK(tmoving >= 3);
+      CHECK(levels_seen > 4); // more than the 4 greys of the plane motion mode
+      CHECK(WaitFor([&] {
+        int r = tm.Frame(held.data(), 540, 471, gs, go);
+        return r == ssh::ScreenMirror::kShown && tm.stats().detail == 1;
+      }, 5000));
+      auto wrong_tm = [&] {
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!tm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+        return wrong;
+      };
+      CHECK(WaitFor([&] { return wrong_tm() == 0; }, 4000)); // the exact picture drawn (a full redraw)
+      std::printf("greys auto 0.5.68: %d of 254340 pixels differ from the exact picture after the motion\n", wrong_tm());
+      tm.Stop();
+    }
 
     // 0.5.66+: the pointer as the arms' sprite (a move costs a tiny record, no frame), and a dragged window as a
     // block move; the panel always the exact picture (with the arrow over it)
@@ -612,6 +662,7 @@ int main() {
     CHECK(WaitFor([&] { return sm.Frame(d0.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 5000));
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     CHECK(exact() == 0);
+
     int frames0 = sm.frames();
     auto at = [](int v) { return (v * 10000 + 538) / 539; };
     auto aty = [](int v) { return (v * 10000 + 469) / 470; };
@@ -678,17 +729,27 @@ int main() {
         int r = 0;
         CHECK(WaitFor([&] { r = cm.Frame(pano.data(), PW, PH, PW * 4, po); return r == ssh::ScreenMirror::kShown; }, 5000));
         if (step) bytes_after = std::max(bytes_after, cm.stats().bytes);
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        const uint8_t *pl = g1::emulator::Panel(0);
-        int wrong = 0;
-        for (int y = 0; y < 471; y++)
-          for (int x = 0; x < 540; x++) {
-            uint8_t want = pano[(size_t(y + 4) * PW + size_t(po.src_x + x)) * 4] ? 15 : 0;
-            wrong += pl[size_t(y) * 640 + size_t(x + 100)] != want;
-          }
-        CHECK(window_of(1, 0, 9) == po.src_x); // the right eye: 100 to the left, 9 lower (Start(100, 9))
-        if (wrong) std::printf("canvas step %d: %d pixels wrong\n", step, wrong);
-        CHECK(wrong == 0);
+        auto left_wrong = [&] {
+          const uint8_t *pl = g1::emulator::Panel(0);
+          int wrong = 0;
+          for (int y = 0; y < 471; y++)
+            for (int x = 0; x < 540; x++) {
+              uint8_t want = pano[(size_t(y + 4) * PW + size_t(po.src_x + x)) * 4] ? 15 : 0;
+              wrong += pl[size_t(y) * 640 + size_t(x + 100)] != want;
+            }
+          return wrong;
+        };
+        // both eyes at the window (the first step sends the whole panorama: a while over the link)
+        CHECK(WaitFor([&] { return left_wrong() == 0 && window_of(1, 0, 9) == po.src_x; }, 3000));
+        if (left_wrong()) {
+          int hist[16] = {};
+          const uint8_t *pl = g1::emulator::Panel(0);
+          for (int i = 0; i < 640 * 480; i++) hist[pl[i] & 15]++;
+          auto st = cm.stats();
+          std::printf("canvas step %d: %d pixels wrong; path %d pan %d bytes %d; panel 0:%d 5:%d 10:%d 15:%d other:%d\n", step,
+                      left_wrong(), st.path, st.pan, st.bytes, hist[0], hist[5], hist[10], hist[15],
+                      640 * 480 - hist[0] - hist[5] - hist[10] - hist[15]);
+        }
       }
       // A head turn the phone does not send: 30 degrees a second to the left (GYR_Y +30000 mdps) for ~0.5 s on both
       // arms; each arm moves the window itself, ~16 px a degree (~240 px), both eyes the same, and the panel is
@@ -701,7 +762,9 @@ int main() {
       int wl = window_of(0, 100, 0), wr = window_of(1, 0, 9);
       std::printf("panorama canvas: a turn of ~15 degrees left on the arms alone: window %d -> left eye %d, right eye "
                   "%d (%d frames sent meanwhile)\n", po.src_x, wl, wr, cm.stats().frames - frames_before);
-      CHECK(wl >= 0 && wl == wr);
+      // each arm ticks on its own clock, so they may differ by one tick's turn (~10 px here) until the phone's next
+      // anchor (every head-turn update) puts both at its window again
+      CHECK(wl >= 0 && wr >= 0 && std::abs(wl - wr) <= 12);
       CHECK(wl < po.src_x - 180 && wl > po.src_x - 300);
       std::printf("panorama canvas: head turns %d bytes at most, the arms' own pan %s\n", bytes_after,
                   cm.stats().pan ? "running" : "NOT running");
