@@ -143,9 +143,11 @@ class Settings(context: Context) {
     fun unlisten(l: android.content.SharedPreferences.OnSharedPreferenceChangeListener) = prefs.unregisterOnSharedPreferenceChangeListener(l)
     // For Native.screenFrame.
     fun screenOptions() = intArrayOf(listOf(FIT, FILL, STRETCH).indexOf(screenFit).coerceAtLeast(0), screenPanX, screenPanY,
-        screenZoom, screenRotate, screenOutX, screenOutY, screenOutW, screenOutH, screenInvertPct, screenLevels,
+        screenZoom, screenRotate, screenOutX, screenOutY, screenOutW, screenOutH, screenInvertPct,
+        if (Session.voiceControl) 16 else screenLevels, // voice control: 16 greys whatever the look
         screenContrast, if (screenSharpen) 1 else 0, if (screenHideCase) 1 else 0, if (screenHideFolded) 1 else 0,
-        screenGamma, screenThreshold, if (screenSteady) 1 else 0, if (screenDither) 1 else 0, screenDetail, screenBudget,
+        screenGamma, screenThreshold, if (screenSteady) 1 else 0, if (screenDither) 1 else 0,
+        if (Session.voiceControl) 1 else screenDetail, screenBudget, // voice control: every pixel, never coarser
         Session.cursorX, Session.cursorY, if (screenClean) 1 else 0, screenCropTop, screenCropBottom,
         Session.overlayGen, // a panel changed (the capture sends the frame again)
         // Heads-up (Alt+0) on the screen too: the head's angle decides, held on while a panel is open.

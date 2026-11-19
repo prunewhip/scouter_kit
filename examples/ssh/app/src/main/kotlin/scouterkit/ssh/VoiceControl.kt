@@ -329,7 +329,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         partial = ""
         heard = t
         lastSpeechAt = SystemClock.elapsedRealtime()
-        val st = VcGrammar.State(typing, zoom != null, notifs != null, cols(), rows(), panel != null)
+        val st = VcGrammar.State(typing, zoom != null, notifs != null, cols(), rows(), panel != null, host.target() == "terminal")
         val cmds = VcGrammar.parse(t, st)
         Log.i(ScouterService.TAG, "voice control: \"$t\" -> ${cmds.joinToString { it.javaClass.simpleName }}")
         for (c in cmds) {
@@ -1034,31 +1034,40 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         val dim = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(170, 170, 170); typeface = bold; textSize = 13f }
         val line = Paint().apply { color = Color.rgb(85, 85, 85); strokeWidth = 1f }
 
-        // the grid over the target
+        // the grid over the target: dotted lines and the cells' names, nothing behind them (the picture shows through;
+        // each letter has a thin dark edge so it reads over anything)
         if (gridOn && host.target() != "terminal") {
             val cols = cols()
             val rows = rows()
             val cw = v.w / cols
             val ch = v.h / rows
+            line.pathEffect = android.graphics.DashPathEffect(floatArrayOf(2f, 3f), 0f)
             for (i in 1 until cols) c.drawLine(v.x + i * cw, v.y, v.x + i * cw, v.y + v.h, line)
             for (j in 1 until rows) c.drawLine(v.x, v.y + j * ch, v.x + v.w, v.y + j * ch, line)
-            val lab = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(230, 230, 230); typeface = bold; textSize = minOf(12f, ch * 0.42f, cw * 0.38f) }
-            val labBg = Paint().apply { color = dark }
+            val size = minOf(12f, ch * 0.42f, cw * 0.38f)
+            val lab = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(235, 235, 235); typeface = bold; textSize = size }
+            val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = dark; typeface = bold; textSize = size; style = Paint.Style.STROKE; strokeWidth = 2.5f
+            }
             for (i in 0 until cols) for (j in 0 until rows) {
                 val l = "${'A' + i}${j + 1}"
-                val tw = lab.measureText(l)
-                val x = v.x + i * cw + 2
-                val y = v.y + j * ch + 2
-                c.drawRect(x, y, x + tw + 4, y + lab.textSize + 3, labBg)
-                c.drawText(l, x + 2, y + lab.textSize, lab)
+                val x = v.x + i * cw + 3
+                val y = v.y + j * ch + 2 + size
+                c.drawText(l, x, y, edge)
+                c.drawText(l, x, y, lab)
             }
-            // the cell just used: filled bright for a moment
+            // the cell just used: a bright frame and its name large for a moment
             val f = flash
             if (f != null && now < flashUntil) {
                 val r = cellRect(f)
-                c.drawRect(r, Paint().apply { color = Color.WHITE })
-                val big = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = dark; typeface = bold; textSize = minOf(22f, r.height() * 0.6f) }
-                c.drawText(f.label, r.centerX() - big.measureText(f.label) / 2, r.centerY() + big.textSize / 3, big)
+                c.drawRect(r, Paint().apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 3f })
+                val bigSize = minOf(22f, r.height() * 0.6f)
+                val big = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; typeface = bold; textSize = bigSize }
+                val bigEdge = Paint(big).apply { color = dark; style = Paint.Style.STROKE; strokeWidth = 3f }
+                val bx = r.centerX() - big.measureText(f.label) / 2
+                val by = r.centerY() + bigSize / 3
+                c.drawText(f.label, bx, by, bigEdge)
+                c.drawText(f.label, bx, by, big)
             }
             zoom?.let { z ->
                 val r = cellRect(z)

@@ -35,7 +35,7 @@ object VcGrammar {
     }
 
     data class State(val typing: Boolean = false, val zoomed: Boolean = false, val notifs: Boolean = false,
-                     val cols: Int = 8, val rows: Int = 12, val panel: Boolean = false)
+                     val cols: Int = 8, val rows: Int = 12, val panel: Boolean = false, val terminal: Boolean = false)
 
     private val NATO = mapOf("alpha" to 'a', "alfa" to 'a', "bravo" to 'b', "charlie" to 'c', "delta" to 'd', "echo" to 'e',
         "foxtrot" to 'f', "fox" to 'f', "golf" to 'g', "hotel" to 'h', "india" to 'i', "juliet" to 'j', "juliett" to 'j',
@@ -113,6 +113,16 @@ object VcGrammar {
         if (w.isEmpty()) return emptyList()
         val p = w.joinToString(" ")
         if (p in STOP) return listOf(Cmd.Stop)
+        target(w)?.let { return listOf(it) }
+        // the terminal takes dictation: what is said is typed ("send" / "enter" presses Enter), no grid, no "type"
+        if (st.terminal && !st.panel) {
+            if (p in CLOSE) return listOf(Cmd.Stop)
+            if (p in setOf("help", "help me", "what can i say", "commands")) return listOf(Cmd.Help)
+            if (p in TYPE_WORDS || p in TYPE_END) return emptyList()
+            val scroll = w.size <= 3 && (w[0] in SCROLL || w[0] == "page") && w.any { it in setOf("up", "down") }
+            if (scroll) return listOf(Cmd.Scroll(if (w.contains("up")) "up" else "down", w.mapNotNull { number(it) }.firstOrNull { it in 1..10 } ?: 1))
+            return typing(raw, w, p).filter { it != Cmd.TypeToggle }
+        }
         if (st.typing) return typing(raw, w, p)
         if (p in TYPE_WORDS) return listOf(Cmd.TypeToggle)
         if (p in setOf("help", "help me", "what can i say", "show help", "commands", "yelp", "kelp", "health", "hell"))
@@ -168,14 +178,6 @@ object VcGrammar {
         if (p in ENTER) return listOf(Cmd.Enter)
         if (p in BACKSPACE) return listOf(Cmd.Backspace(1))
 
-        // where the glasses look: "phone", "switch to laptop"
-        val target = when (w.last()) {
-            "phone", "laptop", "desktop", "terminal", "computer" -> w.last()
-            else -> null
-        }
-        if (target != null && (w.size == 1 || w[0] in setOf("switch", "show", "go", "use", "control"))) {
-            return listOf(Cmd.Target(if (target == "computer") "laptop" else target))
-        }
 
         // the assistant: "ask what's the weather", "claude summarize this", "google pizza near me"
         val q0 = w[0]
@@ -217,6 +219,19 @@ object VcGrammar {
             return listOf(Cmd.Tap(cell, verbOf(w)))
         }
         return listOf(Cmd.Other(raw.trim()))
+    }
+
+    // Where the glasses look: "phone", "terminal", "switch to laptop", "go to the terminal", "laptop screen".
+    private fun target(w: List<String>): Cmd? {
+        var ws = w
+        if (ws.size > 1 && ws.last() == "screen") ws = ws.dropLast(1)
+        val t = when (ws.lastOrNull()) {
+            "phone", "laptop", "desktop", "terminal", "computer", "shell", "claude's terminal" -> ws.last()
+            else -> return null
+        }
+        val lead = ws.dropLast(1).filter { it !in setOf("to", "the", "my", "on") }
+        if (lead.isNotEmpty() && (lead.size > 1 || lead[0] !in setOf("switch", "show", "go", "use", "control", "open", "back"))) return null
+        return Cmd.Target(when (t) { "computer" -> "laptop"; "shell" -> "terminal"; else -> t })
     }
 
     // A swipe moves the page the way the finger goes; scrolling names where the view goes.
