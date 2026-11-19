@@ -4594,6 +4594,7 @@ class ScouterService : Service() {
     // ------------------------------------------------ voice control (VoiceControl)
 
     private val vc: VoiceControl by lazy { VoiceControl(this, vcHost) }
+    private var vcHeadUp: Boolean? = null // "Always visible" before voice control turned it on (null: untouched)
     private val vcRedraw: Runnable = Runnable { if (vc.on) vc.draw() }
     private val vcHost: VoiceControl.Host = object : VoiceControl.Host {
         override val work: Handler get() = this@ScouterService.work
@@ -4660,6 +4661,26 @@ class ScouterService : Service() {
         override fun vault(): Vault = this@ScouterService.vault
         override fun claudeServer(): Settings.Server? = settings.servers().firstOrNull { it.local } ?: settings.active()
         override fun terminalScroll(dir: Int) = scroll(dir, 1, raw = true)
+        override fun alwaysOn(on: Boolean) {
+            if (on) {
+                if (vcHeadUp == null) {
+                    vcHeadUp = settings.phoneForce
+                    if (!settings.phoneForce) {
+                        settings.phoneForce = true
+                        refresh()
+                    }
+                }
+                if (Session.blank) display(true, "voice control")
+            } else {
+                vcHeadUp?.let { was ->
+                    if (settings.phoneForce != was) {
+                        settings.phoneForce = was
+                        refresh()
+                    }
+                }
+                vcHeadUp = null
+            }
+        }
         override fun onState() {
             Session.voiceControl = vc.on
             Session.changed()

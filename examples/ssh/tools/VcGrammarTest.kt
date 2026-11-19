@@ -86,6 +86,14 @@ fun main() {
     check("reply", one("reply 2 on my way", n), Cmd.Notif("reply", 2, "on my way"))
     check("reply with", one("Reply two with sounds good", n), Cmd.Notif("reply", 2, "sounds good"))
     check("close", one("close", n), Cmd.Notif("close"))
+    // closing: a box first, else voice control; typed while typing
+    check("close", one("close"), Cmd.Stop)
+    check("close panel", one("close", VcGrammar.State(panel = true)), Cmd.Cancel)
+    check("close notifs", one("close", n), Cmd.Notif("close"))
+    check("close zoom", one("close", z), Cmd.Cancel)
+    check("voice off typing", one("voice off", t), Cmd.Stop)
+    check("done typing", one("done", t), Cmd.TypeToggle)
+    check("that's all", one("That's all."), Cmd.Stop)
     println(if (failures == 0) "vc grammar: ok" else "vc grammar: $failures failures")
     if (failures > 0) kotlin.system.exitProcess(1)
 }

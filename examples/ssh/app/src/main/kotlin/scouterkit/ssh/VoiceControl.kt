@@ -23,9 +23,11 @@ import kotlin.math.log10
 import kotlin.math.sqrt
 
 // Voice control: the phone or the laptop worked by voice alone, through the glasses' microphone, with a heads-up
-// display on the glasses that always says what it hears and what it did. On (Alt+;, the left TouchBar's double tap,
-// "voice control" in the app): the microphone stays open and every phrase is a command; or held (the left TouchBar
-// held: push to talk), for one phrase. The glasses show a grid over what they show (the phone's screen, the laptop's,
+// display on the glasses that always says what it hears and what it did. Woken by holding the left TouchBar and
+// saying the first command ("phone", "C4", "notifications"): it stays on, the microphone open, every phrase a command,
+// and the display always on (whatever the head's angle) until it is closed ("voice off", "close", the left
+// TouchBar's double tap, Alt+;, 10 idle minutes), when the display goes back to how it was (head-up). Held again
+// while on: what is said is acted on when it is let go (no waiting for the pause). The glasses show a grid over what they show (the phone's screen, the laptop's,
 // the phone's desktop): "C4" taps C4 there. "type" types what follows into the field with the focus ("backspace"
 // deletes the word before, "send" is Enter, "type" again ends it); "notifications" lists them ("open 2", "reply 2
 // …"); "ask …" asks Claude, whose answer shows; "open maps", "back", "home", "scroll down", "zoom C4"; anything else
@@ -48,6 +50,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         fun vault(): Vault
         fun claudeServer(): Settings.Server?
         fun terminalScroll(dir: Int)
+        fun alwaysOn(on: Boolean) // the display always on while voice control is (true), as it was before (false)
         fun onState() // Session.changed()
     }
 
@@ -93,6 +96,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         feedback = ""
         partial = ""
         lastSpeechAt = SystemClock.elapsedRealtime()
+        host.alwaysOn(true)
         listen(false)
         host.work.removeCallbacks(idleCheck)
         host.work.postDelayed(idleCheck, 30000)
@@ -111,33 +115,35 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         listener?.stopNow()
         listener = null
         status = ""
+        holding = false
         clearHud()
+        host.alwaysOn(false)
         if (why.isNotEmpty()) Log.i(ScouterService.TAG, "voice control: $why")
         host.onState()
     }
 
-    // The left TouchBar held: with voice control on, its words are already coming (nothing to start: the marker
-    // flashes); off, a phrase of its own with the same display, ended when let go.
+    // The left TouchBar held: off, it wakes voice control (STARTING at once, LIVE once sound comes) and the first
+    // command is what is said while holding; it stays on after. On, the words are already coming: what is said is
+    // acted on when it is let go.
+    private var holding = false
+
     fun pttStart() {
+        holding = true
         if (on) {
             pulse = !pulse
-            say("● LISTENING: speak")
+            say("● HOLDING: speak, let go to do it")
             return
         }
-        ptt = true
-        typing = false
-        zoom = null
-        notifs = null
-        panel = null
-        feedback = ""
-        partial = ""
-        listen(true)
-        host.onState()
+        start()
+        feedback = "◌ waking: keep holding and say a command"
+        feedbackAt = SystemClock.elapsedRealtime()
+        draw()
     }
 
     fun pttEnd() {
-        if (!ptt) return
-        listener?.flushAndStop()
+        if (!holding) return
+        holding = false
+        listener?.flushNow()
     }
 
     private val idleCheck = object : Runnable {
@@ -203,6 +209,13 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
             flushReq = true
         }
 
+        @Volatile private var flushKeep = false
+
+        // What is said so far is a phrase now (the hold let go); it goes on listening.
+        fun flushNow() {
+            flushKeep = true
+        }
+
         override fun run() {
             var mic: Mic? = null
             var reason = ""
@@ -252,6 +265,11 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
                         post { if (listener === this) drawSoon() }
                     }
                     if (flushReq) break
+                    if (flushKeep) {
+                        flushKeep = false
+                        val t = rec.flush()
+                        if (t.isNotEmpty()) post { if (listener === this) phrase(t) }
+                    }
                 }
                 if (flushReq) {
                     val t = rec.flush()
@@ -306,7 +324,7 @@ class VoiceControl(private val ctx: Context, private val host: Host) {
         partial = ""
         heard = t
         lastSpeechAt = SystemClock.elapsedRealtime()
-        val st = VcGrammar.State(typing, zoom != null, notifs != null, cols(), rows())
+        val st = VcGrammar.State(typing, zoom != null, notifs != null, cols(), rows(), panel != null)
         val cmds = VcGrammar.parse(t, st)
         Log.i(ScouterService.TAG, "voice control: \"$t\" -> ${cmds.joinToString { it.javaClass.simpleName }}")
         for (c in cmds) {

@@ -35,7 +35,7 @@ object VcGrammar {
     }
 
     data class State(val typing: Boolean = false, val zoomed: Boolean = false, val notifs: Boolean = false,
-                     val cols: Int = 8, val rows: Int = 12)
+                     val cols: Int = 8, val rows: Int = 12, val panel: Boolean = false)
 
     private val NATO = mapOf("alpha" to 'a', "alfa" to 'a', "bravo" to 'b', "charlie" to 'c', "delta" to 'd', "echo" to 'e',
         "foxtrot" to 'f', "fox" to 'f', "golf" to 'g', "hotel" to 'h', "india" to 'i', "juliet" to 'j', "juliett" to 'j',
@@ -93,7 +93,9 @@ object VcGrammar {
     }
 
     private val STOP = setOf("stop listening", "voice off", "voice control off", "stop voice", "stop voice control",
-        "exit voice control", "goodbye", "good bye", "turn off voice control")
+        "exit voice control", "goodbye", "good bye", "turn off voice control", "close voice", "close voice control")
+    // Closes the box shown (notifications, help, Claude, a zoom), else voice control itself.
+    private val CLOSE = setOf("close", "exit", "sleep", "go to sleep", "that's all", "thats all", "done")
     private val TYPE_WORDS = setOf("type", "typing", "start typing", "dictate", "type mode", "keyboard")
     private val TYPE_END = setOf("type", "stop typing", "done typing", "end typing", "finish typing", "typing off",
         "exit typing", "stop", "done")
@@ -137,6 +139,8 @@ object VcGrammar {
                 (w[0] in setOf("open", "show", "read", "number") || w.size == 1) && n > 0 -> return listOf(Cmd.Notif("open", n))
             }
         }
+
+        if (p in CLOSE) return listOf(if (st.panel) Cmd.Cancel else Cmd.Stop)
 
         // the phone's own buttons
         when (p) {
