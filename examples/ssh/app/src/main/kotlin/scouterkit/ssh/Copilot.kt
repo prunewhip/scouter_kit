@@ -28,6 +28,16 @@ object Copilot {
     @Volatile private var session: String? = null
     @Volatile private var busy = false
     @Volatile private var live: Live? = null
+    @Volatile var startedAt = 0L // wall clock, when it was switched on
+        private set
+    @Volatile var partialCue = "" // the cue as it is being written (streamed), else ""
+        private set
+
+    // For the glasses' interview view: the newest cues (oldest first) and the last lines heard (who, text).
+    fun cues(n: Int): List<Turn> = synchronized(turns) { turns.filter { it.state == "done" || it.state == "thinking" }.takeLast(n) }
+    fun heardTail(n: Int): List<Pair<String, String>> = synchronized(lock) { heard.takeLast(n).toList() }
+
+    const val MODEL = "claude-sonnet-5-5" // Copilot only (the user's choice); every other Claude in Vox keeps its own
 
     // Claude kept running through the whole talk: one `claude -p` reading and writing JSON lines over one SSH channel,
     // so a cue costs only the model's answer (~2.6 s) instead of Claude starting each time (~7 s more on the phone,
@@ -43,7 +53,9 @@ object Copilot {
             val settings = Settings(c)
             val s = settings.servers().firstOrNull { it.local } ?: settings.active()
                 ?: throw IllegalStateException("no server for Claude (Terminal tab)")
-            val cmd = CarClaude.PATH + "cd ~ 2>/dev/null; ANTHROPIC_MODEL=haiku exec claude -p --input-format stream-json " +
+            // its own folder: Claude Code there loads no project notes or memory, so it knows the briefing and nothing else
+            val cmd = CarClaude.PATH + "mkdir -p ~/.vox-copilot && cd ~/.vox-copilot; ANTHROPIC_MODEL=$MODEL exec claude -p --effort low " +
+                "--input-format stream-json " +
                 "--output-format stream-json --verbose --include-partial-messages --allowedTools '' --append-system-prompt " +
                 CarClaude.q(system) + " 2>&1"
             stream = Bootstrap(Vault(c)).stream(s.host, s.port, s.user, cmd, input = true)
@@ -116,8 +128,8 @@ object Copilot {
         val s = t.trim()
         if (s.length < 6 || s.uppercase(Locale.US).startsWith("PASS") || now - partialAt < 350 || !ScouterService.running) return
         partialAt = now
-        val lines = s.lines().map { it.trim().trimStart('-', '•', '*', ' ') }.filter { it.isNotEmpty() }.take(4).joinToString("\n")
-        runCatching { ScouterService.send(c, ScouterService.ACTION_PANEL, "do" to "copilot:${question.take(160)}\u0001$lines…") }
+        partialCue = s.lines().map { it.trim().trimStart('-', '•', '*', ' ') }.filter { it.isNotEmpty() }.take(4).joinToString("\n")
+        changed()
     }
     private var pending: StringBuilder? = null // a question still being said
     private var pendingAt = 0L
@@ -149,8 +161,29 @@ object Copilot {
 
     // On: Listen mode is switched on with it (its microphone service starts while Vox shows) and kept reading at
     // once, a new conversation with Claude.
+    @Volatile private var appContext: Context? = null
+
+    // Claude started and briefed before the first question: the briefing (system prompt) read, the cache warm, so the
+    // first cue is as quick as the rest.
+    private fun brief(c: Context) {
+        if (busy) return
+        busy = true
+        set("Briefing Claude…")
+        try {
+            val l = liveFor(c)
+            val (r, why) = l?.ask("The ${if (mode(c) == "interview") "interview" else "conversation"} is about to start. " +
+                "Read your briefing now. Reply with exactly READY.", 45_000) {} ?: (null to "Claude could not start")
+            if (r == null) Log.w(ScouterService.TAG, "copilot: briefing: $why")
+            set(if (r != null) "Ready" else "Listening (Claude starts at the first question)")
+        } finally {
+            busy = false
+            changed()
+        }
+    }
+
     fun start(context: Context) {
         val c = context.applicationContext
+        appContext = c
         if (on) return
         synchronized(lock) {
             heard.clear()
@@ -162,11 +195,15 @@ object Copilot {
         Settings(c).listenOn = true
         runCatching { ListenService.ensure(c) }
         set("Listening")
-        if (brain(c) == "claude") Thread({ liveFor(c) }, "vox-copilot-warm").start() // Claude starting while they talk
+        startedAt = System.currentTimeMillis()
+        partialCue = ""
+        if (ScouterService.running) runCatching { ScouterService.send(c, ScouterService.ACTION_PANEL, "do" to "copilotview") }
+        if (brain(c) == "claude") Thread({ brief(c) }, "vox-copilot-brief").start()
         Thread({
             while (on) {
                 Listen.looking(30_000)
-                val ask = synchronized(lock) {
+                // while Claude is busy (the briefing, an answer) a question waits rather than being dropped
+                val ask = if (busy) null else synchronized(lock) {
                     val p = pending
                     if (p != null && SystemClock.elapsedRealtime() >= pendingAt) {
                         pending = null
@@ -186,6 +223,8 @@ object Copilot {
         set("")
         live?.close()
         live = null
+        partialCue = ""
+        if (ScouterService.running) runCatching { ScouterService.send(appContext ?: return@runCatching, ScouterService.ACTION_PANEL, "do" to "copilotclose") }
         Log.i(ScouterService.TAG, "copilot: off")
     }
 
@@ -206,7 +245,16 @@ object Copilot {
     // answered) but never start an answer.
     fun heard(c: Context, text: String, who: String, personId: String?) {
         if (!on || text.isBlank()) return
+        try {
+            heardLine(c, text, who, personId)
+        } finally {
+            changed() // the view's transcript
+        }
+    }
+
+    private fun heardLine(c: Context, text: String, who: String, personId: String?) {
         val mine = personId == Speakers.ME
+        val continuous = mode(c) == "interview" // every turn of theirs is read; Claude says PASS when no answer is due
         synchronized(lock) {
             heard += (if (mine) "me" else who.ifEmpty { "them" }) to text.trim()
             if (heard.size > 400) {
@@ -220,7 +268,7 @@ object Copilot {
             if (p != null) { // more of a question still being said: it waits a little longer (5 s in all at most)
                 p.append(' ').append(text.trim())
                 pendingAt = minOf(now + SETTLE_MS, pendingFirst + 5000)
-            } else if (isQuestion(text) && now - lastAuto > 4000) {
+            } else if ((continuous || isQuestion(text)) && now - lastAuto > (if (continuous) 1500 else 4000)) {
                 pending = StringBuilder(text.trim())
                 pendingFirst = now
                 pendingAt = now + SETTLE_MS
@@ -241,14 +289,18 @@ object Copilot {
         Thread({ request(c, last ?: "", false) }, "vox-copilot-ask").start()
     }
 
+    // Claude's briefing: what it is, what it is given, when to speak and how. Interview mode has its own (the user's
+    // design: Claude answers only what the user should say next); the other modes keep the shorter one.
     private fun system(c: Context): String {
+        val prep = prep(c).trim()
+        val background = if (prep.isEmpty()) "\n\nNo background was given: never state facts about the user; give the shape of a strong answer instead."
+            else "\n\n=== THE USER'S BACKGROUND (the only source of facts about them) ===\n$prep\n=== END OF BACKGROUND ==="
+        if (mode(c) == "interview") return INTERVIEW + background
         val what = when (mode(c)) {
-            "interview" -> "a job interview (the user is the candidate; practice or real)"
             "meeting" -> "a meeting"
             "sales" -> "a sales call (the user sells)"
             else -> "a conversation"
         }
-        val prep = prep(c).trim()
         return "You are a silent copilot for the user during $what. You are given the conversation as it is heard (speech " +
             "recognition: expect small mistakes and missing words; \"me\" is the user, other names or \"them\" are the others). " +
             "When asked, write what the user could say next as cues they glance at on smart glasses while talking: at most 3 " +
@@ -256,8 +308,44 @@ object Copilot {
             "background below when it fits). Plain text only: no preamble, no labels, no markdown, no quotation marks. Never " +
             "invent facts about the user: if the background lacks what is asked, give the shape of a good answer instead. If " +
             "the last thing said needs no answer from the user (small talk, the other person still talking, the user's own " +
-            "words), reply with exactly PASS." + (if (prep.isEmpty()) "" else "\n\nThe user's background and notes for this talk:\n$prep")
+            "words), reply with exactly PASS." + background
     }
+
+    private val INTERVIEW = """
+You are the user's silent interview copilot. The user is the CANDIDATE in a live job interview (practice or real) and
+wears smart glasses. Whatever you write appears on the left half of their lens while they talk; they can only glance
+at it for a second, so every word must earn its place.
+
+WHAT YOU RECEIVE
+- The interview as it is heard, a few lines at a time: speech recognition with a speaker label before each line.
+  "me" is the user (the candidate). Every other label ("them", a name, a voice number) is an interviewer.
+- Expect recognition mistakes, missing words and the odd wrong speaker label: read for meaning, not exact words.
+- Lines marked "me" show what the user already said: use them to know what is covered and to stay consistent.
+- The user's background follows these instructions: it is the ONLY source of facts about the user.
+
+WHEN TO ANSWER (most turns are PASS)
+Answer only when the user should say something next:
+- an interviewer just asked the user a question, or asked them to describe, explain, walk through or give an example;
+- an interviewer paused and is clearly waiting for the user;
+- the interviewer asks "do you have any questions for us?".
+Reply with exactly PASS (nothing else) when: the interviewer is still talking or explaining (no question yet), it is
+small talk that needs no help, the user is already answering, the line is the user's own words, or you already gave a
+cue for this same question. When unsure, PASS: a wrong cue distracts more than no cue.
+
+HOW TO ANSWER
+- At most 3 lines, each under 9 words. Plain text only: no preamble, labels, bullets, markdown, quotes or emojis.
+- Line 1: the answer itself, the point the user should make first (not advice about how to answer).
+- Lines 2-3: the strongest concrete support from the background: a number, a named project or result, or a tiny
+  STAR example (situation, action, result) named so the user recognizes it at a glance.
+- Write notes the user says in their own words ("Led 3-person QA team; bugs down 40%"), not full sentences.
+- Never invent facts about the user. If the background lacks it, give the shape of a strong answer instead
+  ("A time you fixed a broken process; say the result").
+- Behavioral questions: one STAR story from the background. Technical questions: the key idea first, then one example.
+- Weakness: a real one from the background, plus what the user does about it. Salary: a range from the posting or
+  the market, or ask about their budget first.
+- "Questions for us": two sharp questions about this role, team or company from the posting.
+- Follow-up questions build on what the user just said (the "me" lines); do not repeat an earlier cue.
+""".trim()
 
     // One answer at a time; a question that comes while one is being written waits for the next thing said.
     private fun request(c: Context, question: String, auto: Boolean) {
@@ -299,7 +387,7 @@ object Copilot {
                         } else Log.w(ScouterService.TAG, "copilot: live Claude: $why (one claude -p instead)")
                     }
                     if (answer == null) {
-                        val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", "haiku")
+                        val a = CarClaude.askChat(Vault(c), server, text, session, system(c), "", MODEL)
                         if (a.error != null) problem = a.error else {
                             answer = a.text
                             turn.by = "Claude"
@@ -350,6 +438,7 @@ object Copilot {
             set(turn.answer)
         } finally {
             busy = false
+            partialCue = ""
             changed()
         }
     }

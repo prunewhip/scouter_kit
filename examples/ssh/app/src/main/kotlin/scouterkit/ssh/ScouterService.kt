@@ -61,6 +61,7 @@ object Session {
     @Volatile var people = false // the calls and texts panel is open (Alt+J)
     @Volatile var peopleTyping = false // it takes typing (a text)
     @Volatile var editor = false // the text editor is open (Alt+N): it takes the keys
+    @Volatile var copilotPanel = false // Copilot's interview view is open (VOX//INTERVIEW)
     @Volatile var listenPanel = false // Listen mode's panel is open (hub L, or Alt+E while Listen is on)
     @Volatile var listenTyping = false // it takes typing (a name for a voice)
     @Volatile var car = "" // Car mode: "" off, else its state (idle, listening, thinking, speaking)
@@ -1723,6 +1724,11 @@ class ScouterService : Service() {
                 val t = rest.substringAfter(':')
                 if (Session.overlay == Panels.LISTEN) { listenSaid = t.take(120); listenDraw() } else note(t, ms)
             }
+            what == "copilotview" -> copilotOpen()
+            what == "copilotclose" -> copilotClose()
+            what == "cpkey:esc" -> { Copilot.stop(); copilotClose() }
+            what == "cpkey:now" -> Copilot.askNow(this)
+            what.startsWith("copilot:") && Copilot.on -> if (Session.copilotPanel) copilotSoon() else copilotOpen()
             what.startsWith("copilot:") -> { // the copilot's cue: "copilot:<question>\u0001<cue>" (Copilot.kt)
                 val q = what.removePrefix("copilot:").substringBefore('\u0001')
                 val a = what.substringAfter('\u0001', "")
@@ -1797,6 +1803,7 @@ class ScouterService : Service() {
             Panels.PEOPLE -> { peopleSaid = text; return peopleDraw() }
             Panels.EDITOR -> { editor?.said = text; return editorDraw() }
             Panels.LISTEN -> { listenSaid = text; return listenDraw() }
+            Panels.COPILOT -> return copilotDraw()
             Panels.CAPTIONS -> { capState = text; return captionsDraw() }
         }
         if (Session.overlay == Panels.HELP || Session.overlay == Panels.SETTINGS) return panelDraw()
@@ -1819,6 +1826,7 @@ class ScouterService : Service() {
             Session.people -> Panels.PEOPLE
             Session.editor -> Panels.EDITOR
             Session.listenPanel -> Panels.LISTEN
+            Session.copilotPanel -> Panels.COPILOT
             Session.captions.isNotEmpty() -> Panels.CAPTIONS
             Session.tvKeys -> Panels.TV
             Session.ffKeys -> Panels.FIREFOX
@@ -2195,12 +2203,14 @@ class ScouterService : Service() {
 
     // A full panel (Panels.frameLines / frameArt) for `kind` while it is the one shown: rows(width in characters,
     // rows that fit) builds what it holds.
-    private fun framePanel(kind: String, title: String, close: String, foot: String, rows: (Int, Int) -> List<Pair<String, Int>>) {
+    private fun framePanel(kind: String, title: String, close: String, foot: String, mono: Boolean = false,
+                           rows: (Int, Int) -> List<Pair<String, Int>>) {
         if (glassesWith == null || Session.overlay != kind) return
         if (settings.show == Settings.SCREEN) {
             val st = Native.screenStats()
             if (st[5] <= 0 || st[6] <= 0) return
-            val art = Panels.frameArt(st[5], st[6], title, close, rows(((st[5] - 24) / 7.4f).toInt(), ((st[6] - 90) / 18)), foot)
+            val art = Panels.frameArt(st[5], st[6], title, close, rows(((st[5] - 24) / (if (mono) 9.2f else 7.4f)).toInt(),
+                ((st[6] - 90) / 18)), foot, mono)
             Native.overlay(null, null, false)
             Native.screenOverlay(art.pixels, art.w, art.h, art.x, art.y)
             Session.overlayGen++
@@ -2223,6 +2233,7 @@ class ScouterService : Service() {
         if (keep != Panels.PEOPLE && Session.people) peopleClose()
         if (keep != Panels.EDITOR && Session.editor) editorClose()
         if (keep != Panels.LISTEN && Session.listenPanel) listenClose()
+        if (keep != Panels.COPILOT && Session.copilotPanel) copilotClose()
     }
 
     private fun panelUp(kind: String) {
@@ -2749,6 +2760,92 @@ class ScouterService : Service() {
         work.removeCallbacks(listenTick)
         work.postDelayed(listenTick, 15_000)
         Session.changed()
+    }
+
+    // ------------------------------------------------ Copilot's interview view (VOX//INTERVIEW)
+
+    // Claude's cue big on the left (what to say: the newest, written as it streams in; earlier ones faint under it),
+    // what is said on the right in a narrow column (who, then the words; newest at the bottom). Opens when Copilot
+    // starts or a cue comes; Esc ends Copilot, Space (or the right TouchBar's triple tap) asks for a cue now.
+    private val copilotWatch: () -> Unit = { work.post { copilotSoon() } }
+    private var copilotDrawn = 0L
+    private val copilotLater = Runnable { copilotDraw() }
+    private val copilotTick = object : Runnable {
+        override fun run() {
+            if (!Session.copilotPanel) return
+            copilotDraw()
+            work.postDelayed(this, 15_000)
+        }
+    }
+
+    private fun copilotOpen() {
+        if (glassesWith == null) return
+        if (Session.copilotPanel) return copilotDraw()
+        panelsAway(Panels.COPILOT)
+        Session.copilotPanel = true
+        panelUp(Panels.COPILOT)
+        Copilot.watch(copilotWatch)
+        copilotDraw()
+        work.removeCallbacks(copilotTick)
+        work.postDelayed(copilotTick, 15_000)
+    }
+
+    private fun copilotClose() {
+        Session.copilotPanel = false
+        Copilot.unwatch(copilotWatch)
+        work.removeCallbacks(copilotTick)
+        work.removeCallbacks(copilotLater)
+        if (Session.overlay == Panels.COPILOT) panelClose()
+        Session.changed()
+    }
+
+    // At most every 300 ms (the cue streams in, the words come fast).
+    private fun copilotSoon() {
+        if (!Session.copilotPanel) return
+        val wait = 300 - (SystemClock.elapsedRealtime() - copilotDrawn)
+        work.removeCallbacks(copilotLater)
+        if (wait <= 0) copilotDraw() else work.postDelayed(copilotLater, wait)
+    }
+
+    private fun copilotDraw() {
+        copilotDrawn = SystemClock.elapsedRealtime()
+        framePanel(Panels.COPILOT, "VOX//INTERVIEW", "Esc ends", "Space or right triple tap: a cue now", mono = true) { width, max ->
+            val rows = mutableListOf<Pair<String, Int>>()
+            val min = if (Copilot.startedAt > 0) (System.currentTimeMillis() - Copilot.startedAt) / 60000 else 0
+            rows += ("▌▌ LIVE ▐░▒▓ Claude Sonnet · ${Copilot.status.ifEmpty { "listening" }.lowercase(java.util.Locale.US)} · $min min") to 1
+            val lw = (width * 0.64f).toInt().coerceAtLeast(18)
+            val rw = (width - lw - 3).coerceAtLeast(8)
+            // left: what to say
+            val left = ArrayList<Pair<String, Int>>()
+            val cues = Copilot.cues(4)
+            val newest = cues.lastOrNull()
+            val writing = Copilot.partialCue
+            val main = when {
+                writing.isNotEmpty() -> "$writing ▌"
+                newest?.state == "thinking" -> "▒▒ reading the question…"
+                newest != null -> newest.answer
+                else -> "waiting for a question"
+            }
+            left += "◢ SAY" to 2
+            for (l in main.lines()) for (w in Panels.wrap(l, lw - 2)) left += "▌ $w" to 1
+            val older = cues.filter { it !== newest && it.state == "done" }.asReversed()
+            if (older.isNotEmpty()) left += "◣ EARLIER" to 2
+            for (t in older) Panels.wrap(t.answer.lines().firstOrNull().orEmpty(), lw - 2).firstOrNull()?.let { left += "  $it" to 2 }
+            // right: what is said
+            val heard = ArrayList<String>()
+            for ((who, text) in Copilot.heardTail(16)) {
+                val tag = when (who) { "me" -> "ME"; "them", "" -> "TH"; else -> who.take(2).uppercase(java.util.Locale.US) }
+                heard += Panels.wrap("$tag› $text", rw)
+            }
+            val body = (max - 1).coerceAtLeast(3)
+            val right = listOf("◢ HEARD") + heard.takeLast(body - 1)
+            for (i in 0 until body) {
+                val l = left.getOrNull(i)
+                rows += ((l?.first ?: "").take(lw).padEnd(lw) + " ┊ " + right.getOrElse(i) { "" }.take(rw)) to
+                    (if (l?.second == 1) 1 else 0)
+            }
+            rows
+        }
     }
 
     private fun listenClose() {
@@ -5309,8 +5406,8 @@ class ScouterService : Service() {
             Settings.ACTION_VOICE_MODE -> voiceModeSet(!Session.voiceMode)
             Settings.ACTION_VOICE_CONTROL, Settings.ACTION_PTT -> vc.toggle()
             Settings.ACTION_COPILOT -> {
-                note("Copilot: a cue for what was just said…", 2500)
                 Copilot.askNow(this)
+                copilotOpen()
             }
             Settings.ACTION_TAB_NEXT -> tabs("next")
             Settings.ACTION_TAB_PREV -> tabs("prev")

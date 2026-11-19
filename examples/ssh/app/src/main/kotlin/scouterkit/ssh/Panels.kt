@@ -23,6 +23,7 @@ object Panels {
     const val HOME = "home" // smart home: the TVs, Home Assistant's lights, switches, thermostats (Alt+O)
     const val PEOPLE = "people" // calls and texts to the starred contacts (Alt+J)
     const val EDITOR = "editor" // the text editor: .txt files in Vox's docs folder (Alt+N)
+    const val COPILOT = "copilot" // Copilot's interview view: Claude's cue on the left, what is said on the right
     const val LISTEN = "listen" // Listen mode: what was heard today (hub L, Alt+E while it is on)
 
     // The hotkeys by group: the keys, what they do. The help on the glasses and the app's Hotkeys page.
@@ -155,11 +156,12 @@ object Panels {
     // at (x, y) of the picture.
     class Art(val pixels: ByteArray, val w: Int, val h: Int, val x: Int, val y: Int)
 
-    private fun paint(size: Float, bold: Boolean = false) = Paint().apply {
+    private fun paint(size: Float, bold: Boolean = false, mono: Boolean = false) = Paint().apply {
         isAntiAlias = false
         color = Color.WHITE
         textSize = size
-        typeface = if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        typeface = if (mono) Typeface.create(Typeface.MONOSPACE, if (bold) Typeface.BOLD else Typeface.NORMAL)
+            else if (bold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
     }
 
     private fun pixels(b: Bitmap): ByteArray {
@@ -461,7 +463,7 @@ object Panels {
     }
 
     // The same rows drawn for a screen's frames (w x h): the title on a lit bar, the rows, the footer.
-    fun frameArt(w: Int, h: Int, title: String, close: String, items: List<Pair<String, Int>>, foot: String): Art {
+    fun frameArt(w: Int, h: Int, title: String, close: String, items: List<Pair<String, Int>>, foot: String, mono: Boolean = false): Art {
         val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(b)
         c.drawColor(Color.BLACK)
@@ -523,9 +525,9 @@ object Panels {
         for ((i, t) in content.lines.withIndex()) {
             val mark = content.marks.getOrElse(i) { 0 }
             val p = when (mark) {
-                1, 3 -> paint(16f, true)
-                2 -> paint(14f)
-                else -> paint(15f)
+                1, 3 -> paint(16f, true, mono)
+                2 -> paint(14f, false, mono)
+                else -> paint(15f, false, mono)
             }
             if (mark == 3) {
                 c.drawRect(4f, (y - line + 6).toFloat(), w - 4f, (y + 5).toFloat(), lit)

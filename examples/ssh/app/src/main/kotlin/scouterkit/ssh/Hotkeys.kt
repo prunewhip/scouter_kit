@@ -150,6 +150,11 @@ object Hotkeys {
             act("edkey:${e.keyCode}:${e.metaState}:$ch")
             return true
         }
+        // Copilot's interview view open: Esc ends Copilot, Space or Enter asks for a cue now.
+        if (Session.copilotPanel && bare && e.keyCode in setOf(KeyEvent.KEYCODE_ESCAPE, KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_ENTER)) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) act(if (e.keyCode == KeyEvent.KEYCODE_ESCAPE) "cpkey:esc" else "cpkey:now")
+            return true
+        }
         // Listen mode's panel open: O (or Space) on / off, P pause, the arrows and Page Up / Down earlier lines, Esc.
         if (Session.listenPanel && bare) {
             if (e.action != KeyEvent.ACTION_DOWN) return true
