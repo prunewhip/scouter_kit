@@ -63,8 +63,12 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private var writeBar: Progress? = null
     private var rowBar: Progress? = null // the list's row of the episode being made
     private var rowText: TextView? = null
+    private var benchBar: Progress? = null
+    private var benchText: TextView? = null
+    private var benchShown: KokoroModel.Bench? = null
+    private var benchFinished = false
     private var builtWith: File? = null // what played when the page was built
-    private val rowChips = HashMap<File, TextView>() // the list's Play chips, by episode
+    private val rowChips = ArrayList<Pair<File, TextView>>() // the list's Play chips, by episode
 
     private var ticks = 0
     private val tick = object : Runnable {
@@ -73,6 +77,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             updateWriting()
             updatePlayer()
             updateVoice()
+            updateBench()
             // The list on screen: a look in the inboxes every 15 s, so a script Claude just left shows up by itself.
             if (!open && ++ticks % 30 == 0) pullNow()
             main.postDelayed(this, 500)
@@ -96,6 +101,11 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             main.post(tick)
             receive(null)
             pullNow()
+            // The speed test once (about a minute), the first time the voice is here and nothing is being made.
+            if (KokoroModel.ready(a) && !KokoroModel.benched(a) && Podcasts.job?.finished != false && KokoroModel.bench == null) {
+                KokoroModel.startBench(a)
+                if (!open) showList()
+            }
         } else {
             PodcastPlayer.onChange = null
             saveDraft()
@@ -130,6 +140,9 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         writeBar = null
         rowBar = null
         rowText = null
+        benchBar = null
+        benchText = null
+        benchShown = null
         rowChips.clear()
         builtWith = PodcastPlayer.file
     }
@@ -221,6 +234,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         val files = Podcasts.scripts(this)
         if (files.isNotEmpty()) body.addView(subhead("Your episodes"))
         for (f in files) body.addView(row(f))
+        speedCard()?.let { body.addView(it) }
         val where = Podcasts.server(this)?.name ?: "the server"
         body.addView(text("The voices are Kokoro, on the phone: nothing is sent anywhere to read them. Scripts Claude writes " +
             "are kept in ~/vox/podcasts on $where; a .md or .txt left in ~/vox/podcasts/inbox there shows up here.", 12f, Ui.FAINT)
@@ -249,8 +263,11 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         val chips = ArrayList<View>()
         if (audio.exists() && !making) {
             val on = PodcastPlayer.file == audio && PodcastPlayer.playing
-            chips += chip(if (on) "Pause" else "Play", true) { PodcastPlayer.toggle(this, audio, nameOf(f)) }.also { rowChips[audio] = it }
+            chips += chip(if (on) "Pause" else "Play", true) { PodcastPlayer.toggle(this, audio, nameOf(f)) }.also { rowChips += audio to it }
         } else if (!making) chips += chip("Make it", true) { makeFrom(f) }
+        else Podcasts.job?.let { j -> chips += chip(if (PodcastPlayer.file == audio && PodcastPlayer.playing) "Pause" else "Listen now", true) {
+            listenTo(j)
+        }.also { rowChips += audio to it } }
         chips += chip("Open", false) { openText(f) }
         c.addView(chipRow(*chips.toTypedArray()), lp().apply { topMargin = dp(10) })
         c.setOnClickListener { openText(f) }
@@ -259,6 +276,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
 
     private fun makeFrom(f: File) {
         if (!KokoroModel.ready(a)) return toast("Download the voice first")
+        if (KokoroModel.bench?.finished == false) return toast("Testing the voice's speed: about a minute, then make it")
         if (Podcasts.job?.finished == false) return toast("Another episode is being made")
         if (Podcasts.makeFile(a, f) == null) return toast("There is nothing to read in it")
         refresh()
@@ -323,13 +341,18 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private fun updatePlayer() {
         val on = PodcastPlayer.playing
         playChip?.text = if (on) "Pause" else "Play"
-        for ((audio, chip) in rowChips) chip.text = if (on && PodcastPlayer.file == audio) "Pause" else "Play"
+        for ((audio, chip) in rowChips) chip.text = if (on && PodcastPlayer.file == audio) "Pause"
+            else if (audio.exists()) "Play" else "Listen now"
         val bar = seek ?: return
         if (dragging) return
         val d = PodcastPlayer.duration
         bar.max = maxOf(d, 1)
         bar.progress = PodcastPlayer.position
-        timeText?.text = "${clock(PodcastPlayer.position)} / ${clock(d)}"
+        timeText?.text = "${clock(PodcastPlayer.position)} / ${clock(d)}" + when {
+            PodcastPlayer.waiting -> "  ·  waiting for more to be made…"
+            PodcastPlayer.early -> "  ·  made so far"
+            else -> ""
+        }
     }
 
     // The voice: a download when it is not on the phone yet.
@@ -403,6 +426,50 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         if (w.finished && !writeFinished) refresh()
     }
 
+    // Heard while it is made (or paused / played again if it is the one playing).
+    private fun listenTo(j: Podcasts.Job) {
+        if (!PodcastPlayer.listen(a, j, j.title)) {
+            val need = 8 - j.madeMs() / 1000
+            toast(if (need > 0) "A few seconds more: about $need s of it is still to be made" else "It can't be played yet")
+        }
+        refresh()
+    }
+
+    // The voice's speed test: what each engine did on this phone and the one kept, a bar while it runs.
+    private fun speedCard(): View? = with(a) {
+        if (!KokoroModel.ready(this)) return null
+        val b = KokoroModel.bench
+        val running = b != null && !b.finished
+        val c = card("Voice speed", "Tries the CPU, more threads, and the phone's GPU / NPU (NNAPI), and keeps the fastest.")
+        val lines = if (b != null) b.lines.toList() else KokoroModel.benchLines(this)
+        if (running) {
+            c.addView(Progress(this).also { benchBar = it }, lp().apply { topMargin = dp(6); bottomMargin = dp(6) })
+            c.addView(text("", 13.5f, Ui.MUTED).also { benchText = it })
+        }
+        for (l in lines) c.addView(text(l, 13f, if (l.startsWith("Using")) Ui.GOOD else Ui.MUTED).apply { setPadding(0, dp(2), 0, 0) })
+        if (!running) {
+            if (lines.isEmpty()) c.addView(text("Now: ${KokoroModel.engine(this).label}", 13f, Ui.MUTED))
+            c.addView(chipRow(chip(if (lines.isEmpty()) "Test the speed" else "Test again", false) {
+                if (Podcasts.job?.finished == false) return@chip toast("After the episode being made")
+                KokoroModel.startBench(this)
+                refresh()
+            }), lp().apply { topMargin = dp(8) })
+        }
+        benchShown = b
+        benchFinished = b?.finished ?: true
+        updateBench()
+        c
+    }
+
+    private fun updateBench() {
+        val b = KokoroModel.bench
+        if (b !== benchShown) { if (b != null && !open) refresh(); return }
+        if (b == null) return
+        benchBar?.fraction = if (b.total > 0) b.done.toFloat() / b.total else 0f
+        benchText?.text = "${b.step}  (${b.done} of ${b.total})"
+        if (b.finished && !benchFinished) refresh()
+    }
+
     // How long Claude usually takes to write one this long, in seconds (looking things up included).
     private fun expected(w: Podcasts.Writing) = 60 + w.minutes * 12
 
@@ -422,7 +489,16 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             if (result != null && result.exists()) chips += chip("Play", true) { dismissed = j; PodcastPlayer.toggle(this, result, j.title) }
             chips += chip("Dismiss", false) { dismissed = j; refresh() }
             c.addView(chipRow(*chips.toTypedArray()), lp().apply { topMargin = dp(10) })
-        } else c.addView(button("Stop", 1) { j.stop.set(true) }, lp().apply { topMargin = dp(10) })
+        } else {
+            val audio = Podcasts.audioOf(j.script)
+            c.addView(chipRow(chip(if (PodcastPlayer.file == audio && PodcastPlayer.playing) "Pause" else "Listen now", true) {
+                listenTo(j)
+            }.also { rowChips += audio to it }), lp().apply { topMargin = dp(10) })
+            c.addView(text("Starts with what is made so far and keeps up as the rest is made.", 12f, Ui.FAINT)
+                .apply { setPadding(0, dp(4), 0, 0) })
+            KokoroModel.using?.let { c.addView(text("Voice engine: ${it.label}", 12f, Ui.FAINT).apply { setPadding(0, dp(2), 0, 0) }) }
+            c.addView(button("Stop", 1) { j.stop.set(true) }, lp().apply { topMargin = dp(10) })
+        }
         jobBar = bar
         jobText = label
         jobShown = j
@@ -509,7 +585,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         body.removeAllViews()
         body.addView(header(if (f == null) "New episode" else nameOf(f), "Read aloud in Kokoro's voices", "Back") { saveDraft(); showList() })
         val audio = f?.let { Podcasts.audioOf(it) }
-        if (PodcastPlayer.file != null && PodcastPlayer.file != audio) nowCard()?.let { body.addView(it) }
+        if (PodcastPlayer.file != null && (PodcastPlayer.file != audio || audio?.exists() != true)) nowCard()?.let { body.addView(it) }
         voiceCard()?.let { body.addView(it) }
         jobCard()?.let { body.addView(it) }
         val making = f != null && Podcasts.job?.let { !it.finished && it.script == f } == true
@@ -715,6 +791,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         val f = file
         if (f == null || draft.isBlank()) return toast("Write or paste something first")
         if (!KokoroModel.ready(a)) return toast("Download the voice first")
+        if (KokoroModel.bench?.finished == false) return toast("Testing the voice's speed: about a minute, then make it")
         val script = Podcasts.parse(draft, nameOf(f))
         if (script.blocks.none { it is Podcasts.Block.Line || it is Podcasts.Block.Heading }) return toast("There is nothing to read in it")
         val style = Podcasts.style(styleId)

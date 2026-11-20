@@ -165,26 +165,152 @@ object KokoroModel {
         dir(context).deleteRecursively()
     }
 
+    // How Kokoro runs: on the CPU with some threads, with XNNPACK (ONNX Runtime's tuned CPU kernels), or with NNAPI
+    // (Android's accelerator interface: the phone's GPU or NPU, for the parts of the model it can take). The speed
+    // test (bench) tries each on this phone and keeps the fastest; sherpa-onnx says in the log when one could not be
+    // used (it runs on the CPU then), and the test reports that too.
+    class Engine(val provider: String, val threads: Int) {
+        val key get() = "$provider:$threads"
+        val label get() = when (provider) {
+            "nnapi" -> "GPU / NPU (NNAPI)"
+            "xnnpack" -> "CPU, XNNPACK"
+            else -> "CPU"
+        } + ", $threads threads"
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("voice", Context.MODE_PRIVATE)
+
+    fun engine(c: Context): Engine {
+        val k = prefs(c).getString("kokoro_engine", null)?.split(":")
+        return Engine(k?.getOrNull(0) ?: "cpu", k?.getOrNull(1)?.toIntOrNull() ?: 4)
+    }
+
     // Loaded once (a second or two), kept while Car mode is on.
     @Volatile private var tts: OfflineTts? = null
+    @Volatile var using: Engine? = null // what the loaded voice runs on
+
+    private fun create(context: Context, e: Engine): OfflineTts {
+        val d = dir(context)
+        return OfflineTts(null, OfflineTtsConfig(model = OfflineTtsModelConfig(kokoro = OfflineTtsKokoroModelConfig(
+            model = File(d, "model.int8.onnx").path, voices = File(d, "voices.bin").path,
+            tokens = File(d, "tokens.txt").path, dataDir = File(d, "espeak-ng-data").path,
+            lexicon = File(d, "lexicon-us-en.txt").path), numThreads = e.threads, provider = e.provider), maxNumSentences = 1))
+    }
 
     @Synchronized
     fun load(context: Context): OfflineTts? {
         tts?.let { return it }
         if (!VoiceModel.available || !ready(context)) return null
-        val d = dir(context)
-        return runCatching {
-            OfflineTts(null, OfflineTtsConfig(model = OfflineTtsModelConfig(kokoro = OfflineTtsKokoroModelConfig(
-                model = File(d, "model.int8.onnx").path, voices = File(d, "voices.bin").path,
-                tokens = File(d, "tokens.txt").path, dataDir = File(d, "espeak-ng-data").path,
-                lexicon = File(d, "lexicon-us-en.txt").path), numThreads = 4), maxNumSentences = 1))
-        }.onFailure { Log.w(ScouterService.TAG, "car: Kokoro did not load: ${it.message}") }.getOrNull().also { tts = it }
+        val e = engine(context)
+        return runCatching { create(context, e) }
+            .onFailure { Log.w(ScouterService.TAG, "car: Kokoro did not load (${e.label}): ${it.message}") }.getOrNull()
+            .also { tts = it; using = if (it != null) e else null }
     }
+
+    // A line into speech, the voice loaded first if it is not. Under the same lock as unload, so the voice is never
+    // let go of in the middle of a line (each line asks for it again).
+    @Synchronized
+    fun speak(context: Context, text: String, sid: Int, speed: Float): FloatArray? {
+        val k = load(context) ?: return null
+        return runCatching { k.generate(text, sid, speed).samples }
+            .onFailure { Log.w(ScouterService.TAG, "Kokoro: ${it.message}") }.getOrNull()
+    }
+
+    // ---- the speed test
+
+    class Bench(val total: Int) {
+        @Volatile var step = "Starting"
+        @Volatile var done = 0
+        val lines = java.util.concurrent.CopyOnWriteArrayList<String>()
+        @Volatile var best: Engine? = null
+        @Volatile var finished = false
+    }
+
+    @Volatile var bench: Bench? = null
+    private const val BENCH_TEXT = "This is the speed test. Each engine reads these same two sentences, and the one " +
+        "that finishes first is the one your episodes will use."
+
+    // The last test's lines (what each engine did), or empty.
+    fun benchLines(c: Context): List<String> = prefs(c).getString("bench_lines", "")!!.split("\n").filter { it.isNotBlank() }
+
+    // Tries each engine on this phone (about a minute; nothing else uses the voice meanwhile), keeps the fastest. An
+    // engine that took the whole app down last time (native code can) is left out from then on.
+    fun startBench(context: Context): Bench? {
+        if (bench?.finished == false || !ready(context)) return null
+        val app = context.applicationContext
+        val p = prefs(app)
+        p.getString("bench_trying", null)?.let { crashed ->
+            p.edit().putString("bench_bad", (p.getString("bench_bad", "") + " " + crashed).trim()).remove("bench_trying").commit()
+        }
+        val bad = p.getString("bench_bad", "")!!.split(" ").toSet()
+        val cores = Runtime.getRuntime().availableProcessors()
+        val all = listOf(Engine("cpu", 4), Engine("cpu", 6), Engine("cpu", minOf(8, cores)), Engine("xnnpack", 4),
+            Engine("nnapi", 4)).distinctBy { it.key }
+        val list = all.filter { it.key !in bad }
+        val b = Bench(list.size)
+        bench = b
+        Thread({
+            var bestSpeed = 0f
+            for (e in list) {
+                b.step = "Trying ${e.label}…"
+                p.edit().putString("bench_trying", e.key).commit()
+                val since = System.currentTimeMillis()
+                val line = runCatching {
+                    synchronized(this) {
+                        unload()
+                        val k = create(app, e)
+                        try {
+                            k.generate("Hello there.", 3, 1f) // the first run is slow everywhere: not counted
+                            val t0 = SystemClock.uptimeMillis()
+                            val a = k.generate(BENCH_TEXT, 3, 1f)
+                            val ms = maxOf(1L, SystemClock.uptimeMillis() - t0)
+                            val speed = a.samples.size * 1000f / a.sampleRate / ms
+                            val said = sherpaSaid(since)
+                            val fell = e.provider != "cpu" && Regex("fall ?back|failed|not support|unsupported|available providers",
+                                RegexOption.IGNORE_CASE).containsMatchIn(said)
+                            if (!fell && speed > bestSpeed) {
+                                bestSpeed = speed
+                                b.best = e
+                            }
+                            "${e.label}: ${"%.1f".format(speed)}x real time" + if (fell) " (not usable here: ran on the CPU)" else ""
+                        } finally {
+                            k.release()
+                        }
+                    }
+                }.getOrElse { "${e.label}: did not start (${it.message?.take(80)})" }
+                p.edit().remove("bench_trying").commit()
+                b.lines += line
+                Log.i(ScouterService.TAG, "voice bench: $line")
+                b.done++
+            }
+            b.best?.let { p.edit().putString("kokoro_engine", it.key).apply() }
+            val summary = b.best?.let { "Using: ${it.label} (${"%.1f".format(bestSpeed)}x real time)" } ?: "Nothing worked: kept as it was"
+            b.lines += summary
+            p.edit().putString("bench_lines", b.lines.joinToString("\n")).putBoolean("benched", true).apply()
+            Log.i(ScouterService.TAG, "voice bench: $summary")
+            b.step = summary
+            b.finished = true
+        }, "voice-bench").start()
+        return b
+    }
+
+    fun benched(c: Context) = prefs(c).getBoolean("benched", false)
+
+    // What sherpa-onnx (ONNX Runtime) said in this app's log since [since] (ms): whether an engine was taken up.
+    private fun sherpaSaid(since: Long): String = runCatching {
+        val pr = ProcessBuilder("logcat", "-d", "-v", "brief", "-T", "%d.%03d".format(since / 1000, since % 1000))
+            .redirectErrorStream(true).start()
+        val out = pr.inputStream.bufferedReader().readText()
+        pr.waitFor()
+        out.lines().filter { Regex("nnapi|xnnpack|provider|fallback", RegexOption.IGNORE_CASE).containsMatchIn(it) }
+            .also { l -> l.forEach { Log.i(ScouterService.TAG, "voice bench: sherpa: ${it.take(200)}") } }.joinToString("\n")
+    }.getOrDefault("")
 
     @Synchronized
     fun unload() {
         runCatching { tts?.release() }
         tts = null
+        using = null
     }
 }
 
@@ -273,13 +399,12 @@ class CarSpeech(private val context: Context, private val onDone: (String) -> Un
                 for (p in parts) {
                     if (gen != my) break
                     val t0 = SystemClock.uptimeMillis()
-                    val a = runCatching { synchronized(KokoroModel) { k.generate(p, sid, rate) } }
-                        .onFailure { Log.w(ScouterService.TAG, "car: Kokoro: ${it.message}") }.getOrNull()
-                    if (a != null && a.samples.isNotEmpty()) {
-                        Log.i(ScouterService.TAG, "car: Kokoro (voice $sid) made ${a.samples.size * 1000L / hz} ms of speech " +
+                    val a = KokoroModel.speak(context, p, sid, rate)
+                    if (a != null && a.isNotEmpty()) {
+                        Log.i(ScouterService.TAG, "car: Kokoro (voice $sid) made ${a.size * 1000L / hz} ms of speech " +
                             "in ${SystemClock.uptimeMillis() - t0} ms")
                         made++
-                        queue.put(a.samples)
+                        queue.put(a)
                     }
                 }
                 queue.put(end)

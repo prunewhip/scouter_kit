@@ -4,7 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
@@ -350,13 +352,23 @@ object Podcasts {
         @Volatile var result: File? = null
         val stop = AtomicBoolean(false)
         val finished get() = stage == "Done" || error != null
+        @Volatile var wav: File? = null // the sound so far (16-bit mono after a 44-byte header): heard while it is made
+        @Volatile var hz = 0
+        val written get() = stage == "Encoding" || finished // the WAV has all it will get
+
+        // How much is made, in ms.
+        fun madeMs(): Long {
+            val w = wav ?: return 0
+            if (hz <= 0) return 0
+            return maxOf(0L, w.length() - 44) / 2 * 1000 / hz
+        }
     }
 
     @Volatile var job: Job? = null
 
     // Starts making the episode on its own thread; false when one is being made or the voice is not ready.
     fun make(c: Context, scriptFile: File, script: Script, cast: Map<String, Int>, style: Style, speed: Float): Job? {
-        if (job?.finished == false) return null
+        if (job?.finished == false || KokoroModel.bench?.finished == false) return null
         val app = c.applicationContext
         val spoken = script.blocks.sumOf {
             when (it) { is Block.Line -> it.text.length; is Block.Heading -> if (style.readHeadings) it.text.length else 0; else -> 0 }
@@ -367,7 +379,10 @@ object Podcasts {
             try {
                 val tts = KokoroModel.load(app) ?: throw IllegalStateException("The voice model is not ready")
                 val hz = tts.sampleRate()
+                val engine = KokoroModel.using?.label ?: "?"
                 val wav = File(scriptFile.parentFile, scriptFile.nameWithoutExtension + ".wav.part")
+                j.hz = hz
+                j.wav = wav
                 j.stage = "Reading"
                 val started = SystemClock.uptimeMillis()
                 writeWav(wav, hz) { put ->
@@ -376,9 +391,8 @@ object Podcasts {
                         val parts = sentences(text)
                         for ((i, s) in parts.withIndex()) {
                             if (j.stop.get()) return false
-                            val a = runCatching { synchronized(KokoroModel) { tts.generate(s, sid, style.speed * speed) } }
-                                .onFailure { Log.w(ScouterService.TAG, "podcast: voice $sid: ${it.message}") }.getOrNull()
-                            if (a != null && a.samples.isNotEmpty()) put(a.samples)
+                            val a = KokoroModel.speak(app, s, sid, style.speed * speed)
+                            if (a != null && a.isNotEmpty()) put(a)
                             j.done += s.length + 1
                             val spent = SystemClock.uptimeMillis() - started
                             if (j.done > 80) j.etaMs = spent * (j.total - minOf(j.done, j.total)) / j.done
@@ -406,6 +420,10 @@ object Podcasts {
                     }
                 }
                 if (j.stop.get()) { wav.delete(); j.error = "Stopped"; return@Thread }
+                val audioMs = j.madeMs()
+                val spentMs = maxOf(1L, SystemClock.uptimeMillis() - started)
+                Log.i(ScouterService.TAG, "podcast: read %.1f min of sound in %.1f min (%.2fx real time) on %s".format(
+                    audioMs / 60000.0, spentMs / 60000.0, audioMs.toDouble() / spentMs, engine))
                 j.stage = "Encoding"
                 j.etaMs = -1
                 val out = audioOf(scriptFile)
@@ -538,18 +556,17 @@ object Podcasts {
         if (job?.finished == false) return
         Thread({
             val tts = KokoroModel.load(app) ?: return@Thread
-            val a = runCatching { synchronized(KokoroModel) { tts.generate("Hello, this is ${voiceName(sid)}. This is how I read.", sid, speed) } }
-                .getOrNull() ?: return@Thread
             val hz = tts.sampleRate()
+            val samples = KokoroModel.speak(app, "Hello, this is ${voiceName(sid)}. This is how I read.", sid, speed)?.takeIf { it.isNotEmpty() } ?: return@Thread
             val t = android.media.AudioTrack.Builder()
                 .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
                     .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(android.media.AudioFormat.Builder().setEncoding(android.media.AudioFormat.ENCODING_PCM_FLOAT)
                     .setSampleRate(hz).setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO).build())
-                .setTransferMode(android.media.AudioTrack.MODE_STATIC).setBufferSizeInBytes(a.samples.size * 4).build()
-            t.write(a.samples, 0, a.samples.size, android.media.AudioTrack.WRITE_BLOCKING)
+                .setTransferMode(android.media.AudioTrack.MODE_STATIC).setBufferSizeInBytes(samples.size * 4).build()
+            t.write(samples, 0, samples.size, android.media.AudioTrack.WRITE_BLOCKING)
             t.play()
-            SystemClock.sleep(a.samples.size * 1000L / hz + 300)
+            SystemClock.sleep(samples.size * 1000L / hz + 300)
             t.release()
         }, "podcast-hear").start()
     }
@@ -718,10 +735,12 @@ object Podcasts {
 
 // The episode playing: one at a time, kept while screens come and go (the Podcasts tab, its own screen, the phone
 // locked), each episode going on where it was left. It pauses while a call, Car mode or another app takes the sound,
-// and comes back after.
+// and comes back after. One still being made plays as it is made (Growing), and moves to its finished file, at the
+// same place, once that is ready.
 object PodcastPlayer {
     private val main = Handler(Looper.getMainLooper())
-    private var player: MediaPlayer? = null
+    private var out: Out? = null
+    private var growing: Podcasts.Job? = null // the episode being made that is playing (until it is handed over)
     private var app: Context? = null
     private var focus: AudioFocusRequest? = null
     private var resume = false // paused for a moment (a call, Car mode): back when the sound is Vox's again
@@ -735,14 +754,180 @@ object PodcastPlayer {
         private set
     var onChange: (() -> Unit)? = null
 
-    val playing: Boolean get() = runCatching { player?.isPlaying == true }.getOrDefault(false)
-    val position: Int get() = runCatching { player?.currentPosition ?: 0 }.getOrDefault(0)
-    val duration: Int get() = runCatching { player?.duration ?: 0 }.getOrDefault(0)
+    val playing: Boolean get() = out?.isPlaying == true
+    val position: Int get() = out?.pos ?: 0
+    val duration: Int get() = out?.dur ?: 0
+    // Playing one being made, and caught up with the making (a few seconds' wait).
+    val waiting: Boolean get() = (out as? Growing)?.waiting == true
+    val early: Boolean get() = out is Growing
+
+    // What plays: a finished file (MediaPlayer), or one being made (Growing).
+    private interface Out {
+        val isPlaying: Boolean
+        val pos: Int
+        val dur: Int
+        fun start()
+        fun pause()
+        fun seek(ms: Int)
+        fun release()
+    }
+
+    private class Finished(val p: MediaPlayer) : Out {
+        override val isPlaying get() = runCatching { p.isPlaying }.getOrDefault(false)
+        override val pos get() = runCatching { p.currentPosition }.getOrDefault(0)
+        override val dur get() = runCatching { p.duration }.getOrDefault(0)
+        override fun start() = p.start()
+        override fun pause() { if (isPlaying) p.pause() }
+        override fun seek(ms: Int) = p.seekTo(ms)
+        override fun release() = p.release()
+    }
+
+    // The episode's WAV read as it is written (16-bit mono after the 44-byte header), into an AudioTrack. Caught up
+    // with the making, it waits for LEAD_S seconds more, so it doesn't stutter; it only goes as far as what is made.
+    private class Growing(private val j: Podcasts.Job, at: Int, private val ended: () -> Unit) : Out {
+        private val hz = j.hz
+        private val raf = RandomAccessFile(j.wav!!, "r")
+        private val lock = Any()
+        private val track: AudioTrack = AudioTrack.Builder().setAudioAttributes(attrs)
+            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(hz)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setBufferSizeInBytes(maxOf(AudioTrack.getMinBufferSize(hz, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT), hz))
+            .build()
+        @Volatile private var want = false
+        @Volatile private var closed = false
+        @Volatile var waiting = false
+        private var base = 0L // the frame the track's head started from
+        private var head0 = 0
+        private var readAt = 0L // the next frame to read
+        private val buf = ByteArray(hz / 5 * 2) // 200 ms
+        private var pending = 0 // bytes of buf read but not yet taken by the track
+        private var pendingOff = 0
+
+        init {
+            val start = (at.toLong() * hz / 1000).coerceIn(0L, madeFrames())
+            base = start
+            readAt = start
+            Thread({ feed() }, "podcast-growing").start()
+        }
+
+        private fun madeFrames() = maxOf(0L, runCatching { raf.length() }.getOrDefault(44L) - 44) / 2
+
+        override val isPlaying get() = want && !closed
+        override val pos: Int get() = synchronized(lock) {
+            if (closed) 0 else ((base + (track.playbackHeadPosition - head0)) * 1000 / hz).toInt()
+        }
+        override val dur: Int get() = (madeFrames() * 1000 / hz).toInt()
+
+        override fun start() {
+            synchronized(lock) {
+                if (closed) return
+                want = true
+                track.play()
+            }
+        }
+
+        override fun pause() {
+            synchronized(lock) {
+                if (closed) return
+                want = false
+                track.pause()
+            }
+        }
+
+        override fun seek(ms: Int) {
+            synchronized(lock) {
+                if (closed) return
+                val to = (ms.toLong() * hz / 1000).coerceIn(0L, maxOf(0L, madeFrames() - hz / 2))
+                track.pause()
+                track.flush()
+                base = to
+                readAt = to
+                pending = 0
+                head0 = track.playbackHeadPosition
+                if (want) track.play()
+            }
+        }
+
+        override fun release() {
+            synchronized(lock) {
+                if (closed) return
+                closed = true
+                runCatching { track.stop() }
+                track.release()
+                runCatching { raf.close() }
+            }
+        }
+
+        private fun feed() {
+            while (!closed) {
+                var sleep = 0L
+                var over = false
+                synchronized(lock) {
+                    if (closed) return
+                    if (!want) { sleep = 200; return@synchronized }
+                    if (pending == 0) {
+                        val made = madeFrames()
+                        val left = made - readAt
+                        val all = j.written
+                        if (left <= 0 || (!all && left < hz / 5) || (waiting && !all && left < hz * LEAD_S)) {
+                            if (all && left <= 0) {
+                                // Everything heard once the track has played what it was given.
+                                if (base + (track.playbackHeadPosition - head0) >= readAt - hz / 20) over = true
+                            } else waiting = true
+                            sleep = 200
+                            return@synchronized
+                        }
+                        waiting = false
+                        val n = minOf(buf.size.toLong(), left * 2).toInt() and 1.inv()
+                        raf.seek(44 + readAt * 2)
+                        val got = raf.read(buf, 0, n)
+                        if (got <= 0) { sleep = 100; return@synchronized }
+                        pending = got and 1.inv()
+                        pendingOff = 0
+                        readAt += pending / 2
+                    }
+                    val w = track.write(buf, pendingOff, pending, AudioTrack.WRITE_NON_BLOCKING)
+                    if (w < 0) { sleep = 100; return@synchronized }
+                    pendingOff += w
+                    pending -= w
+                    if (pending > 0) sleep = 40
+                }
+                if (over) {
+                    want = false
+                    ended()
+                    sleep = 300
+                }
+                if (sleep > 0) SystemClock.sleep(sleep)
+            }
+        }
+    }
+
+    private const val LEAD_S = 8
 
     private val keep = object : Runnable {
         override fun run() {
             remember()
             if (playing) main.postDelayed(this, 5000)
+        }
+    }
+
+    // Playing one being made: on to its finished file once it is ready (same place, same state).
+    private val handOver = object : Runnable {
+        override fun run() {
+            val j = growing ?: return
+            val f = file
+            val a = app
+            if (j.error != null) { growing = null; return } // stopped: what was made plays to its end
+            if (j.stage == "Done" && f != null && a != null && f.exists()) {
+                val at = position
+                val was = playing
+                growing = null
+                Log.i(ScouterService.TAG, "podcast: made while playing; on from the finished file at ${at / 1000} s")
+                openFile(a, f, title, at, was)
+                return
+            }
+            main.postDelayed(this, 1000)
         }
     }
 
@@ -753,12 +938,37 @@ object PodcastPlayer {
 
     // Play / pause [audio]: it is opened (where it was left) if another one was playing.
     fun toggle(c: Context, audio: File, name: String) {
-        if (file == audio && player != null) {
+        if (file == audio && out != null) {
             if (playing) pause() else play()
-        } else open(c, audio, name)
+        } else openFile(c, audio, name, at(c, audio), true)
     }
 
-    private fun open(c: Context, audio: File, name: String) {
+    // The episode being made, heard from where it was left (if that is made yet) or the start, as it is made.
+    // False: not enough is made yet (a few seconds).
+    fun listen(c: Context, j: Podcasts.Job, name: String): Boolean {
+        val audio = Podcasts.audioOf(j.script)
+        if (j.stage == "Done" && audio.exists()) { toggle(c, audio, name); return true }
+        if (file == audio && out != null) { if (playing) pause() else play(); return true }
+        if (j.wav?.exists() != true || j.hz <= 0 || j.madeMs() < LEAD_S * 1000L) return false
+        stop()
+        val a = c.applicationContext
+        app = a
+        val left = at(a, audio).takeIf { it < j.madeMs() - 2000 } ?: 0
+        val g = runCatching { Growing(j, left) { main.post { ended(audio) } } }.getOrElse {
+            Log.w(ScouterService.TAG, "podcast: play while made: ${it.message}")
+            return false
+        }
+        out = g
+        growing = j
+        file = audio
+        title = name
+        play()
+        main.removeCallbacks(handOver)
+        main.postDelayed(handOver, 1000)
+        return true
+    }
+
+    private fun openFile(c: Context, audio: File, name: String, at: Int, start: Boolean) {
         stop()
         val a = c.applicationContext
         app = a
@@ -773,33 +983,38 @@ object PodcastPlayer {
             Log.w(ScouterService.TAG, "podcast: play: ${it.message}")
             return
         }
-        p.setOnCompletionListener {
-            prefs(a).edit().remove("at:${audio.name}").apply()
-            pausedAt = SystemClock.elapsedRealtime()
-            dropFocus()
-            changed()
-        }
-        player = p
+        p.setOnCompletionListener { ended(audio) }
+        out = Finished(p)
         file = audio
         title = name
-        val at = at(a, audio)
         if (at in 1 until p.duration - 3000) p.seekTo(at)
-        play()
+        if (start) play() else changed()
+    }
+
+    // The end: next time from the start.
+    private fun ended(audio: File) {
+        if (file != audio) return
+        if (out is Growing && growing != null) return // the rest is still being made: the hand-over goes on
+        app?.let { prefs(it).edit().remove("at:${audio.name}").apply() }
+        out?.pause()
+        pausedAt = SystemClock.elapsedRealtime()
+        dropFocus()
+        changed()
     }
 
     fun play() {
-        val p = player ?: return
+        val o = out ?: return
         if (!takeFocus()) return
         resume = false
-        p.start()
+        o.start()
         main.removeCallbacks(keep)
         main.postDelayed(keep, 5000)
         changed()
     }
 
     fun pause() {
-        val p = player ?: return
-        if (playing) p.pause()
+        val o = out ?: return
+        o.pause()
         resume = false
         pausedAt = SystemClock.elapsedRealtime()
         remember()
@@ -808,14 +1023,14 @@ object PodcastPlayer {
     }
 
     fun seekBy(ms: Int) {
-        val p = player ?: return
-        p.seekTo((position + ms).coerceIn(0, maxOf(0, duration - 500)))
+        val o = out ?: return
+        o.seek((position + ms).coerceIn(0, maxOf(0, duration - 500)))
         remember()
         changed()
     }
 
     fun seekTo(ms: Int) {
-        player?.seekTo(ms)
+        out?.seek(ms)
         remember()
         changed()
     }
@@ -824,8 +1039,10 @@ object PodcastPlayer {
     fun stop() {
         remember()
         main.removeCallbacks(keep)
-        runCatching { player?.release() }
-        player = null
+        main.removeCallbacks(handOver)
+        runCatching { out?.release() }
+        out = null
+        growing = null
         file = null
         title = ""
         dropFocus()
@@ -834,7 +1051,7 @@ object PodcastPlayer {
 
     // The car's play / pause (Car mode, idle): this episode's, while one plays or was paused in the last half hour.
     fun carToggle(): Boolean {
-        if (player == null) return false
+        if (out == null) return false
         if (!playing && SystemClock.elapsedRealtime() - pausedAt > 30 * 60_000L) return false
         main.post { if (playing) pause() else play() }
         return true
@@ -843,7 +1060,7 @@ object PodcastPlayer {
     private fun remember() {
         val f = file ?: return
         val a = app ?: return
-        if (player == null) return
+        if (out == null) return
         prefs(a).edit().putInt("at:${f.name}", position).apply()
     }
 
@@ -858,14 +1075,14 @@ object PodcastPlayer {
                 when (change) {
                     AudioManager.AUDIOFOCUS_LOSS -> pause()
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> if (playing) {
-                        player?.pause()
+                        out?.pause()
                         resume = true
                         remember()
                         changed()
                     }
                     AudioManager.AUDIOFOCUS_GAIN -> if (resume) {
                         resume = false
-                        player?.start()
+                        out?.start()
                         main.removeCallbacks(keep)
                         main.postDelayed(keep, 5000)
                         changed()
