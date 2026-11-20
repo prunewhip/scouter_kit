@@ -62,15 +62,20 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private var builtWith: File? = null // what played when the page was built
     private val rowChips = HashMap<File, TextView>() // the list's Play chips, by episode
 
+    private var ticks = 0
     private val tick = object : Runnable {
         override fun run() {
             updateJob()
             updateWriting()
             updatePlayer()
             updateVoice()
+            // The list on screen: a look in the inboxes every 15 s, so a script Claude just left shows up by itself.
+            if (!open && ++ticks % 30 == 0) pullNow()
             main.postDelayed(this, 500)
         }
     }
+
+    private fun pullNow() = Podcasts.pull(a) { received(it, forceMake = false, openIt = false) }
 
     init {
         showList()
@@ -86,7 +91,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             if (!open) showList()
             main.post(tick)
             receive(null)
-            Podcasts.pull(a) { received(it, forceMake = false, openIt = false) }
+            pullNow()
         } else {
             PodcastPlayer.onChange = null
             saveDraft()
@@ -491,6 +496,8 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         if (!making) body.addView(text("Made on the phone, about as fast as it is spoken. It goes on if you leave.", 12.5f, Ui.FAINT)
             .apply { setPadding(dp(4), 0, dp(4), dp(14)) })
 
+        // The text scrolls in a box of its own (a long script never pushes the rest a mile down); a saved one's
+        // text comes last, under how it sounds.
         val src = card("The text", "Lines like HOST: and GUEST: are read by different voices; ## lines are chapter titles.")
         if (f == null) {
             nameF = field("Name", draftName, "e.g. Why the sky is blue").also { src.addField(it) }
@@ -498,11 +505,12 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         } else nameF = null
         textF = field("Text", draft, "Paste or write here…", lines = 10).also { src.addField(it) }
         textF!!.addTextChangedListener(watch { draft = it })
+        boxed(textF!!)
         src.addView(chipRow(
             chip("Open a file", false) { pick() },
             chip("Paste", false) { paste() },
             chip("Clear", false) { draft = ""; textF?.setText("") }), lp().apply { topMargin = dp(10) })
-        body.addView(src)
+        if (f == null) body.addView(src)
 
         val parsed = Podcasts.parse(draft, draftName.ifBlank { "Untitled" })
         styleId = prefs.getString("style:${f?.name ?: "new"}", null) ?: parsed.style
@@ -525,6 +533,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
                 .apply { setPadding(0, dp(6), 0, 0) })
         }
         body.addView(look)
+        if (f != null) body.addView(src)
 
         if (f != null) body.addView(button("Delete this one", 1) {
             dialog().setTitle("Delete ${nameOf(f)}?").setMessage("The text and its episode.")
@@ -554,6 +563,26 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             toast(if (Podcasts.saveToMusic(this, audio, nameOf(f))) "Saved in Music/Vox" else "Could not save it")
         }), lp().apply { topMargin = dp(8) })
         c
+    }
+
+    // A box about half the screen high that scrolls by itself: a finger on it moves the text, not the page (until it
+    // reaches either end).
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    private fun boxed(e: EditText) {
+        e.layoutParams = lp(h = (a.resources.displayMetrics.heightPixels * 0.45f).toInt())
+        e.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+        e.minLines = 1
+        e.isVerticalScrollBarEnabled = true
+        e.scrollBarStyle = View.SCROLLBARS_INSIDE_INSET
+        e.setOnTouchListener { v, ev ->
+            val inside = v.canScrollVertically(1) || v.canScrollVertically(-1)
+            when (ev.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> v.parent?.requestDisallowInterceptTouchEvent(inside)
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL ->
+                    v.parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            false
+        }
     }
 
     private fun watch(on: (String) -> Unit) = object : TextWatcher {

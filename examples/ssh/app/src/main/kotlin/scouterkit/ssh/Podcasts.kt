@@ -664,28 +664,38 @@ object Podcasts {
         return w
     }
 
-    // Scripts left in ~/vox/podcasts/inbox on that server, into the list (moved to ~/vox/podcasts/taken there). At
-    // most once a minute (a connection each time); [done] gets the new files on the main thread.
+    // Scripts left in ~/vox/podcasts/inbox, into the list (moved to ~/vox/podcasts/taken there): on this phone's own
+    // server (where Claude in Termux leaves them) and on the one Claude writes on (server), if that is another. Every
+    // few seconds at most (a connection each time; the page asks while its list shows); [done] gets the new files
+    // on the main thread.
     private var pulledAt = 0L
+    @Volatile private var pulling = false
     private const val FILE_MARK = "@@VOX-FILE@@ "
     private const val PULL = "cd ~/vox/podcasts/inbox 2>/dev/null || exit 0; mkdir -p ../taken; for f in *.md *.txt; do " +
         "[ -f \"\$f\" ] || continue; printf '\\n$FILE_MARK%s\\n' \"\$f\"; cat \"\$f\"; mv \"\$f\" ../taken/; done"
 
     fun pull(c: Context, done: (List<File>) -> Unit) {
         val now = SystemClock.elapsedRealtime()
-        if (pulledAt != 0L && now - pulledAt < 60_000) return
+        if (pulling || (pulledAt != 0L && now - pulledAt < 8_000)) return
         pulledAt = now
+        pulling = true
         val app = c.applicationContext
         Thread({
-            val got = runCatching {
-                val s = server(app) ?: return@runCatching emptyList<File>()
-                val out = Bootstrap(Vault(app)).run(s.host, s.port, s.user, PULL)
-                out.split("\n$FILE_MARK").drop(1).mapNotNull { part ->
-                    val name = part.substringBefore('\n').trim().substringBeforeLast('.')
-                    val text = part.substringAfter('\n', "")
-                    if (text.isBlank() || text.contains('\u0000')) null else add(app, text.take(MAX_CHARS), name)
-                }
-            }.onFailure { Log.i(ScouterService.TAG, "podcast: inbox on the server: ${it.message}") }.getOrDefault(emptyList())
+            val got = ArrayList<File>()
+            try {
+                val list = Settings(app).servers()
+                val where = listOfNotNull(list.firstOrNull { it.local }, server(app)).distinctBy { it.id }
+                for (s in where) runCatching {
+                    val out = Bootstrap(Vault(app)).run(s.host, s.port, s.user, PULL)
+                    for (part in out.split("\n$FILE_MARK").drop(1)) {
+                        val name = part.substringBefore('\n').trim().substringBeforeLast('.')
+                        val text = part.substringAfter('\n', "")
+                        if (text.isNotBlank() && !text.contains('\u0000')) got += add(app, text.take(MAX_CHARS), name)
+                    }
+                }.onFailure { Log.i(ScouterService.TAG, "podcast: inbox on ${s.name}: ${it.message}") }
+            } finally {
+                pulling = false
+            }
             if (got.isNotEmpty()) Handler(Looper.getMainLooper()).post { done(got) }
         }, "podcast-pull").start()
     }
