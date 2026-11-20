@@ -903,7 +903,7 @@ class ScouterService : Service() {
         work.removeCallbacks(batteryTicker)
         work.postDelayed(batteryTicker, 3000)
         header() // the dashboard on the new terminal
-        if (car != null) display(false, "car mode") // driving: nothing on the glasses
+        if (car != null && !carLit) display(false, "car mode") // driving: nothing on the glasses (unless Alt+0 lit them)
     }
 
     // An arm's bond is gone, or its encryption failed: no reconnect and no pairing (Android would pair again by
@@ -1979,9 +1979,15 @@ class ScouterService : Service() {
 
     // Alt+0 / Alt+Z, heads-up mode: the terminal only while looking up (it fades away with the head level), or always. A note says which
     // (the terminal shows for it, then goes by the new rule).
+    // Alt+0 has the last word: on a dark display (Car mode's, Alt+L's, the phone locked) it lights it first, its
+    // heads-up mode kept; Car mode leaves it lit then (a glasses reconnect too) until Car mode ends.
     private fun lookUpOnly() {
         settings.phone = true
-        settings.phoneForce = !settings.phoneForce
+        if (Session.blank) {
+            if (car != null) carLit = true
+            carBlanked = false
+            display(true, "alt+0")
+        } else settings.phoneForce = !settings.phoneForce
         Log.i(TAG, "look-up only: ${!settings.phoneForce}")
         refresh()
         // Said plainly and long enough to read (Alt+0 must never leave a doubt), after the Alt-held help is gone.
@@ -4967,6 +4973,7 @@ class ScouterService : Service() {
         }
     }
     private var carBlanked = false // Car mode turned the glasses' display off
+    private var carLit = false // Alt+0 lit the glasses during Car mode: they stay lit
     private val carDevices = HashMap<String, String>() // a car's Bluetooth address: its name
     private val carGone = HashMap<String, Runnable>() // a car whose link dropped: its end of Car mode, if it stays gone
 
@@ -5134,6 +5141,7 @@ class ScouterService : Service() {
             carListener?.stop()
             if (carBlanked) display(true, "car mode off")
             carBlanked = false
+            carLit = false
         }
         carHost.carChanged()
     }

@@ -124,7 +124,13 @@ object Hotkeys {
 
     private fun shortcut(context: Context, e: KeyEvent): Boolean {
         val settings = Settings(context)
-        if (!settings.hotkeys) return false
+        if (!settings.hotkeys) {
+            // Alt+0 still (it has the last word: heads-up mode, a dark display lit, Car mode's too).
+            if (!(e.isAltPressed && e.keyCode == KeyEvent.KEYCODE_0)) return false
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0)
+                ScouterService.send(context, ScouterService.ACTION_PANEL, "do" to "lookup")
+            return true
+        }
         altHold(context, e)
         // A quick reply being written on the dashboard: every key is its (Alt+Space / Alt+V still listen).
         // (Alt+0, heads-up mode, works everywhere: never typed into anything.)
