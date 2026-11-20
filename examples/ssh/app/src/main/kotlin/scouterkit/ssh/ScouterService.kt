@@ -568,8 +568,11 @@ class ScouterService : Service() {
             // Alt+A, S, L, = / -, P, , / . and the keys while a panel is open (extra "do").
             ACTION_PANEL -> work.post { hotkey(intent.getStringExtra("do").orEmpty()) }
             // Alt+K: the keyboard's keys to the phone's apps, or back to the glasses' terminal.
+            // (Extra "to": "phone" sends them there, Alt+9 opening Termux.)
             ACTION_KEYS -> work.post {
-                Session.keysToPhone = !Session.keysToPhone
+                val phone = intent.getStringExtra("to") == "phone"
+                if (phone && Session.keysToPhone) return@post
+                Session.keysToPhone = phone || !Session.keysToPhone
                 voiceSay(if (Session.keysToPhone) "\u2328 Keyboard: phone (Alt+K for the glasses)" else "\u2328 Keyboard: glasses")
             }
             // The look-up view's settings changed: the header and the fade again.

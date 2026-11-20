@@ -97,7 +97,7 @@ class SettingsActivity : Activity() {
         }
 
         val hot = page.section("Keyboard and trackpad", "set_keys", "keyboard",
-            hint = "A keyboard paired with the phone: Alt+arrows walk the sources, Alt+1…9 picks one, Alt+0 heads-up mode.")
+            hint = "A keyboard paired with the phone: Alt+arrows walk the sources, Alt+1…8 picks one, Alt+9 Termux on the phone, Alt+0 heads-up mode.")
         hot.addToggle(toggle("Alt shortcuts", "Off: Alt with these keys reaches the app in front", settings.hotkeys) {
             settings.hotkeys = it
         })

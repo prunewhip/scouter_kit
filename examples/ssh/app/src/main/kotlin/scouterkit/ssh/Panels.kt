@@ -30,7 +30,8 @@ object Panels {
     val GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "Screens" to listOf(
             "Alt+arrows" to "move between screens",
-            "Alt+1..9" to "jump to a screen",
+            "Alt+1..8" to "jump to a screen",
+            "Alt+9" to "Termux on the phone",
             "Alt+Q" to "close the screen shown",
         ),
         "Display" to listOf(

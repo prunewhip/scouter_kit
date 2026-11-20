@@ -15,7 +15,7 @@ import android.view.accessibility.AccessibilityEvent
 
 // A keyboard's shortcuts (a Bluetooth keyboard paired with the phone): Alt with an arrow moves around the
 // sources as a grid (left and right: this phone, then each other server; up and down: terminal, screen),
-// Alt+1 ... Alt+9 picks Home's source of that number, Alt+0 heads-up mode (look-up only), Alt+L the display off
+// Alt+1 ... Alt+8 picks Home's source of that number, Alt+9 Termux on the phone, Alt+0 heads-up mode (look-up only), Alt+L the display off
 // or on, Alt+V voice mode (talking to the terminal), Alt+Space
 // listens for a voice command, Alt+M the pointer (then arrows, Enter, Escape), Alt+T / [ / ] / W the tabs,
 // Alt+A the help on the glasses (every hotkey: Panels.GROUPS; also while Alt is held by itself), Alt+S the quick
@@ -445,6 +445,11 @@ object Hotkeys {
                 android.widget.Toast.makeText(context.applicationContext, if (on) "Head turn on" else "Head turn off",
                     android.widget.Toast.LENGTH_SHORT).show()
             }
+            return true
+        }
+        // Alt+9: Termux on the phone (the phone's terminal), the keyboard typing into it.
+        if (e.keyCode == KeyEvent.KEYCODE_9) {
+            if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Desktop.terminal(context)
             return true
         }
         // Alt+Shift+D: the phone's Linux desktop (Desktop, the Termux:X11 app); Alt+D alone is the preview.

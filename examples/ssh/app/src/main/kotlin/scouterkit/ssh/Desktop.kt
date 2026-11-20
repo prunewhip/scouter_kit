@@ -24,4 +24,18 @@ object Desktop {
         runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             .onFailure { android.util.Log.w(ScouterService.TAG, "desktop: open failed", it) }
     }
+
+    // Alt+9: Termux, the phone's terminal, to the front; the keyboard types into it (Alt+K gives it back to the
+    // glasses' terminal).
+    fun terminal(context: Context) {
+        val app = context.applicationContext
+        val intent = app.packageManager.getLaunchIntentForPackage("com.termux")
+        if (intent == null) {
+            Toast.makeText(app, "Termux isn't installed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { android.util.Log.w(ScouterService.TAG, "terminal: open failed", it) }
+        if (ScouterService.running) ScouterService.send(app, ScouterService.ACTION_KEYS, "to" to "phone")
+    }
 }

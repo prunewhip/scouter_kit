@@ -155,7 +155,7 @@ this phone's Ubuntu and Termux, mosh's ports and *Forget its host key*).
   where the glasses are going ("LAPTOP // TERMINAL"), and the new picture comes in once its pixels are on the
   arms (about 0.3 s). Each way of switching has its own: Alt+Left / Right (and next / previous) a data stream, a
   neon edge in staggered bands from that side with shards of the new picture flying ahead of it; Alt+Up / Down a
-  CRT scan line with its glow from the top or the bottom, with interference lines ahead; a jump (Alt+1 ... 9, a
+  CRT scan line with its glow from the top or the bottom, with interference lines ahead; a jump (Alt+1 ... 8, a
   click on the dashboard, voice, a shortcut) tiles that decrypt in a random order; the tabs a quicker stream
   toward the tab they go to; the display a CRT switching off (to a line, then a dot) and on (opening from the
   middle). Between two terminals only the terminal moves: the dashboard stays, like a task bar. A switch within
