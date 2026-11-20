@@ -254,6 +254,7 @@ class ScouterService : Service() {
                 longArrayOf(0, 120))
             is CaseCheck.Event.Problem -> Triple("${CaseCheck.name(e.arm)} arm isn't charging",
                 if (e.state == CaseCheck.State.NO_CONTACT) "It doesn't reach the case's charger (the other arm does): lift the glasses out and seat them again"
+                else if (e.state == CaseCheck.State.NO_CURRENT) "Its charger is on but no current flows (${pct(e.pct)}) and restarting it didn't help: lift the glasses out and seat them again"
                 else "It's in the case but gets no charge (${pct(e.pct)}): lift the glasses out and seat them again",
                 longArrayOf(0, 300, 150, 300, 150, 300))
             is CaseCheck.Event.Fixed -> Triple("${CaseCheck.name(e.arm)} arm charging ✓", "It's charging now (${pct(e.pct)})", longArrayOf(0, 120))

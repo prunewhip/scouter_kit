@@ -1461,6 +1461,15 @@ class Arm:
         if len(body) >= 123:   # the LEDs off while the case talks to the arm, its panel on
             v.update(zip(("blanks", "blank_pulses", "blanked_s"), struct.unpack_from("<3I", body, 110)))
             v["blanked"] = bool(body[122])
+        if len(body) >= 140:   # 0.5.69: the charger and its recovery, the case resets asked (0x80)
+            v.update(charge_status=body[123], charge_error=body[124],
+                     charger_restarts=struct.unpack_from("<H", body, 125)[0],
+                     charger_releases=struct.unpack_from("<H", body, 127)[0],
+                     park=dict(zip(("status", "error", "vbus", "ntc", "ilim"), body[129:134])),
+                     park_age_ms=struct.unpack_from("<I", body, 134)[0],
+                     resets_asked=struct.unpack_from("<H", body, 138)[0])
+            if v["park_age_ms"] == M32:
+                v["park_age_ms"] = None
         return v
 
     def case_trace(self):

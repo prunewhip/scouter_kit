@@ -196,6 +196,20 @@ and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, 
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
 
+### What 0.5.69 adds (the charger restarts itself in the case; the case is no longer told to reboot)
+
+- Seen 2026-11-19 (case USB log, case firmware V2.67): the left arm's charger sat idle for minutes in the case with
+  power there (0 mA at VRECT 5.2 V, the enable written after every battery reply), or toggled every poll. Stock's
+  answer, copied in caselink.c, is the 0x80 battery reply once ~3 polls were "powered, not charging"; the case then
+  switches both coils off and reboots ("turn off fields", `MCU BOOT OK`): six times in four hours, both arms cut.
+- `pmic.c charger_tick` (every second): VBUS, charging allowed, battery found, not full, no die-temperature pause,
+  NTC neither cold nor hot, and no charge phase for 20 s, or trickle/CC with under 2 mA flowing for 60 s: a latched
+  charger error is released (TASKCLEARCHGERR + TASKRELEASEERR, at most 3 an hour), else the charger is restarted
+  (BCHGENABLECLR, BCHGENABLESET). Logged with the charger, VBUS, NTC and ILIM status registers.
+- caselink.c: 0x80 only after 3 minutes of the stock condition, at most once per 30 minutes (`resets_asked`).
+- DIAG CASE grows to 140 bytes: charge status and error now, restarts, releases, the registers at the last one and
+  its age, resets asked (`g1host.case_stats()`). Emulator test `charger` (in the gate).
+
 ### What 0.5.68 adds (VIDEOT transform-coded video; flash locked at boot)
 
 - **VIDEOT** (opcode 0x58, VM.md §3.9): natural video as 8-bit pictures up to 320 × 240, 8 × 8 blocks with motion

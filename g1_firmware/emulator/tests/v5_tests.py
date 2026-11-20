@@ -3044,6 +3044,45 @@ def test_videox(name):
 def test_videot(name):
     return run(name, CUR_MIC, videot_body)
 
+
+def charger_body(e, res):
+    """Charger recovery (0.5.69, DEVELOPMENT.md "0.5.69"): with VBUS and the battery at 3.9 V, a latched charger error is
+    released about 20 s later (counted, its registers kept); constant current without current flowing for 60 s
+    restarts the charger; battery replies while powered (VRECT 5.74 V) but not charging no longer carry the 0x80
+    that makes the case reboot, within its 3 minutes."""
+    arm = e.arm
+    out = res.setdefault("charger", {})
+    arm.tr.set_model(NPM, "VbusConnected", "true")
+    arm.tr.set_model(NPM, "BatteryVoltageMilliVolts", "3900")
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "-30")
+    arm.wait(3)
+    c0 = arm.case_stats()
+    common.model_call(arm, NPM, "InjectChargerErrorReason", "32")
+    arm.wait(5)
+    mid = arm.case_stats()
+    arm.wait(20)
+    c1 = arm.case_stats()
+    out["release"] = {k: [c0.get(k), mid.get(k), c1.get(k)] for k in ("charge_status", "charge_error", "charger_releases",
+                                                                     "charger_restarts", "park")}
+    assert mid["charge_error"] == 32 and mid["charger_releases"] == c0["charger_releases"], out
+    assert c1["charger_releases"] == c0["charger_releases"] + 1 and c1["charge_error"] == 0, out
+    assert c1["park"]["error"] == 32 and c1["charge_status"] & 0x0C and c1["park_age_ms"] < 10000, out
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "0")
+    arm.wait(66)
+    c2 = arm.case_stats()
+    out["noflow"] = {"restarts": [c1["charger_restarts"], c2["charger_restarts"]], "park": c2["park"]}
+    assert c2["charger_restarts"] == c1["charger_restarts"] + 1 and c2["park"]["status"] & 0x0C, out
+    replies = [common.case_request(arm, "130001006407") for _ in range(8)]
+    out["replies"] = [r.hex() for r in replies]
+    assert all(len(r) == 11 and r[4] == 0 and r[9] != 0x80 for r in replies), out
+    out["resets_asked"] = arm.case_stats()["resets_asked"]
+    assert out["resets_asked"] == 0, out
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "-30")
+
+
+def test_charger(name):
+    return run(name, CUR_MIC, charger_body)
+
 def test_peer(name):
     return run(name, CUR_MIC, peer_body)
 
@@ -3438,7 +3477,7 @@ TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "upd
          "bad_packets": test_bad_packets, "no_panel": test_no_panel, "starve": test_starve,
          "sessions": test_sessions, "imu": test_imu, "diag": test_diag, "pair_link": test_pair_link,
          "peer": test_peer, "pair_stream": test_pair_stream,
-         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "videot": test_videot, "panel_guard": test_panel_guard,
+         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "videot": test_videot, "charger": test_charger, "panel_guard": test_panel_guard,
          "assets": test_assets}
 for _t in ("crash", "hang", "thread_hang", "safe_mode", "lost_packet", "reset_mid_frame", "security", "pmic_watchdog",
            "i2c_errors", "no_pmic"):

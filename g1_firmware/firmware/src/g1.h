@@ -118,6 +118,11 @@ struct pmic_status {
 	uint8_t vterm_code, charge_status, vbus_status, refuse_reason;
 	uint16_t vbat_mv, ntc_code;
 	uint32_t i2c_errors;
+	/* charger recovery (pmic.c charger_tick, 0.5.69): the error register as last read, the restarts and error
+	 * releases done, and the registers at the last one (charge status, error, VBUS status, NTC status, ILIM status) */
+	uint8_t charge_error, park_status, park_error, park_vbus, park_ntc, park_ilim;
+	uint16_t charger_restarts, charger_releases;
+	uint32_t park_ms;
 };
 extern struct pmic_status pmic_status;
 /* One nPM1300 ADC sample (every second, pmic.c), as read: results 0x05 0x10..0x1A, charger status
@@ -214,7 +219,7 @@ struct caselink_state {
 	uint32_t by_look, reply_n, reply_late, reply_max_us, it_count[8], blanks, blank_pulses;
 	uint64_t blanked_ms;
 	uint64_t reply_sum_us;
-	uint16_t vrect_mv, busy, unknown, long_trip;
+	uint16_t vrect_mv, busy, unknown, long_trip, resets_asked;
 	uint8_t status, level, lid, box_battery, it_sts, gpo_config;
 	bool lid_closed, full_latched, charging, lid_known, box_known, field, blanked;
 };

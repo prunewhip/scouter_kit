@@ -349,7 +349,19 @@ size_t diag_request(const uint8_t *a, size_t alen, uint8_t *b, size_t n, uint8_t
 		put32(&b[n + 114], caselink.blank_pulses);
 		put32(&b[n + 118], (uint32_t)(caselink.blanked_ms / 1000));
 		b[n + 122] = caselink.blanked;
-		return n + 123;
+		/* 0.5.69: the charger now, its recovery (pmic.c charger_tick) and the case resets asked (0x80) */
+		b[n + 123] = pmic_status.charge_status;
+		b[n + 124] = pmic_status.charge_error;
+		put16(&b[n + 125], pmic_status.charger_restarts);
+		put16(&b[n + 127], pmic_status.charger_releases);
+		b[n + 129] = pmic_status.park_status;
+		b[n + 130] = pmic_status.park_error;
+		b[n + 131] = pmic_status.park_vbus;
+		b[n + 132] = pmic_status.park_ntc;
+		b[n + 133] = pmic_status.park_ilim;
+		put32(&b[n + 134], pmic_status.park_ms ? k_uptime_get_32() - pmic_status.park_ms : UINT32_MAX);
+		put16(&b[n + 138], caselink.resets_asked);
+		return n + 140;
 	}
 	case D_ADC_BURST: {   /* u8 n, u16 wait µs, u8 first (0: take a new record): VBAT+IBAT conversions with their
 			       * times (the panel's pulse, docs/review-dimming.md point 12); per one: u16 t (10 µs since the

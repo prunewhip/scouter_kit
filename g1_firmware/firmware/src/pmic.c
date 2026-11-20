@@ -306,6 +306,7 @@ static bool sample(void)
 	pmic_status.charge_status = v;
 	if (rd(0x03, 0x36, &v, 1) == 0) {
 		m.charge_error = v;
+		pmic_status.charge_error = v;
 	}
 	if (rd(0x08, 0x04, &v, 1) == 0) {
 		m.ldsw_status = v;
@@ -410,6 +411,78 @@ static int configure(void)
 	pmic_status.charging_enabled = wr1(0x03, 0x04, 0x01) == 0;
 	LOG_INF("charging enabled, VTERM code 0x%02x, NTC %u", pmic_status.vterm_code, pmic_status.ntc_code);
 	return 0;
+}
+
+/* Charger recovery (0.5.69, DEVELOPMENT.md "0.5.69"). In the case the left arm's charger was seen idle for minutes with power
+ * there (0 mA at VRECT 5.2 V although the enable is written after every battery reply), and stock's answer to that,
+ * the 0x80 reply, makes the case switch its coils off and reboot, cutting both arms (caselink.c). Here, with VBUS,
+ * charging allowed, the battery found and not full (COMPLETED, the case latch), no die-temperature pause and the
+ * NTC neither cold nor hot: no charge phase for STALL_S seconds in a row, or trickle/constant current without
+ * 2 mA flowing for NOFLOW_S, restarts the charger (BCHGENABLECLR, BCHGENABLESET); a latched charger error is
+ * released instead (TASKCLEARCHGERR, TASKRELEASEERR), at most RELEASES_PER_H an hour so that a real fault (the
+ * safety timer) stays honoured. The case's own reboot did both, for both arms, every few seconds. */
+#define STALL_S 20
+#define NOFLOW_S 60
+#define RELEASES_PER_H 3
+
+static void charger_tick(void)
+{
+	static uint8_t stalled, noflow, releases;
+	static uint32_t window_ms;
+	uint8_t cs = pmic_status.charge_status, ntc = 0, ilim = 0;
+	uint32_t now = k_uptime_get_32();
+	bool phase = cs & 0x0C;   /* trickle, constant current */
+
+	if (now - window_ms >= 3600000U) {
+		window_ms = now;
+		releases = 0;
+	}
+	if (!charge_allowed || !pmic_vbus_present() || !(cs & 0x01) || (cs & 0x72) || caselink.full_latched) {
+		stalled = 0;
+		noflow = 0;
+		return;
+	}
+	if (phase) {
+		stalled = 0;
+		noflow = power_ibat_ua() > -2000 ? noflow + 1 : 0;
+		if (noflow < NOFLOW_S) {
+			return;
+		}
+	} else {
+		noflow = 0;
+		if (++stalled < STALL_S) {
+			return;
+		}
+	}
+	stalled = 0;
+	noflow = 0;
+	if (rd(0x03, 0x32, &ntc, 1) == 0 && (ntc & 0x09)) {
+		return;   /* cold or hot: the chip's own pause */
+	}
+	rd(0x03, 0x2D, &ilim, 1);
+	pmic_status.park_status = cs;
+	pmic_status.park_error = pmic_status.charge_error;
+	pmic_status.park_vbus = pmic_status.vbus_status;
+	pmic_status.park_ntc = ntc;
+	pmic_status.park_ilim = ilim;
+	pmic_status.park_ms = now;
+	if (pmic_status.charge_error) {
+		if (releases >= RELEASES_PER_H) {
+			return;
+		}
+		releases++;
+		wr1(0x03, 0x01, 0x01);
+		wr1(0x03, 0x00, 0x01);
+		pmic_status.charger_releases++;
+	} else {
+		wr1(0x03, 0x05, 0x01);
+		k_msleep(10);
+		pmic_status.charger_restarts++;
+	}
+	pmic_status.charging_enabled = wr1(0x03, 0x04, 0x01) == 0;
+	LOG_WRN("charger idle with VBUS (status 0x%02x, error 0x%02x, VBUS 0x%02x, NTC 0x%02x, ILIM 0x%02x, %d uA): %s",
+		cs, pmic_status.park_error, pmic_status.park_vbus, ntc, ilim, (int)power_ibat_ua(),
+		pmic_status.park_error ? "error released" : "restarted");
 }
 
 static void arm_watchdog(void)
@@ -622,6 +695,7 @@ static void pmic_thread(void *a, void *b, void *c)
 			caselink_vbus_changed();
 		}
 		guard_tick(sample());
+		charger_tick();
 		power_line(t);
 		caselink_battery_tick();
 		exec_sensors();
