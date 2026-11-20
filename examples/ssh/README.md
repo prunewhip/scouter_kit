@@ -391,7 +391,9 @@ when a car's Bluetooth audio connects (Bluetooth class car audio or hands-free) 
 media session of its own, which Android gives the keys once Vox has played a moment of silence (the last app to
 start playing gets them). Vox plays it again half a second after any other player starts (an
 `AudioPlaybackCallback`: Spotify resuming after an answer, a new track) and, on Android 13+, whenever Android says
-the keys went elsewhere (if it lets Vox know).
+the keys went elsewhere (if it lets Vox know). While another app plays (YouTube, Spotify) a moment is not enough
+(Android gives the keys back to the app playing), so Vox loops silence for as long as the other app plays, started
+again when the keys still go away (five times a minute at most, then a two-minute rest).
 
 Next listens on the phone's own microphone by default (*Listen with*; the glasses' battery spared: `PhoneMic`,
 16 kHz, voice-recognition tuning), or the glasses' (Parakeet either way, loaded ahead when Car mode comes on); the
@@ -400,12 +402,18 @@ only through a microphone foreground service started while the app was in front:
 whenever Vox comes to the front with the microphone allowed (and drops it again if Android refuses it later). Next again sends (a chime at once; what was still being said is
 read too). Nothing else ends a question but play / pause (sends) and two minutes. The words go, by default
 (*Talk to: this Claude*), into the Claude session running in the server's tmux (the conversation the glasses show,
-which goes on there): a small Python script on the server finds the pane running Claude, refuses while Claude
-waits for an OK on its screen, types the words with a note that they came by voice from the car and asks for a
-short spoken answer, and reads Claude's reply from that session's transcript (`~/.claude/projects/*/*.jsonl`: the
-text after its last tool use, once the turn ends; four minutes at most). *A separate chat* uses
-`claude -p --output-format json` instead (a spoken-style system prompt, web search and fetch allowed, its own
-conversation resumed by session id until "new conversation").
+which goes on there): a small Python script on the server finds the pane running Claude, types the words with a
+note that they came by voice from the car and asks for a short spoken answer, and keeps what it needs to follow the
+turn in `~/.cache/vox-car/`. The phone then follows the turn in rounds of 90 s (each a new SSH command) for up to
+half an hour: the reply is read from that session's transcript (`~/.claude/projects/*/*.jsonl`, read on from where
+the question was: the text after the last tool use, once the turn ends). After 25 s the music comes back ("still
+working on it") and the answer is read after a chime when it comes (after whatever Vox is doing then). When Claude
+asks for an OK on its screen (a permission prompt, found with `tmux capture-pane`), the question and what it is about
+are read aloud, and the next words answer it: yes (the first option), always (the "don't ask again" one), no
+(Escape), or anything else (Escape, then those words to Claude). "Read that back" reads the last answer again
+(kept in the settings, also after the car was off). *A separate chat* uses `claude -p --output-format json`
+instead (a spoken-style system prompt; web search and fetch, and reading and editing files, allowed), its own
+conversation resumed by session id until "new conversation", run in the conversation's folder.
 
 The answer is read aloud through the car with the music paused (transient focus; it resumes after): in Kokoro's
 voice once downloaded (Kokoro 82M v1.0, int8, about 150 MB from Hugging Face at a pinned revision, each file
@@ -413,9 +421,13 @@ checked by SHA-256, sherpa-onnx's `OfflineTts` made sentence by sentence and pla
 choose from), else Android's text-to-speech (its best installed voice). Chimes, made in code: Car mode on, listening
 (rising), sent (falling), a soft tick while Claude thinks, a low pair for a problem, a step down when nothing was
 sent. Next while Claude speaks or thinks asks again; play / pause stops the answer or cancels; Previous says the
-answer again. Idle, play / pause goes to the music app and Previous starts a new conversation: a new tmux tab,
-opened behind the one in front (your own conversation stays where it was), running a fresh Claude on Sonnet
-(quicker for talk); the questions go to that tab from then on (a chat: its session forgotten). Sonnet is set for
+answer again. Idle, play / pause goes to a Vox podcast episode playing (or paused in the last half hour), else to
+the music app, and Previous starts a new conversation (so do "new conversation" and "new project NAME"): a folder of
+its own on the server, `~/car/<date-time>` (or `~/car/<name>`) with a `CLAUDE.md` saying what it is, and a new tmux
+tab there, opened behind the one in front (your own conversation stays where it was), running a fresh Claude on
+Sonnet (quicker for talk) that edits files without asking (`--permission-mode acceptEdits`); the questions go to
+that tab from then on (its pane is kept in the settings; a chat: its session forgotten, the next one in the new
+folder). Sonnet is set for
 that one process (ANTHROPIC_MODEL), never with `claude --model`, which can become the saved default and switch your
 own Claude too; if the saved default (`~/.claude/settings.json`) changed anyway, it is put back. While Car mode is on the glasses' display stays off (driving): it goes dark when Car mode comes
 on or the glasses connect, panels and the phone waking don't light it, nothing of Car mode's is drawn on them, and
@@ -591,19 +603,24 @@ with the app in the back.
   connected is no longer dropped because the other took over 30 s); the log says how long each arm and the whole
   start took. Pairing scans as the page opens, stops 1.2 s after a whole pair is seen and pairs the only pair
   found without a tap.
-- **Podcasts** (Voice tab, Podcasts: `PodcastActivity` + `Podcasts.kt`): a text read aloud in several voices as an
-  episode on the phone, a port of the core of the Narrator Studio app. Paste or open a .txt / .md (an article, a
+- **Podcasts** (its own tab: `PodcastPage`, also on a screen of its own for Share, `PodcastActivity`; `Podcasts.kt`):
+  a text read aloud in several voices as an episode on the phone, a port of the core of the Narrator Studio app.
+  **Ask Claude to write one**: a topic, a length (5, 10, 20 min) and a style; `claude -p` writes the script on the
+  server Claude runs on (Car mode's), in `~/vox/podcasts` there (where the script is kept), and the episode is made
+  when it is written. The player (`PodcastPlayer`) goes on while the page is away or the phone is locked, each episode
+  from where it was left, pausing while Car mode or a call takes the sound; each episode in the list has Play. Paste or open a .txt / .md (an article, a
   chapter, notes) or a script with `HOST:` / `GUEST:` lines (front matter `title:` / `style:`, `## ` headings,
   `[pause 2]`); six styles (audiobook, podcast, lecture, interview, story, briefing) set the pace, the gaps and who
   reads which tag; each speaker's voice is one of Kokoro's 28 English voices (the car's model, shared; tap to hear).
   Made sentence by sentence into a WAV, then an AAC .m4a in `Android/data/<app>/files/podcasts` beside its text,
-  with a bar and the time left; played in the page (seek, 15 s back, 30 s forward), saved to Music/Vox on a tap.
+  with a bar and the time left; played on the page (seek, 15 s back, 30 s on), saved to Music/Vox on a tap.
   Text gets in by **Share** (the share sheet's "Vox Podcasts", from Claude's app or any other; it opens as a new
   text, never over another), by a file dropped in `Android/data/<app>/files/podcasts/inbox/` (what Claude on the
-  phone does, with `/root/vox-tools/podcast.sh FILE [--make]`; read each time the page opens), or by an intent with
+  phone does over adb; read each time the page opens), by a .md or .txt left in `~/vox/podcasts/inbox` on the server
+  (taken when the tab opens, at most once a minute; moved to `~/vox/podcasts/taken`), or by an intent with
   `--ez make true`; `make: true` in a text's header also starts the episode (when the voice is downloaded). Nothing is
   read aloud unless asked, and a notification says when an episode is ready.
-  "Copy the request" makes a prompt that has Claude write a script in this format. Not yet in the phone port:
+  Not yet in the phone port:
   PDFs, VibeVoice and voice cloning, music and sound cues, chapters in the file.
 - **Alt+N** (or **E** on the hub) opens the text editor on the glasses (`Editor.kt`, `Panels.EDITOR`): the .txt and
   .md files in Vox's folder `Android/data/<app id>/files/docs` (copy files there from a computer or with `adb push`),

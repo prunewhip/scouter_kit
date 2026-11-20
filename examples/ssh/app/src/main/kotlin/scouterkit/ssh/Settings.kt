@@ -456,6 +456,11 @@ class Settings(context: Context) {
     var carSpeaker: Int by Number("car_speaker", 3)
     // Car mode listens on "phone" (its own microphone: the glasses' battery spared) or "glasses".
     var carMic: String by Text("car_mic", "phone")
+    // The last answer read in the car ("read that back", also after the car was off), the tmux pane of the car's own
+    // Claude tab (a new conversation; empty: the conversation in front), and the car conversation's folder (in ~/car).
+    var carLast: String by Text("car_last", "")
+    var carPane: String by Text("car_pane", "")
+    var carFolder: String by Text("car_folder", "")
     // Smart home (Home.kt): Home Assistant's address (http://homeassistant.local:8123), a long-lived access token,
     // and the entities to show (light.kitchen, climate.living_room...).
     var haUrl: String by Text("ha_url", "")

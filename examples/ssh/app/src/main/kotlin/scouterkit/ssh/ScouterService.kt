@@ -459,7 +459,7 @@ class ScouterService : Service() {
         }
         settings.listen(lookPrefs)
         work.postDelayed(windowPoll, 3000)
-        Media.onChange = { work.post { dash(); car?.show() } }
+        Media.onChange = { work.post { dash(); car?.mediaChanged() } }
         Media.onStarted = { work.post { car?.reclaim() } }
         Media.start(this)
         registerReceiver(carLink, IntentFilter().apply {
@@ -580,9 +580,9 @@ class ScouterService : Service() {
                     "car_check" -> carCheck()
                     "mic_fg" -> micForeground()
                     "car_test" -> carTest()
-                    "car_new" -> {
+                    "car_new" -> car?.newConversation() ?: run {
                         settings.carSession = ""
-                        car?.newConversation()
+                        settings.carPane = ""
                     }
                     "car_talk" -> car?.talk()
                     "car_voice" -> Thread { // Kokoro downloaded (the Voice tab): loaded ahead while Car mode is on
@@ -5035,7 +5035,7 @@ class ScouterService : Service() {
         }
         override fun carVault() = vault
         override fun carChanged() {
-            Session.car = car?.state?.name?.lowercase() ?: ""
+            Session.car = car?.let { if (it.state == CarMode.State.IDLE && it.working) "working" else it.state.name.lowercase() } ?: ""
             Session.changed()
         }
     }

@@ -2,11 +2,18 @@ package scouterkit.ssh
 
 import android.content.ContentValues
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.media.MediaPlayer
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
@@ -18,6 +25,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 // into an episode on the phone. A port of the core of the Narrator Studio app: its script format, its reading
 // styles and its cast of characters, with Kokoro (the car's voice model, shared) as the voice. Episodes are .m4a
 // files in Android/data/<app>/files/podcasts beside the script they were made from, and can be saved to Music.
+// Claude writes one from a topic on the server Claude runs on (Car mode's), in ~/vox/podcasts there, where the
+// script is kept; a script left in ~/vox/podcasts/inbox there (by Claude in the terminal, or anything else) comes
+// into the list when the Podcasts tab opens.
 object Podcasts {
     // --------------------------------------------------------------- voices
 
@@ -309,6 +319,26 @@ object Podcasts {
 
     fun audioOf(script: File) = File(script.parentFile, script.nameWithoutExtension + ".m4a")
 
+    // An episode's length ("12 min"), read once per version of the file.
+    private val lengths = HashMap<String, String>()
+
+    fun minutes(f: File): String {
+        val key = "${f.path}:${f.lastModified()}"
+        lengths[key]?.let { return it }
+        val s = runCatching {
+            val m = android.media.MediaMetadataRetriever()
+            try {
+                m.setDataSource(f.path)
+                val ms = m.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong()
+                "${maxOf(1, (ms + 30_000) / 60_000)} min"
+            } finally {
+                m.release()
+            }
+        }.getOrDefault("")
+        lengths[key] = s
+        return s
+    }
+
     // ---------------------------------------------------------------- making
 
     // One episode being made (one at a time): the screen reads it, and it goes on while the screen is away.
@@ -491,13 +521,15 @@ object Podcasts {
     }
 
     // "Ready" in the notifications (the screen may be off, or another app open).
-    private fun notifyDone(c: Context, title: String) = runCatching {
+    private fun notifyDone(c: Context, title: String) = notice(c, "Episode ready", title)
+
+    private fun notice(c: Context, what: String, title: String) = runCatching {
         val nm = c.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
         nm.createNotificationChannel(android.app.NotificationChannel("podcasts", "Podcasts", android.app.NotificationManager.IMPORTANCE_DEFAULT))
         val open = android.app.PendingIntent.getActivity(c, 31, android.content.Intent(c, PodcastActivity::class.java)
             .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK), android.app.PendingIntent.FLAG_IMMUTABLE)
         nm.notify(7303, android.app.Notification.Builder(c, "podcasts").setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentTitle("Episode ready").setContentText(title).setContentIntent(open).setAutoCancel(true).build())
+            .setContentTitle(what).setContentText(title).setContentIntent(open).setAutoCancel(true).build())
     }
 
     // A voice heard: a short line in it, on its own thread (nothing while an episode is being made).
@@ -537,6 +569,127 @@ object Podcasts {
         true
     }.getOrElse { Log.w(ScouterService.TAG, "podcast: save to Music: ${it.message}"); false }
 
+    // ------------------------------------------------- made in one go
+
+    // The text in [f] made into its episode with what was chosen for it (its style, speed and voices: the Podcasts
+    // screen keeps them), else its header's style and the style's cast. Null: another one is being made.
+    fun makeFile(c: Context, f: File): Job? {
+        val prefs = c.getSharedPreferences("podcasts", Context.MODE_PRIVATE)
+        val text = runCatching { f.readText() }.getOrNull() ?: return null
+        val script = parse(text, f.nameWithoutExtension.replace('-', ' ').replaceFirstChar { it.uppercase() })
+        if (script.blocks.none { it is Block.Line || it is Block.Heading }) return null
+        val st = style(prefs.getString("style:${f.name}", null) ?: script.style ?: if (script.speakers.size >= 2) "podcast" else "audiobook")
+        val cast = defaultCast(st, script.speakers)
+        prefs.getString("cast:${f.name}", "")!!.split("|").filter { "=" in it }.forEach {
+            val (k, v) = it.split("=", limit = 2)
+            if (k in cast) v.toIntOrNull()?.let { sid -> cast[k] = sid }
+        }
+        return make(c, f, script, cast, st, prefs.getInt("speed:${f.name}", 100) / 100f)
+    }
+
+    // ------------------------------------------------ written by Claude
+
+    // Claude writing a script (one at a time), on its own thread; made into the episode once written if asked.
+    class Writing(val topic: String, val minutes: Int, val make: Boolean) {
+        val started = SystemClock.elapsedRealtime()
+        @Volatile var error: String? = null
+        @Volatile var result: File? = null
+        val finished get() = error != null || result != null
+    }
+
+    @Volatile var writing: Writing? = null
+
+    // The server Claude runs on: Car mode's choice, else this phone's, else the one in use.
+    fun server(c: Context): Settings.Server? {
+        val s = Settings(c)
+        val list = s.servers()
+        return list.firstOrNull { it.id == s.carServer } ?: list.firstOrNull { it.local } ?: s.active()
+    }
+
+    private const val WRITE_MORE = "\n\nReply with the script only, nothing before or after it. Check facts on the web " +
+        "when the topic needs it."
+
+    // `claude -p` in ~/vox/podcasts on the server: the script to NAME.md there, and out (after a line VOX-RC <exit code>).
+    private fun writeCommand(prompt: String, name: String) = CarClaude.PATH +
+        "cd ~ && mkdir -p vox/podcasts/inbox && cd vox/podcasts || { echo 'VOX: could not make ~/vox/podcasts'; exit 0; }; " +
+        "command -v claude >/dev/null || { echo 'VOX: claude is not installed there'; exit 0; }; " +
+        "F=${CarClaude.q(name)}.md; printf %s ${CarClaude.q(prompt)} | claude -p --output-format text " +
+        "--allowedTools 'WebSearch,WebFetch' > \"\$F.part\" 2>&1; rc=\$?; echo \"VOX-RC \$rc\"; cat \"\$F.part\"; " +
+        "if [ \$rc = 0 ]; then mv \"\$F.part\" \"\$F\"; else rm -f \"\$F.part\"; fi"
+
+    // What Claude wrote, without a word before the script's header or a code fence around it.
+    private fun scriptOf(out: String): String {
+        var t = out.lines().filterNot { it.trim().startsWith("```") }.joinToString("\n").trim()
+        val head = t.indexOf("---\n")
+        if (head in 1..600 && t.substring(0, head).endsWith("\n")) t = t.substring(head)
+        return t
+    }
+
+    fun write(c: Context, topic: String, style: Style, minutes: Int, make: Boolean): Writing? {
+        if (writing?.finished == false) return null
+        val app = c.applicationContext
+        val w = Writing(topic, minutes, make)
+        writing = w
+        Thread({
+            try {
+                val server = server(app) ?: throw IllegalStateException("Add a server for Claude in Vox first")
+                val name = slug(topic) + "-" + java.text.SimpleDateFormat("MMdd-HHmm", java.util.Locale.US).format(java.util.Date())
+                val out = try {
+                    Bootstrap(Vault(app)).run(server.host, server.port, server.user, writeCommand(prompt(topic, style, minutes) + WRITE_MORE, name))
+                } catch (e: Bootstrap.UnknownHost) {
+                    throw IllegalStateException("${server.name} is not trusted yet: open its terminal once in Vox")
+                } catch (e: Exception) {
+                    throw IllegalStateException("Could not reach ${server.name}: ${e.message ?: ""}".trim())
+                }
+                out.lines().firstOrNull { it.startsWith("VOX: ") }?.let { throw IllegalStateException(it.removePrefix("VOX: ")) }
+                val at = out.indexOf("VOX-RC ")
+                if (at < 0) throw IllegalStateException(out.lines().lastOrNull { it.isNotBlank() }?.take(200) ?: "Claude gave no answer")
+                val eol = out.indexOf('\n', at).let { if (it < 0) out.length else it }
+                val rc = out.substring(at + 7, eol).trim().toIntOrNull() ?: 1
+                val body = out.substring(minOf(out.length, eol + 1))
+                if (rc != 0) throw IllegalStateException(body.lines().lastOrNull { it.isNotBlank() }?.take(200) ?: "Claude had a problem")
+                val text = scriptOf(body)
+                if (parse(text, topic).blocks.none { it is Block.Line }) throw IllegalStateException("Claude's answer had no script in it")
+                val f = add(app, text.take(MAX_CHARS), null)
+                val st = parse(text, topic).style ?: style.id
+                app.getSharedPreferences("podcasts", Context.MODE_PRIVATE).edit().putString("style:${f.name}", st).apply()
+                w.result = f
+                Log.i(ScouterService.TAG, "podcast: Claude wrote '${f.name}' in ${(SystemClock.elapsedRealtime() - w.started) / 1000} s")
+                if (make && KokoroModel.ready(app)) makeFile(app, f) else notice(app, "Script ready", parse(text, topic).title)
+            } catch (e: Throwable) {
+                Log.w(ScouterService.TAG, "podcast: writing: ${e.message}")
+                w.error = e.message ?: "It stopped"
+            }
+        }, "podcast-write").start()
+        return w
+    }
+
+    // Scripts left in ~/vox/podcasts/inbox on that server, into the list (moved to ~/vox/podcasts/taken there). At
+    // most once a minute (a connection each time); [done] gets the new files on the main thread.
+    private var pulledAt = 0L
+    private const val FILE_MARK = "@@VOX-FILE@@ "
+    private const val PULL = "cd ~/vox/podcasts/inbox 2>/dev/null || exit 0; mkdir -p ../taken; for f in *.md *.txt; do " +
+        "[ -f \"\$f\" ] || continue; printf '\\n$FILE_MARK%s\\n' \"\$f\"; cat \"\$f\"; mv \"\$f\" ../taken/; done"
+
+    fun pull(c: Context, done: (List<File>) -> Unit) {
+        val now = SystemClock.elapsedRealtime()
+        if (pulledAt != 0L && now - pulledAt < 60_000) return
+        pulledAt = now
+        val app = c.applicationContext
+        Thread({
+            val got = runCatching {
+                val s = server(app) ?: return@runCatching emptyList<File>()
+                val out = Bootstrap(Vault(app)).run(s.host, s.port, s.user, PULL)
+                out.split("\n$FILE_MARK").drop(1).mapNotNull { part ->
+                    val name = part.substringBefore('\n').trim().substringBeforeLast('.')
+                    val text = part.substringAfter('\n', "")
+                    if (text.isBlank() || text.contains('\u0000')) null else add(app, text.take(MAX_CHARS), name)
+                }
+            }.onFailure { Log.i(ScouterService.TAG, "podcast: inbox on the server: ${it.message}") }.getOrDefault(emptyList())
+            if (got.isNotEmpty()) Handler(Looper.getMainLooper()).post { done(got) }
+        }, "podcast-pull").start()
+    }
+
     // For Claude (or any chat): a request that makes a script in this format. Pasted, then the answer is pasted back.
     fun prompt(topic: String, style: Style, minutes: Int): String {
         val tags = style.cast.keys.filter { it != "NARRATOR" }.take(2)
@@ -550,5 +703,173 @@ object Podcasts {
             "- Write for the ear: short sentences, no lists, tables, links or emoji, numbers and symbols spelled the way they are said.\n" +
             "- [pause 2] on its own line makes a two-second pause.\n" +
             "- Plain text only: no other markdown."
+    }
+}
+
+// The episode playing: one at a time, kept while screens come and go (the Podcasts tab, its own screen, the phone
+// locked), each episode going on where it was left. It pauses while a call, Car mode or another app takes the sound,
+// and comes back after.
+object PodcastPlayer {
+    private val main = Handler(Looper.getMainLooper())
+    private var player: MediaPlayer? = null
+    private var app: Context? = null
+    private var focus: AudioFocusRequest? = null
+    private var resume = false // paused for a moment (a call, Car mode): back when the sound is Vox's again
+    private var pausedAt = 0L
+    private val attrs = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+
+    @Volatile var file: File? = null
+        private set
+    var title = ""
+        private set
+    var onChange: (() -> Unit)? = null
+
+    val playing: Boolean get() = runCatching { player?.isPlaying == true }.getOrDefault(false)
+    val position: Int get() = runCatching { player?.currentPosition ?: 0 }.getOrDefault(0)
+    val duration: Int get() = runCatching { player?.duration ?: 0 }.getOrDefault(0)
+
+    private val keep = object : Runnable {
+        override fun run() {
+            remember()
+            if (playing) main.postDelayed(this, 5000)
+        }
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("podcasts", Context.MODE_PRIVATE)
+
+    // Where an episode was left (ms); 0: from the start.
+    fun at(c: Context, audio: File) = prefs(c).getInt("at:${audio.name}", 0)
+
+    // Play / pause [audio]: it is opened (where it was left) if another one was playing.
+    fun toggle(c: Context, audio: File, name: String) {
+        if (file == audio && player != null) {
+            if (playing) pause() else play()
+        } else open(c, audio, name)
+    }
+
+    private fun open(c: Context, audio: File, name: String) {
+        stop()
+        val a = c.applicationContext
+        app = a
+        val p = runCatching {
+            MediaPlayer().apply {
+                setAudioAttributes(attrs)
+                setWakeMode(a, PowerManager.PARTIAL_WAKE_LOCK)
+                setDataSource(audio.path)
+                prepare()
+            }
+        }.getOrElse {
+            Log.w(ScouterService.TAG, "podcast: play: ${it.message}")
+            return
+        }
+        p.setOnCompletionListener {
+            prefs(a).edit().remove("at:${audio.name}").apply()
+            pausedAt = SystemClock.elapsedRealtime()
+            dropFocus()
+            changed()
+        }
+        player = p
+        file = audio
+        title = name
+        val at = at(a, audio)
+        if (at in 1 until p.duration - 3000) p.seekTo(at)
+        play()
+    }
+
+    fun play() {
+        val p = player ?: return
+        if (!takeFocus()) return
+        resume = false
+        p.start()
+        main.removeCallbacks(keep)
+        main.postDelayed(keep, 5000)
+        changed()
+    }
+
+    fun pause() {
+        val p = player ?: return
+        if (playing) p.pause()
+        resume = false
+        pausedAt = SystemClock.elapsedRealtime()
+        remember()
+        dropFocus()
+        changed()
+    }
+
+    fun seekBy(ms: Int) {
+        val p = player ?: return
+        p.seekTo((position + ms).coerceIn(0, maxOf(0, duration - 500)))
+        remember()
+        changed()
+    }
+
+    fun seekTo(ms: Int) {
+        player?.seekTo(ms)
+        remember()
+        changed()
+    }
+
+    // Closed (where it was is kept).
+    fun stop() {
+        remember()
+        main.removeCallbacks(keep)
+        runCatching { player?.release() }
+        player = null
+        file = null
+        title = ""
+        dropFocus()
+        changed()
+    }
+
+    // The car's play / pause (Car mode, idle): this episode's, while one plays or was paused in the last half hour.
+    fun carToggle(): Boolean {
+        if (player == null) return false
+        if (!playing && SystemClock.elapsedRealtime() - pausedAt > 30 * 60_000L) return false
+        main.post { if (playing) pause() else play() }
+        return true
+    }
+
+    private fun remember() {
+        val f = file ?: return
+        val a = app ?: return
+        if (player == null) return
+        prefs(a).edit().putInt("at:${f.name}", position).apply()
+    }
+
+    private fun changed() = main.post { onChange?.invoke() }
+
+    private fun takeFocus(): Boolean {
+        if (focus != null) return true
+        val am = app?.getSystemService(AudioManager::class.java) ?: return true
+        val f = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(attrs)
+            .setWillPauseWhenDucked(true)
+            .setOnAudioFocusChangeListener({ change ->
+                when (change) {
+                    AudioManager.AUDIOFOCUS_LOSS -> pause()
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> if (playing) {
+                        player?.pause()
+                        resume = true
+                        remember()
+                        changed()
+                    }
+                    AudioManager.AUDIOFOCUS_GAIN -> if (resume) {
+                        resume = false
+                        player?.start()
+                        main.removeCallbacks(keep)
+                        main.postDelayed(keep, 5000)
+                        changed()
+                    }
+                }
+            }, main).build()
+        if (am.requestAudioFocus(f) == AudioManager.AUDIOFOCUS_REQUEST_FAILED) return false
+        focus = f
+        return true
+    }
+
+    private fun dropFocus() {
+        val f = focus ?: return
+        focus = null
+        app?.getSystemService(AudioManager::class.java)?.abandonAudioFocusRequest(f)
     }
 }

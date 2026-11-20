@@ -187,6 +187,7 @@ class MainActivity : Activity() {
         pages += terminalPage(settings)
         pages += voicePage(settings)
         pages += tvPage()
+        pages += podcastPage()
         for (p in pages) content.addView(p, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         for (p in pages) p.foldLongText() // the long explanations: their first lines, "more" for the rest
         selectTab(getPreferences(MODE_PRIVATE).getInt("tab", 0), animate = false)
@@ -215,7 +216,7 @@ class MainActivity : Activity() {
             setPadding(dp(6), dp(8), dp(6), dp(10))
         }
         val items = listOf("glasses" to "Glasses", "screen" to "Screen", "terminal" to "Terminal", "mic" to "Voice",
-            "tv" to "TV", "gear" to "Settings")
+            "tv" to "TV", "headphones" to "Podcasts", "gear" to "Settings")
         for ((i, item) in items.withIndex()) {
             val (icon, name) = item
             val cell = LinearLayout(this).apply {
@@ -229,8 +230,11 @@ class MainActivity : Activity() {
             val pill = FrameLayout(this)
             val glyph = IconView(this, icon, 22, Ui.MUTED)
             pill.addView(glyph, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-            cell.addView(pill, LinearLayout.LayoutParams(dp(58), dp(32)))
-            val label = text(name, 11.5f, Ui.MUTED, Ui.BOLD).apply { gravity = Gravity.CENTER }
+            cell.addView(pill, LinearLayout.LayoutParams(dp(50), dp(32)))
+            val label = text(name, 11f, Ui.MUTED, Ui.BOLD).apply {
+                gravity = Gravity.CENTER
+                maxLines = 1
+            }
             cell.addView(label, lp(ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
             tabItems += Triple(pill, glyph, label)
             bar.addView(cell, lp(0, weight = 1f))
@@ -269,6 +273,7 @@ class MainActivity : Activity() {
         wantPreview()
         if (tab == 1) previewView.refresh()
         if (tab == TV_TAB) tv?.refresh()
+        podcasts?.visible(resumed && tab == PODCAST_TAB)
     }
 
     // The screen's picture is made only while a tab shows it (Screen, or Glasses while a screen is on them).
@@ -285,6 +290,24 @@ class MainActivity : Activity() {
         val (scroll, page) = scrollPage()
         tv = TvPage(this, page)
         return scroll
+    }
+
+    // ------------------------------------------------ Podcasts (PodcastPage, as its own screen for Share)
+
+    private var podcasts: PodcastPage? = null
+    private val PODCAST_TAB = 5
+
+    private fun podcastPage(): View {
+        val (scroll, page) = scrollPage()
+        podcasts = PodcastPage(this, page)
+        return scroll
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (tab == PODCAST_TAB && podcasts?.back() == true) return
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     // ------------------------------------------------ Glasses (home)
@@ -382,7 +405,7 @@ class MainActivity : Activity() {
         copilotApp = RoundAction(this, "spark", "Copilot") { startActivity(Intent(this, CopilotActivity::class.java)) }
         talkApp = RoundAction(this, "terminal", "Talk") { ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "voicemode") }
         val apps = listOf(listenApp, RoundAction(this, "chat", "Ask") { listen("ask") },
-            RoundAction(this, "headphones", "Podcasts") { startActivity(Intent(this, PodcastActivity::class.java)) }, carApp,
+            RoundAction(this, "headphones", "Podcasts") { selectTab(PODCAST_TAB) }, carApp,
             RoundAction(this, "captions", "Captions") {
                 if (!ScouterService.running) android.widget.Toast.makeText(this, "Start Vox first", android.widget.Toast.LENGTH_SHORT).show()
                 else ScouterService.send(this, ScouterService.ACTION_PANEL, "do" to "captions")
@@ -977,14 +1000,6 @@ class MainActivity : Activity() {
         }, lp().apply { topMargin = dp(8) })
         page.addView(lm)
 
-        // Podcasts: a text or a script read aloud in several voices, made on the phone (PodcastActivity).
-        val pc = card("Podcasts", "Turn an article, a chapter or a HOST: / GUEST: script into an episode, read in " +
-            "different voices on the phone (Kokoro). Plays here, saves to Music.")
-        pc.addView(button("Open Podcasts", 0) {
-            startActivity(android.content.Intent(this, PodcastActivity::class.java))
-        }, lp().apply { topMargin = dp(8) })
-        page.addView(pc)
-
         // Voice mode: everything said is typed into the terminal on the glasses (Claude's prompt) until it is off.
         val talk = card("Voice mode", "Talk to the terminal: what you say is typed into it (Claude's prompt), a " +
             "strip at the bottom of the glasses shows it is on. Say \"send\" for Enter, \"scratch that\" to take " +
@@ -1096,9 +1111,15 @@ class MainActivity : Activity() {
         carBox.addView(carState)
         carBox.addView(text("In the car, press Next on the steering wheel, wait for the chime, talk, then press Next " +
             "again to send. Claude's answer is read aloud through the car; the music pauses meanwhile and comes back " +
-            "after. Next while Claude talks: ask again. Play / pause stops the answer, Previous hears it again. " +
-            "Previous otherwise starts a new conversation (a new Claude tab). It listens on the phone's microphone (or " +
-            "the glasses'); while Car mode is on the glasses' display stays off, since you are driving.", 13f, Ui.MUTED).apply { setPadding(0, dp(4), 0, dp(6)) })
+            "after. A long job (a build) can take minutes: after 25 seconds the music comes back, and you hear a chime " +
+            "and the answer when it's done. When Claude asks for your OK (may I run this?), it reads the question: " +
+            "press Next and say yes, always, or no (anything else: no, and your words go to Claude instead). Say " +
+            "\"read that back\" to hear the last answer again, \"new conversation\" or \"new project\" and a name for a " +
+            "fresh Claude in a new folder of its own (car/ in the server's home folder, where its files stay). Next " +
+            "while Claude talks: ask again. Play / pause stops the answer, Previous hears it again, and otherwise " +
+            "starts a new conversation. While another app plays (YouTube, Spotify), Vox keeps the car's buttons. It " +
+            "listens on the phone's microphone (or the glasses'); while Car mode is on the glasses' display stays " +
+            "off, since you are driving.", 13f, Ui.MUTED).apply { setPadding(0, dp(4), 0, dp(6)) })
         carBox.addView(segmented(listOf("auto" to "When the car connects", "on" to "Always", "off" to "Off"), settings.carMode) {
             settings.carMode = it
             ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "car_check")
@@ -1245,6 +1266,7 @@ class MainActivity : Activity() {
             "" -> if (Settings(this).carMode == "off") "Off" else "Waiting for the car (its Bluetooth audio)"
             "listening" -> "Listening…"
             "thinking" -> "Claude is thinking…"
+            "working" -> "Claude is working on it: the answer is read when it's done"
             "speaking" -> "Speaking"
             else -> "On" + (if (Session.carName.isNotEmpty()) " · ${Session.carName}" else "") + ": press Next to talk"
         }
@@ -1768,7 +1790,7 @@ class MainActivity : Activity() {
 
     // Find anything: every tab's labels (and Settings', from the row under the results).
     private fun find(start: String = "") {
-        val names = listOf("Glasses", "Screen", "Terminal", "Voice", "TV")
+        val names = listOf("Glasses", "Screen", "Terminal", "Voice", "TV", "Podcasts")
         Finder.open(this, pages.mapIndexed { i, p -> names[i] to p }, start,
             "Look in Settings" to { q -> startActivity(Intent(this, SettingsActivity::class.java).putExtra("find", q)) }) { i, f ->
             selectTab(i)
@@ -2034,6 +2056,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        podcasts?.visible(false)
         content.removeCallbacks(readyTick)
         content.removeCallbacks(showLater)
         showQueued = false
@@ -2166,6 +2189,7 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(request: Int, result: Int, data: Intent?) {
         super.onActivityResult(request, result, data)
+        if (podcasts?.result(request, result, data) == true) return
         if (request == CompanionApp.REQUEST) companion = CompanionApp.result(this, if (result == RESULT_OK) data else null)
         if (request == SCREEN_REQUEST) {
             if (result == RESULT_OK && data != null) {

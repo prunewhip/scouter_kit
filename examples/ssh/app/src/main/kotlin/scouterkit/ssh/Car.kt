@@ -392,7 +392,10 @@ class CarSpeech(private val context: Context, private val onDone: (String) -> Un
 // Android hands the keys to the app that last started playing, so Vox plays a moment of silence to have them, and
 // does so again half a second after any other player starts (Spotify resuming after an answer, a new track) and
 // whenever Android says the keys went elsewhere (where it lets Vox know). The music app's play / pause and previous
-// are passed on to it (Media).
+// are passed on to it (Media). While another app plays (YouTube, Spotify), a moment is not enough: the keys went back
+// to it as soon as Vox's silence ended (once a second, all the time). Then Vox keeps silence playing, looped, as long
+// as the other app plays, started again if the keys still go away (at most five times a minute, then a two-minute
+// rest).
 class CarButtons(private val context: Context, private val handler: Handler, private val onKey: (Int, Boolean) -> Unit) {
     private val session = MediaSession(context, "Vox car")
     private val audio = context.getSystemService(AudioManager::class.java)
@@ -401,6 +404,11 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
     private var claimUntil = 0L
     private var lastClaim = 0L
     private val again = Runnable { claim() }
+    private var hold: AudioTrack? = null // the looped silence while another app plays
+    private var others = false
+    private val holds = ArrayDeque<Long>() // when the keys went away while it played, the last minute
+    private var lost = false // the keys went to another app (Android 13+ says)
+    private var restUntil = 0L
 
     private val playback = object : AudioManager.AudioPlaybackCallback() {
         override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
@@ -444,8 +452,11 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
     private fun watchKeys() {
         val moved = MediaSessionManager.OnMediaKeyEventSessionChangedListener { pkg, _ ->
             if (pkg != context.packageName) {
-                Log.i(ScouterService.TAG, "car: the media keys went to ${pkg.ifEmpty { "nobody" }}: taking them back")
-                soon()
+                if (SystemClock.uptimeMillis() >= restUntil) {
+                    if (!others) Log.i(ScouterService.TAG, "car: the media keys went to ${pkg.ifEmpty { "nobody" }}: taking them back")
+                    lost = true
+                    soon()
+                }
             }
         }
         runCatching {
@@ -465,10 +476,19 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
         handler.postDelayed(again, 500)
     }
 
-    // The keys to Vox: a moment of silence played (the last app to start playing gets them).
+    // Another app plays, or no longer does (Media).
+    fun othersPlaying(on: Boolean) {
+        if (on == others) return
+        others = on
+        if (on) claim() else letGo()
+    }
+
+    // The keys to Vox: a moment of silence played (the last app to start playing gets them); looped while another
+    // app plays.
     fun claim() {
         val now = SystemClock.uptimeMillis()
         if (now - lastClaim < 800) return soon()
+        if (others) return holdKeys(now)
         lastClaim = now
         claimUntil = now + 1000
         Thread {
@@ -490,6 +510,50 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
         }.start()
     }
 
+    private fun holdKeys(now: Long) {
+        if (now < restUntil) return
+        // Started again because the keys went away while it played: five times in a minute and it rests.
+        if (lost && hold != null) {
+            while (holds.isNotEmpty() && now - holds.first() > 60_000) holds.removeFirst()
+            holds.addLast(now)
+            if (holds.size >= 5) {
+                holds.clear()
+                restUntil = now + 120_000
+                letGo()
+                Log.i(ScouterService.TAG, "car: the other app keeps taking the media keys: trying again in 2 min")
+                handler.removeCallbacks(again)
+                handler.postDelayed(again, 120_000)
+                return
+            }
+        }
+        lost = false
+        lastClaim = now
+        claimUntil = now + 1000
+        val first = hold == null
+        letGo()
+        hold = runCatching {
+            val n = 44100 / 2
+            AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+                .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(44100)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .setBufferSizeInBytes(n * 2)
+                .build().apply {
+                    write(ShortArray(n), 0, n)
+                    setLoopPoints(0, n, -1)
+                    play()
+                }
+        }.onFailure { Log.w(ScouterService.TAG, "car: hold: ${it.message}") }.getOrNull()
+        if (first) Log.i(ScouterService.TAG, "car: another app plays: Vox keeps the media keys")
+    }
+
+    private fun letGo() {
+        hold?.let { t -> runCatching { t.stop() }; runCatching { t.release() } }
+        hold = null
+    }
+
     // What the car's screen shows (its now-playing): a title, a line under it, playing or not.
     fun show(title: String, subtitle: String, playing: Boolean) {
         runCatching {
@@ -509,6 +573,7 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
 
     fun release() {
         handler.removeCallbacks(again)
+        letGo()
         runCatching { audio.unregisterAudioPlaybackCallback(playback) }
         unwatchKeys?.invoke()
         runCatching {
@@ -520,83 +585,98 @@ class CarButtons(private val context: Context, private val handler: Handler, pri
 
 // Claude on a saved server, two ways. The terminal (Settings.carTarget "terminal"): the words typed into the Claude
 // session running in the server's tmux (the conversation the glasses show), told they came by voice from the car,
-// and its reply read from that session's transcript once its turn ends (a small Python script there does both).
-// A chat ("chat"): `claude -p` with JSON out, a conversation of its own resumed by its session id.
+// and its reply read from that session's transcript once its turn ends (a small Python script there does both). The
+// turn is followed in rounds of a minute and a half for as long as it takes (a build: minutes), and a question
+// Claude asks on its screen (may I run this?) comes back to be answered by voice. A chat ("chat"): `claude -p` with
+// JSON out, a conversation of its own resumed by its session id. Each new conversation has a folder of its own on the
+// server (~/car/<date and time>), where Claude keeps what it makes: files there are easy to find again.
 object CarClaude {
-    class Answer(val text: String, val session: String?, val error: String?)
+    // A question Claude asks on its screen: what it is about, its options ("Yes", "Yes, and don't ask again …", "No …").
+    class Ask(val pane: String, val question: String, val about: List<String>, val options: List<String>)
+
+    // text: the answer; working: not yet (said: its last words so far); sent: typed in (session: the pane).
+    class Answer(val text: String, val session: String?, val error: String?, val ask: Ask? = null,
+                 val working: Boolean = false, val sent: Boolean = false)
 
     const val PROMPT = "The user is talking with you by voice while driving; your reply is read aloud by text-to-speech " +
         "through the car's speakers. Answer in short, natural spoken sentences, usually one to four. No markdown, lists, " +
-        "headings, code, URLs or emoji. If a full answer would be long, give the gist and offer to go on."
+        "headings, code, URLs or emoji. If a full answer would be long, give the gist and offer to go on. Files you make " +
+        "go in the current folder, which is this conversation's own."
 
     const val PATH = "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:\$PATH\"; export PATH; "
 
     fun q(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
+    // A new conversation's folder name: the date and time, or a project's name ("new project garden" → garden).
+    fun folderName(project: String = ""): String {
+        val slug = project.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40)
+        return slug.ifEmpty { java.text.SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(java.util.Date()) }
+    }
+
+    // What a car conversation's folder tells Claude (its CLAUDE.md, written once).
+    private const val FOLDER_NOTE = "# A car conversation\n\nStarted by voice from the car (Vox's Car mode). The user is " +
+        "driving: each reply is read aloud, so keep replies short and spoken, with no markdown.\n\nThis folder is this " +
+        "conversation's own: keep what you make here (notes, drafts, code, results). When asked to remember or write " +
+        "something down, add it to notes.md here.\n"
+
+    // cd into ~/car/<folder> (made, with its CLAUDE.md, the first time).
+    private fun enter(folder: String) = "D=\"\$HOME/car/\"${q(folder)}; mkdir -p \"\$D\" && cd \"\$D\" || " +
+        "{ echo 'VOX: could not make the folder'; exit 0; }; [ -f CLAUDE.md ] || printf %s ${q(FOLDER_NOTE)} > CLAUDE.md; "
+
     // system: what Claude is told it is doing; tools: what it may use ("" none); model: for this one process
-    // (ANTHROPIC_MODEL: `claude --model` can become the user's saved default), "" the user's own.
+    // (ANTHROPIC_MODEL: `claude --model` can become the user's saved default), "" the user's own; folder: the car
+    // conversation's folder (in ~/car), "" the home folder.
     fun chatCommand(text: String, session: String?, system: String = PROMPT, tools: String = "WebSearch,WebFetch",
-                    model: String = ""): String {
+                    model: String = "", folder: String = ""): String {
         val resume = if (session.isNullOrEmpty()) "" else "--resume ${q(session)} "
         val env = if (Regex("[a-z0-9.-]+").matches(model)) "ANTHROPIC_MODEL=$model " else ""
-        return PATH + "cd ~ 2>/dev/null; command -v claude >/dev/null || { echo 'VOX: claude is not installed there'; exit 0; }; " +
+        return PATH + "cd ~ 2>/dev/null; " + (if (folder.isEmpty()) "" else enter(folder)) +
+            "command -v claude >/dev/null || { echo 'VOX: claude is not installed there'; exit 0; }; " +
             "printf %s ${q(text)} | ${env}claude -p --output-format json $resume--append-system-prompt ${q(system)} " +
             (if (tools.isEmpty()) "" else "--allowedTools ${q(tools)} ") + "2>&1"
     }
 
-    // Typed into tmux session `session`'s Claude pane; waits up to `limit` s for the turn's end. Prints one line of
-    // JSON: {"text", "session"} or {"error"}. With "dry": only says which pane it would type into.
+    // The terminal, in three modes. send SESSION ID [dry]: types stdin into tmux session SESSION's Claude pane (or
+    // pane %N) and keeps what it needs to follow the turn in ~/.cache/vox-car/ID.json; prints {"sent", "pane"}, or
+    // {"ask", ...} when Claude already waits for an answer on the screen, or {"error"}. wait ID LIMIT: follows the
+    // turn for up to LIMIT s: {"text", "session"} at its end, {"ask", "about", "options", "pane"} when Claude asks
+    // something on the screen, {"working", "said"} at the limit. The transcript is read on from where it was.
     const val TERMINAL_PY = """
 import sys, os, json, glob, time, subprocess, re
-text = sys.stdin.read().strip()
-sess, limit = sys.argv[1], float(sys.argv[2])
-dry = len(sys.argv) > 3 and sys.argv[3] == "dry"
+home = os.path.expanduser("~")
+DIR = os.path.join(home, ".cache", "vox-car")
 TAG = "(By voice, from the car: answer briefly, in plain spoken sentences.) "
-NEEDLE = "from the car: answer briefly"
+MARK = "By voice, from the car"
 def out(**k):
     print(json.dumps(k))
     sys.exit(0)
 def tmux(*a):
     return subprocess.run(["tmux"] + list(a), capture_output=True, text=True)
-if sess.startswith("%"):
-    r = tmux("display", "-p", "-t", sess, "#{pane_id} 1 1 #{pane_pid}")
-else:
-    r = tmux("list-panes", "-s", "-t", sess, "-F", "#{pane_id} #{window_active} #{pane_active} #{pane_pid}")
-if r.returncode != 0 or not r.stdout.strip():
-    out(error="There is no Claude session called " + sess + " running there.")
-panes = sorted([l.split() for l in r.stdout.split("\n") if len(l.split()) == 4], key=lambda x: (x[1] != "1", x[2] != "1"))
-procs, kids = {}, {}
-try:
-    for l in subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True).stdout.split("\n"):
-        f = l.split(None, 2)
-        if len(f) >= 2:
-            procs[f[0]] = f[2] if len(f) > 2 else ""
-            kids.setdefault(f[1], []).append(f[0])
-except Exception:
-    pass
-def runs_claude(pid):
-    todo, seen = [pid], set()
-    while todo:
-        p = todo.pop()
-        if p in seen:
-            continue
-        seen.add(p)
-        a = procs.get(p, "")
-        first = a.split(" ")[0] if a else ""
-        if first.endswith("claude") or "/claude/versions/" in a or "claude-keepalive" in a:
-            return True
-        todo += kids.get(p, [])
-    return False
-pane = next((p[0] for p in panes if runs_claude(p[3])), panes[0][0] if panes else None)
-if pane is None:
-    out(error="There is no Claude session called " + sess + " running there.")
-screen = tmux("capture-pane", "-p", "-t", pane).stdout
-tail = "\n".join(screen.rstrip("\n").split("\n")[-25:])
-if re.search(r"Do you want to|1\. Yes", tail):
-    out(error="Claude is waiting for your OK on the screen.")
-if dry:
-    out(text="pane " + pane)
-home = os.path.expanduser("~")
+def tail(pane, n=30):
+    return tmux("capture-pane", "-p", "-t", pane).stdout.rstrip("\n").split("\n")[-n:]
+def asking(pane):
+    lines = tail(pane)
+    q = next((i for i in range(len(lines) - 1, -1, -1) if "Do you want to" in lines[i]), None)
+    if q is None:
+        return None
+    opts = []
+    for l in lines[q + 1:]:
+        m = re.match(r"^[\s│|❯>]*(\d)\.\s+(.*?)[\s│|]*$", l)
+        if m:
+            opts.append(m.group(2).strip())
+    if not opts:
+        return None
+    about = []
+    for l in reversed(lines[max(0, q - 14):q]):
+        s = l.strip()
+        if s and (s[0] in "╭┌" or set(s) <= set("─━-╌═")):
+            break
+        s = s.strip("│|").strip()
+        if s:
+            about.insert(0, s)
+    return {"ask": lines[q].strip().strip("│|").strip(), "about": about[:3], "options": opts[:4], "pane": pane}
+def busy(pane):
+    return any("esc to interrupt" in l for l in tail(pane, 8))
 def sizes():
     found, now = {}, time.time()
     for p in glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl")):
@@ -607,93 +687,222 @@ def sizes():
         if now - st.st_mtime < 3 * 86400:
             found[p] = st.st_size
     return found
-before = sizes()
-tmux("send-keys", "-t", pane, "-l", TAG + text)
-time.sleep(0.4)
-tmux("send-keys", "-t", pane, "Enter")
+def strings(o):
+    if isinstance(o, str):
+        yield o
+    elif isinstance(o, dict):
+        for v in o.values():
+            yield from strings(v)
+    elif isinstance(o, list):
+        for v in o:
+            yield from strings(v)
+mode = sys.argv[1]
+if mode == "send":
+    sess, rid = sys.argv[2], sys.argv[3]
+    dry = len(sys.argv) > 4 and sys.argv[4] == "dry"
+    text = sys.stdin.read().strip()
+    if sess.startswith("%"):
+        r = tmux("display", "-p", "-t", sess, "#{pane_id} 1 1 #{pane_pid}")
+    else:
+        r = tmux("list-panes", "-s", "-t", sess, "-F", "#{pane_id} #{window_active} #{pane_active} #{pane_pid}")
+    if r.returncode != 0 or not r.stdout.strip():
+        out(error="There is no Claude session called " + sess + " running there.")
+    panes = sorted([l.split() for l in r.stdout.split("\n") if len(l.split()) == 4], key=lambda x: (x[1] != "1", x[2] != "1"))
+    procs, kids = {}, {}
+    try:
+        for l in subprocess.run(["ps", "-eo", "pid=,ppid=,args="], capture_output=True, text=True).stdout.split("\n"):
+            f = l.split(None, 2)
+            if len(f) >= 2:
+                procs[f[0]] = f[2] if len(f) > 2 else ""
+                kids.setdefault(f[1], []).append(f[0])
+    except Exception:
+        pass
+    def runs_claude(pid):
+        todo, seen = [pid], set()
+        while todo:
+            p = todo.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            a = procs.get(p, "")
+            first = a.split(" ")[0] if a else ""
+            if first.endswith("claude") or "/claude/versions/" in a or "claude-keepalive" in a:
+                return True
+            todo += kids.get(p, [])
+        return False
+    pane = next((p[0] for p in panes if runs_claude(p[3])), panes[0][0] if panes else None)
+    if pane is None:
+        out(error="There is no Claude session called " + sess + " running there.")
+    a = asking(pane)
+    if a:
+        out(**a)
+    if dry:
+        out(text="pane " + pane)
+    os.makedirs(DIR, exist_ok=True)
+    for f in glob.glob(os.path.join(DIR, "*.json")):
+        try:
+            if time.time() - os.stat(f).st_mtime > 6 * 3600:
+                os.remove(f)
+        except OSError:
+            pass
+    st = {"pane": pane, "before": sizes(), "text": text, "t0": time.time(), "target": None, "pos": 0,
+          "seen": False, "texts": [], "tools": 0, "busy": False, "idle": 0}
+    with open(os.path.join(DIR, rid + ".json"), "w") as f:
+        json.dump(st, f)
+    tmux("send-keys", "-t", pane, "-l", TAG + text)
+    time.sleep(0.4)
+    tmux("send-keys", "-t", pane, "Enter")
+    out(sent=True, pane=pane)
+rid, limit = sys.argv[2], float(sys.argv[3])
+path = os.path.join(DIR, rid + ".json")
+try:
+    with open(path) as f:
+        st = json.load(f)
+except Exception:
+    out(error="Vox lost track of that question; the answer is in the terminal.")
+pane, key = st["pane"], st["text"][:30]
+def save():
+    with open(path, "w") as f:
+        json.dump(st, f)
+def done(**k):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    out(**k)
+def ours(l):
+    if MARK not in l or '"tool_result"' in l:
+        return False
+    try:
+        j = json.loads(l)
+    except Exception:
+        return False
+    return j.get("type") != "assistant" and any(MARK in s and key in s for s in strings(j))
 deadline = time.time() + limit
-target, off = None, 0
-while target is None and time.time() < deadline:
-    time.sleep(0.6)
-    for p, size in sizes().items():
-        b = before.get(p, 0)
-        if size > b:
+while True:
+    if st["target"] is None:
+        for p, size in sizes().items():
+            b = st["before"].get(p, 0)
+            if size <= b:
+                continue
             with open(p, "rb") as f:
                 f.seek(b)
-                chunk = f.read().decode("utf-8", "replace")
-            if NEEDLE in chunk:
-                target, off = p, b
+                data = f.read()
+            at = b
+            for raw in data.split(b"\n"):
+                if ours(raw.decode("utf-8", "replace")):
+                    st["target"], st["pos"] = p, at
+                    break
+                at += len(raw) + 1
+            if st["target"]:
                 break
-if target is None:
-    out(error="Claude did not take the message.")
-while time.time() < deadline:
-    with open(target, "rb") as f:
-        f.seek(off)
-        data = f.read().decode("utf-8", "replace")
-    seen, texts, done = False, [], False
-    for l in data.split("\n"):
-        if not seen:
-            seen = NEEDLE in l
-            continue
-        try:
-            j = json.loads(l)
-        except Exception:
-            continue
-        if j.get("type") == "assistant":
-            for c in (j.get("message") or {}).get("content") or []:
-                if not isinstance(c, dict):
+        if st["target"] is None and time.time() - st["t0"] > 120 and not busy(pane):
+            done(error="Claude did not take the message.")
+    if st["target"]:
+        with open(st["target"], "rb") as f:
+            f.seek(st["pos"])
+            data = f.read()
+        end = data.rfind(b"\n")
+        if end >= 0:
+            st["pos"] += end + 1
+            for raw in data[:end].split(b"\n"):
+                l = raw.decode("utf-8", "replace")
+                if not st["seen"]:
+                    st["seen"] = ours(l)
                     continue
-                if c.get("type") == "text" and (c.get("text") or "").strip():
-                    texts.append(c["text"])
-                elif c.get("type") == "tool_use":
-                    texts = []
-        elif j.get("type") == "system" and j.get("subtype") == "turn_duration":
-            done = True
-            break
-    if done:
-        out(text="\n".join(texts).strip() or "Done.", session=os.path.basename(target)[:-6])
+                try:
+                    j = json.loads(l)
+                except Exception:
+                    continue
+                t = j.get("type")
+                if t == "assistant":
+                    for c in (j.get("message") or {}).get("content") or []:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "text" and (c.get("text") or "").strip():
+                            st["texts"].append(c["text"])
+                        elif c.get("type") == "tool_use":
+                            st["texts"] = []
+                            st["tools"] += 1
+                elif t == "system" and j.get("subtype") == "turn_duration":
+                    done(text="\n".join(st["texts"]).strip() or "Done.", session=os.path.basename(st["target"])[:-6])
+    a = asking(pane)
+    if a:
+        save()
+        out(**a)
+    if st["seen"]:
+        if busy(pane):
+            st["busy"], st["idle"] = True, 0
+        elif st["busy"]:
+            st["idle"] += 1
+            if st["idle"] > 40:
+                done(text="\n".join(st["texts"]).strip() or "Claude stopped.", session=os.path.basename(st["target"])[:-6])
+    if time.time() >= deadline:
+        save()
+        out(working=True, said=(st["texts"][-1] if st["texts"] else "")[-300:])
     time.sleep(1.0)
-out(error="Claude is still working on it; the answer will be on the glasses.")
 """
 
-    fun terminalCommand(text: String, session: String, limit: Int, dry: Boolean = false): String =
-        PATH + "command -v python3 >/dev/null || { echo 'VOX: python3 is not installed there'; exit 0; }; " +
-            "command -v tmux >/dev/null || { echo 'VOX: tmux is not installed there'; exit 0; }; " +
-            "printf %s ${q(text)} | python3 -c ${q(TERMINAL_PY)} ${q(session)} $limit${if (dry) " dry" else ""} 2>&1"
+    // The script with these arguments (and text on its stdin).
+    private fun py(args: String, input: String = ""): String = PATH +
+        "command -v python3 >/dev/null || { echo 'VOX: python3 is not installed there'; exit 0; }; " +
+        "command -v tmux >/dev/null || { echo 'VOX: tmux is not installed there'; exit 0; }; " +
+        "printf %s ${q(input)} | python3 -c ${q(TERMINAL_PY)} $args 2>&1"
 
-    // A new tab (tmux window) in `session` running a fresh Claude on Sonnet (quicker for talk), opened behind the
-    // tab in front (the user's own conversation stays where it was); waits (12 s at most) for Claude's prompt and
-    // answers its pane, which the questions then go to. Sonnet through ANTHROPIC_MODEL, which lasts only for that
-    // process: `claude --model` can become the saved default, and the user's own Claude then changed model too.
-    // As a backstop the saved default (~/.claude/settings.json "model") is put back if it changed meanwhile.
-    fun newTab(vault: Vault, server: Settings.Server, session: String): Answer = run(vault, server, PATH + newTabScript(session))
+    fun sendCommand(text: String, session: String, id: String, dry: Boolean = false): String =
+        py("send ${q(session)} ${q(id)}${if (dry) " dry" else ""}", text)
+
+    fun waitCommand(id: String, limit: Int): String = py("wait ${q(id)} $limit")
+
+    // Typed into the terminal; the turn then followed with wait.
+    fun send(vault: Vault, server: Settings.Server, text: String, session: String, id: String): Answer =
+        run(vault, server, sendCommand(text, session, id))
+
+    fun wait(vault: Vault, server: Settings.Server, id: String, limit: Int): Answer = run(vault, server, waitCommand(id, limit))
+
+    // An answer to Claude's question on the screen: option n (0: the first, highlighted one), or -1: Escape (no).
+    fun answer(vault: Vault, server: Settings.Server, pane: String, option: Int): Answer {
+        val keys = when {
+            option < 0 -> "Escape"
+            else -> (List(option) { "Down" } + "Enter").joinToString(" ")
+        }
+        return run(vault, server, PATH + "tmux send-keys -t ${q(pane)} $keys 2>&1 && echo '{\"text\": \"ok\"}'")
+    }
+
+    // A new tab (tmux window) in `session` running a fresh Claude on Sonnet (quicker for talk) in a new folder of its
+    // own (~/car/<folder>, with a CLAUDE.md saying what it is), where it may edit files without asking (anything else
+    // it asks, by voice); opened behind the tab in front (the user's own conversation stays where it was); waits (12 s
+    // at most) for Claude's prompt and answers its pane, which the questions then go to. Sonnet through
+    // ANTHROPIC_MODEL, which lasts only for that process: `claude --model` can become the saved default, and the
+    // user's own Claude then changed model too. As a backstop the saved default (~/.claude/settings.json "model") is
+    // put back if it changed meanwhile.
+    fun newTab(vault: Vault, server: Settings.Server, session: String, folder: String): Answer =
+        run(vault, server, PATH + newTabScript(session, folder))
 
     private const val GET_MODEL = "import json,sys\ntry: print(json.load(open(sys.argv[1])).get('model', ''))\nexcept Exception: print('-')"
     private const val PUT_MODEL = "import json,sys\np, m = sys.argv[1], sys.argv[2]\ntry: d = json.load(open(p))\n" +
         "except Exception: sys.exit(0)\nif d.get('model', '') != m:\n    d.pop('model', None) if m == '' else d.update(model=m)\n" +
         "    open(p, 'w').write(json.dumps(d, indent=2) + '\\n')\n    print('VOX-RESTORED')"
 
-    fun newTabScript(session: String): String =
+    fun newTabScript(session: String, folder: String): String =
         "S=${q(session)}; F=\"\$HOME/.claude/settings.json\"; " +
             "command -v tmux >/dev/null || { echo 'VOX: tmux is not installed there'; exit 0; }; " +
             "tmux has-session -t \"\$S\" 2>/dev/null || { echo \"VOX: There is no Claude session called \$S running there.\"; exit 0; }; " +
+            enter(folder) +
             "M=-; command -v python3 >/dev/null && M=\$(python3 -c ${q(GET_MODEL)} \"\$F\" 2>/dev/null); " +
-            "P=\$(tmux new-window -d -P -F '#{pane_id}' -c \"\$HOME\" -e \"PATH=\$PATH\" -e ANTHROPIC_MODEL=sonnet -t \"\$S:\" -n voice 'exec claude') || " +
-            "{ echo 'VOX: tmux could not open a tab'; exit 0; }; " +
+            "P=\$(tmux new-window -d -P -F '#{pane_id}' -c \"\$D\" -e \"PATH=\$PATH\" -e ANTHROPIC_MODEL=sonnet -t \"\$S:\" " +
+            "-n car 'exec claude --permission-mode acceptEdits') || { echo 'VOX: tmux could not open a tab'; exit 0; }; " +
             "i=0; while [ \$i -lt 24 ]; do tmux capture-pane -p -t \"\$P\" 2>/dev/null | grep -q 'for shortcuts' && break; " +
             "sleep 0.5; i=\$((i+1)); done; " +
             "[ \"\$M\" != - ] && python3 -c ${q(PUT_MODEL)} \"\$F\" \"\$M\" 2>/dev/null; " +
             "printf '{\"text\": \"ok\", \"session\": \"%s\"}\\n' \"\$P\""
 
-    fun askTerminal(vault: Vault, server: Settings.Server, text: String, session: String): Answer =
-        run(vault, server, terminalCommand(text, session, 240))
-
     fun askChat(vault: Vault, server: Settings.Server, text: String, session: String?, system: String = PROMPT,
-                tools: String = "WebSearch,WebFetch", model: String = ""): Answer {
-        val first = run(vault, server, chatCommand(text, session, system, tools, model))
+                tools: String = "WebSearch,WebFetch", model: String = "", folder: String = ""): Answer {
+        val first = run(vault, server, chatCommand(text, session, system, tools, model, folder))
         // A conversation the server no longer has: a new one.
         if (first.error != null && !session.isNullOrEmpty() && first.error.contains("session", true))
-            return run(vault, server, chatCommand(text, null, system, tools, model))
+            return run(vault, server, chatCommand(text, null, system, tools, model, folder))
         return first
     }
 
@@ -709,6 +918,12 @@ out(error="Claude is still working on it; the answer will be on the glasses.")
         val json = out.lines().lastOrNull { it.trimStart().startsWith("{") }?.let { runCatching { org.json.JSONObject(it.trim()) }.getOrNull() }
             ?: out.lastIndexOf("\n{").takeIf { it >= 0 }?.let { runCatching { org.json.JSONObject(out.substring(it + 1)) }.getOrNull() }
             ?: return Answer("", null, out.lines().lastOrNull { it.isNotBlank() }?.take(200) ?: "Claude gave no answer")
+        if (json.has("ask")) {
+            fun list(k: String) = json.optJSONArray(k)?.let { a -> List(a.length()) { a.optString(it) } } ?: emptyList()
+            return Answer("", null, null, ask = Ask(json.optString("pane"), json.optString("ask"), list("about"), list("options")))
+        }
+        if (json.optBoolean("working")) return Answer(json.optString("said"), null, null, working = true)
+        if (json.optBoolean("sent")) return Answer("", json.optString("pane"), null, sent = true)
         if (json.has("error") && !json.has("result")) return Answer("", null, json.optString("error"))
         val result = json.optString("result").ifEmpty { json.optString("text") }
         val id = json.optString("session_id").ifEmpty { json.optString("session") }.ifEmpty { null }
@@ -735,7 +950,11 @@ interface CarHost {
     fun carChanged()
 }
 
-// Next: listen. Next again: send. Nothing else starts or ends a question, so it does what the button says.
+// Next: listen. Next again: send. Nothing else starts or ends a question, so it does what the button says. A
+// question to the terminal is followed until Claude is done, however long: after 25 s the music comes back ("still
+// working on it") and the answer is read when it comes, after a chime. When Claude asks on its screen (may I run
+// this?), the question is read too, and the next thing said answers it: yes, always, no, or anything else (no, and
+// those words to Claude instead). "Read that back" reads the last answer again (kept while the car is off).
 class CarMode(private val context: Context, private val host: CarHost) {
     enum class State { IDLE, STARTING, LISTENING, SENDING, THINKING, SPEAKING }
 
@@ -751,11 +970,24 @@ class CarMode(private val context: Context, private val host: CarHost) {
     private var partial = ""
     private var micOn = false // the listener runs
     private var request = 0
+    private var droppedUpTo = 0 // questions up to this one were cancelled: not followed
     private var asked = ""
-    private var lastAnswer = ""
-    @Volatile private var voicePane: String? = null // the tab "New conversation" opened: questions go there
+    private var lastAnswer = settings.carLast
     private var lastKey = 0L
     private var lastKeyCode = 0
+
+    // The question typed into the terminal, followed (one at a time: a newer one replaces it).
+    private class Follow(val id: String, val request: Int, val server: Settings.Server, val question: String) {
+        val started = SystemClock.uptimeMillis()
+    }
+    @Volatile private var follow: Follow? = null
+    private var pendingAsk: CarClaude.Ask? = null // Claude's question on its screen, answered by the next words
+    private var askFor: Follow? = null
+    private var askThen: String? = null // a question that waited for that answer
+    private var queued: (() -> Unit)? = null // an answer that came while Vox was busy: read once it is free
+
+    // Claude works on a question in the background (the answer is read when it comes).
+    val working get() = follow != null
 
     private val noSpeech = Runnable { if (state == State.LISTENING && said.isBlank() && partial.isEmpty()) cancel("I didn't hear anything.") }
     private val tooLong = Runnable { if (state == State.LISTENING) send() }
@@ -767,9 +999,18 @@ class CarMode(private val context: Context, private val host: CarHost) {
             h.postDelayed(this, 2600)
         }
     }
+    // A long one (a build): the music back meanwhile; the answer is read when it comes.
+    private val longWait = Runnable {
+        val f = follow
+        if (state == State.THINKING && f != null && f.request == request) {
+            h.removeCallbacks(pulse)
+            state = State.IDLE
+            say("Still working on it. I'll tell you when it's done.")
+        }
+    }
 
     fun start(greet: Boolean) {
-        buttons.claim()
+        if (Media.now?.playing == true) buttons.othersPlaying(true) else buttons.claim()
         host.carPreload()
         speech.preload()
         show()
@@ -780,6 +1021,9 @@ class CarMode(private val context: Context, private val host: CarHost) {
     }
 
     fun release() {
+        follow = null
+        pendingAsk = null
+        queued = null
         reset()
         speech.release()
         buttons.release()
@@ -790,12 +1034,22 @@ class CarMode(private val context: Context, private val host: CarHost) {
     // Media says another app started playing: the keys back (CarButtons also sees players start by itself).
     fun reclaim() = buttons.claim()
 
-    // What the car shows: Vox's state, or (idle) what plays.
+    // What plays changed (Media): the keys held while another app plays, and the car's screen.
+    fun mediaChanged() {
+        buttons.othersPlaying(Media.now?.playing == true)
+        show()
+    }
+
+    // What the car shows: Vox's state, or (idle) what plays, or that Claude works on something.
     fun show() {
         val now = Media.now
         when (state) {
-            State.IDLE -> if (now != null && now.title.isNotEmpty()) buttons.show(now.title, now.artist, now.playing)
-                else buttons.show("Vox", "Press next to talk to Claude", false)
+            State.IDLE -> when {
+                pendingAsk != null -> buttons.show("Claude asks (next to answer)", pendingAsk?.question ?: "", false)
+                follow != null && now?.playing != true -> buttons.show("Claude is working…", asked, false)
+                now != null && now.title.isNotEmpty() -> buttons.show(now.title, now.artist, now.playing)
+                else -> buttons.show("Vox", "Press next to talk to Claude", false)
+            }
             State.STARTING -> buttons.show("One moment…", "Getting the microphone", true)
             State.LISTENING -> buttons.show("Listening… (next sends)", (said.toString() + partial).trim().ifEmpty { "Talk to Claude" }, true)
             State.SENDING -> buttons.show("Sending…", said.toString().trim(), true)
@@ -820,16 +1074,21 @@ class CarMode(private val context: Context, private val host: CarHost) {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
             KeyEvent.KEYCODE_HEADSETHOOK -> when (state) {
                 State.STARTING, State.LISTENING -> send()
-                State.SENDING, State.THINKING -> cancel("Cancelled.", false)
+                State.SENDING, State.THINKING -> stopAsking()
                 State.SPEAKING -> quiet()
-                State.IDLE -> Media.control("toggle")
+                State.IDLE -> if (!PodcastPlayer.carToggle()) Media.control("toggle")
             }
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> when (state) {
                 State.SPEAKING -> if (lastAnswer.isNotEmpty()) speak(lastAnswer, "answer")
-                State.STARTING, State.LISTENING, State.SENDING, State.THINKING -> cancel("Cancelled.", false)
+                State.STARTING, State.LISTENING -> cancel("Cancelled.", false)
+                State.SENDING, State.THINKING -> stopAsking()
                 State.IDLE -> newConversation()
             }
-            KeyEvent.KEYCODE_MEDIA_STOP -> if (state == State.IDLE) Media.control("toggle") else cancel("Stopped.", false)
+            KeyEvent.KEYCODE_MEDIA_STOP -> when (state) {
+                State.IDLE -> if (!PodcastPlayer.carToggle()) Media.control("toggle")
+                State.SENDING, State.THINKING -> stopAsking()
+                else -> cancel("Stopped.", false)
+            }
         }
     }
 
@@ -897,67 +1156,260 @@ class CarMode(private val context: Context, private val host: CarHost) {
         CarSounds.play(CarSounds.Sound.SEND)
         host.carBand("$MIC Sending…", true)
         show()
-        if (micOn) host.carStopListening() else ask() // micEnded asks
+        if (micOn) host.carStopListening() else heard() // micEnded hands it on
     }
 
     private fun micEnded(why: String) {
         micOn = false
         when (state) {
-            State.SENDING -> ask()
+            State.SENDING -> heard()
             State.STARTING, State.LISTENING -> if (why.isNotEmpty()) fail(why) else if (said.isNotBlank()) {
                 state = State.SENDING
-                ask()
+                heard()
             } else cancel("I didn't hear anything.")
             else -> {}
         }
     }
 
-    // ------------------------------------------------ Claude
+    // ------------------------------------------------ what was said
 
-    private fun ask() {
+    // An answer to Claude's question, or Vox's own words (read that back, a new conversation, never mind), or a
+    // question for Claude.
+    private fun heard() {
         val text = said.toString().trim()
         said.setLength(0)
         partial = ""
         if (text.isEmpty()) return cancel("I didn't catch that.")
         val words = VoiceCommands.normalize(text)
-        val terminal = settings.carTarget != "chat"
-        if (!terminal && words in NEW_CHAT) {
-            settings.carSession = ""
-            CarSounds.play(CarSounds.Sound.READY)
-            return say("New conversation.")
-        }
+        pendingAsk?.let { return answerAsk(it, text, words) }
         if (words in NEVER_MIND) return cancel("Cancelled.", false)
+        if (words in READ_BACK_WORDS || READ_BACK.matches(words)) return readBack()
+        if (words in NEW_CHAT) {
+            state = State.IDLE
+            return newConversation()
+        }
+        NEW_PROJECT.matchEntire(words)?.let {
+            state = State.IDLE
+            return newConversation(it.groupValues[1])
+        }
+        question(text)
+    }
+
+    private fun readBack() {
+        if (lastAnswer.isEmpty()) return cancel("There's no answer to read back yet.")
+        host.carBand("Claude: $lastAnswer", true)
+        speak(lastAnswer, "answer")
+    }
+
+    // ------------------------------------------------ Claude
+
+    private fun question(text: String) {
         val server = host.carServer() ?: return fail("Add a server for Claude in Vox first.")
+        val terminal = settings.carTarget != "chat"
         state = State.THINKING
         asked = text
+        holdFocus()
         host.carBand("$MIC “$text”  Claude is thinking…", true)
         show()
         h.postDelayed(pulse, 1800)
         val id = ++request
-        val session = settings.carSession.ifEmpty { null }
+        if (!terminal) {
+            // A chat: in its conversation's folder (a new one with a new conversation).
+            if (settings.carSession.isEmpty() || settings.carFolder.isEmpty()) settings.carFolder = CarClaude.folderName()
+            val session = settings.carSession.ifEmpty { null }
+            val folder = settings.carFolder
+            Log.i(ScouterService.TAG, "car: asking Claude on ${server.name} (chat, ~/car/$folder)")
+            Thread {
+                val t0 = SystemClock.uptimeMillis()
+                val a = CarClaude.askChat(host.carVault(), server, text, session, tools = CHAT_TOOLS, folder = folder)
+                Log.i(ScouterService.TAG, "car: answer in ${SystemClock.uptimeMillis() - t0} ms" + (a.error?.let { ": $it" } ?: ""))
+                h.post { answered(id, a) }
+            }.start()
+            return
+        }
         val tmux = host.carTmux(server)
-        Log.i(ScouterService.TAG, "car: asking Claude on ${server.name} (${if (terminal) "tmux $tmux" else "chat"})")
+        val f = Follow("q${System.currentTimeMillis()}", id, server, text)
+        Log.i(ScouterService.TAG, "car: asking Claude on ${server.name} (tmux ${settings.carPane.ifEmpty { tmux }})")
         Thread {
-            val t0 = SystemClock.uptimeMillis()
-            val pane = voicePane
-            var a = if (!terminal) CarClaude.askChat(host.carVault(), server, text, session)
-                else CarClaude.askTerminal(host.carVault(), server, text, pane ?: tmux)
-            // The voice tab was closed meanwhile: the conversation in front, as before it.
-            if (terminal && pane != null && a.error?.contains("no Claude session", true) == true) {
-                voicePane = null
-                a = CarClaude.askTerminal(host.carVault(), server, text, tmux)
+            val pane = settings.carPane.ifEmpty { null }
+            var a = CarClaude.send(host.carVault(), server, text, pane ?: tmux, f.id)
+            // The car's tab was closed meanwhile: the conversation in front, as before it.
+            if (pane != null && a.error?.contains("no Claude session", true) == true) {
+                settings.carPane = ""
+                a = CarClaude.send(host.carVault(), server, text, tmux, f.id)
             }
-            Log.i(ScouterService.TAG, "car: answer in ${SystemClock.uptimeMillis() - t0} ms" + (a.error?.let { ": $it" } ?: ""))
-            h.post { answered(id, a, terminal) }
+            h.post { sent(f, a, text) }
         }.start()
     }
 
-    private fun answered(id: Int, a: CarClaude.Answer, terminal: Boolean) {
+    // Typed in (followed from now on), or Claude already waited for an OK (asked first), or a problem.
+    private fun sent(f: Follow, a: CarClaude.Answer, text: String) {
+        if (f.request <= droppedUpTo) return
+        val current = f.request == request && state == State.THINKING
+        when {
+            a.ask != null -> {
+                pendingAsk = a.ask
+                askFor = null
+                askThen = text
+                if (current) askAloud(a.ask, first = true)
+            }
+            a.error != null -> if (current) fail(a.error)
+            else -> {
+                follow = f
+                pendingAsk = null
+                poll(f)
+                if (current) h.postDelayed(longWait, 25000)
+            }
+        }
+    }
+
+    // The turn followed in rounds (the link dropping now and then is retried) until its end, or Claude's question.
+    private fun poll(f: Follow) {
+        Thread({
+            var misses = 0
+            while (follow === f) {
+                val a = CarClaude.wait(host.carVault(), f.server, f.id, 90)
+                if (follow !== f) return@Thread
+                if (a.working) {
+                    if (SystemClock.uptimeMillis() - f.started < 30 * 60_000L) continue
+                    h.post { followed(f, CarClaude.Answer("", null, "Claude is still working after half an hour. The answer will be in the terminal.")) }
+                    return@Thread
+                }
+                if (a.error != null && a.error.startsWith("I can't reach") && ++misses <= 3) {
+                    SystemClock.sleep(5000)
+                    continue
+                }
+                h.post { followed(f, a) }
+                return@Thread
+            }
+        }, "car-follow").start()
+    }
+
+    private fun followed(f: Follow, a: CarClaude.Answer) {
+        if (follow !== f) return
+        h.removeCallbacks(longWait)
+        if (a.ask != null) {
+            pendingAsk = a.ask
+            askFor = f
+            askThen = null
+            return deliver(f) { askAloud(a.ask, first = false) }
+        }
+        follow = null
+        Log.i(ScouterService.TAG, "car: answer after ${(SystemClock.uptimeMillis() - f.started) / 1000} s" + (a.error?.let { ": $it" } ?: ""))
+        if (a.error != null) return deliver(f) { trouble(a.error) }
+        lastAnswer = a.text
+        settings.carLast = a.text
+        deliver(f) { answer(a.text) }
+    }
+
+    // Now when Vox is free (or waits for exactly this), else once it is.
+    private fun deliver(f: Follow, block: () -> Unit) {
+        if (state == State.IDLE || (state == State.THINKING && request == f.request)) block() else queued = block
+    }
+
+    private fun freed() {
+        val q = queued ?: return
+        queued = null
+        h.postDelayed({ if (state == State.IDLE) q() else queued = q }, 600)
+    }
+
+    // The answer: read at once while it was waited for; later, after a chime (and the music paused again).
+    private fun answer(text: String) {
+        h.removeCallbacks(pulse)
+        host.carBand("Claude: $text", true)
+        if (state == State.THINKING) return speak(text, "answer")
+        CarSounds.play(CarSounds.Sound.READY)
+        state = State.SPEAKING // nothing else starts in the moment before it is read
+        holdFocus()
+        h.postDelayed({ if (state == State.SPEAKING) speak(text, "answer") }, 700)
+    }
+
+    private fun trouble(why: String) {
+        if (state == State.THINKING) return fail(why)
+        Log.w(ScouterService.TAG, "car: $why")
+        CarSounds.play(CarSounds.Sound.ERROR)
+        say(why)
+    }
+
+    private fun askAloud(a: CarClaude.Ask, first: Boolean) {
+        h.removeCallbacks(pulse)
+        val about = a.about.joinToString(". ").take(160)
+        val always = a.options.any { it.contains("ask again", true) }
+        val text = (if (first) "Claude is waiting for your OK first. " else "Claude asks. ") +
+            (if (about.isNotEmpty()) "$about. " else "") + a.question +
+            (if (always) " Press next and say yes, always, or no." else " Press next and say yes or no.")
+        host.carBand("$MIC ${a.question}", true)
+        if (state != State.THINKING) CarSounds.play(CarSounds.Sound.READY)
+        say(text)
+    }
+
+    // The next words after Claude's question: yes (its first option), always (the "don't ask again" one), no
+    // (Escape), or anything else: Escape, then those words to Claude.
+    private fun answerAsk(p: CarClaude.Ask, text: String, words: String) {
+        val f = askFor
+        val then = askThen
+        pendingAsk = null
+        askFor = null
+        askThen = null
+        val always = p.options.indexOfFirst { it.contains("ask again", true) }
+        val choice = when {
+            words in ALWAYS && always >= 0 -> always
+            words in YES || words in ALWAYS -> 0
+            words in NO -> -1
+            else -> -2
+        }
+        val server = f?.server ?: host.carServer() ?: return fail("Add a server for Claude in Vox first.")
+        state = State.THINKING
+        asked = text
+        holdFocus()
+        show()
+        val id = ++request
+        Log.i(ScouterService.TAG, "car: answering Claude's question: ${if (choice >= 0) p.options.getOrElse(choice) { "yes" } else "no"}")
+        Thread {
+            val r = CarClaude.answer(host.carVault(), server, p.pane, if (choice == -2) -1 else choice)
+            h.post {
+                if (id != request || state != State.THINKING) return@post
+                if (r.error != null) return@post fail(r.error)
+                CarSounds.play(CarSounds.Sound.SEND)
+                when {
+                    choice == -2 -> {
+                        follow = null
+                        state = State.IDLE
+                        h.postDelayed({ if (state == State.IDLE) question(text) }, 900)
+                    }
+                    then != null -> {
+                        state = State.IDLE
+                        h.postDelayed({ if (state == State.IDLE) question(then) }, 900)
+                    }
+                    choice == -1 -> {
+                        follow = null
+                        state = State.IDLE
+                        say("Okay, I told Claude no.")
+                    }
+                    f != null && follow === f -> {
+                        // Followed on, as a question just sent.
+                        val g = Follow(f.id, id, f.server, f.question)
+                        follow = g
+                        h.postDelayed(pulse, 1800)
+                        h.postDelayed(longWait, 25000)
+                        poll(g)
+                    }
+                    else -> {
+                        state = State.IDLE
+                        say("Okay.")
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun answered(id: Int, a: CarClaude.Answer) {
         if (id != request || state != State.THINKING) return
         h.removeCallbacks(pulse)
-        if (!terminal) a.session?.let { settings.carSession = it }
+        a.session?.let { settings.carSession = it }
         if (a.error != null) return fail(a.error)
         lastAnswer = a.text
+        settings.carLast = a.text
         host.carBand("Claude: ${a.text}", true)
         speak(a.text, "answer")
     }
@@ -980,6 +1432,7 @@ class CarMode(private val context: Context, private val host: CarHost) {
         dropFocus()
         if (id == "answer") host.carBand("Claude: $lastAnswer", false)
         show()
+        freed()
     }
 
     private fun quiet() {
@@ -988,16 +1441,28 @@ class CarMode(private val context: Context, private val host: CarHost) {
         dropFocus()
         CarSounds.play(CarSounds.Sound.CANCEL)
         show()
+        freed()
     }
 
     // ------------------------------------------------ the end of a go
+
+    // The question being asked or waited for, cancelled (its answer is not read).
+    private fun stopAsking() {
+        droppedUpTo = request
+        follow = null
+        h.removeCallbacks(longWait)
+        cancel("Cancelled.", false)
+    }
 
     // aloud: the reason is said too (not for a cancel the user asked for: the chime says it).
     private fun cancel(why: String, aloud: Boolean = true) {
         reset()
         CarSounds.play(CarSounds.Sound.CANCEL)
         host.carBand("$MIC $why", false)
-        if (aloud) h.postDelayed({ if (state == State.IDLE) say(why) }, 500) else dropFocus()
+        if (aloud) h.postDelayed({ if (state == State.IDLE) say(why) }, 500) else {
+            dropFocus()
+            freed()
+        }
         show()
     }
 
@@ -1010,12 +1475,13 @@ class CarMode(private val context: Context, private val host: CarHost) {
         show()
     }
 
-    // Whatever runs stops (a request's answer is dropped when it comes).
+    // Whatever runs stops (a request's answer is dropped when it comes; a question followed in the terminal goes on).
     private fun reset() {
         h.removeCallbacks(noSpeech)
         h.removeCallbacks(tooLong)
         h.removeCallbacks(slowMic)
         h.removeCallbacks(pulse)
+        h.removeCallbacks(longWait)
         if (micOn) host.carStopListening()
         micOn = false
         said.setLength(0)
@@ -1048,14 +1514,21 @@ class CarMode(private val context: Context, private val host: CarHost) {
         h.postDelayed({ if (state == State.IDLE) say("Hi, this is how Claude sounds in the car.") }, 1500)
     }
 
-    // Previous (idle) or the Voice tab: a new conversation. The terminal: a new tab running a fresh Claude, in front
-    // (the glasses show it), where the next question goes; a chat: its session forgotten.
-    fun newConversation() {
+    // Previous (idle), "new conversation", "new project …", or the Voice tab: a new conversation in a new folder of
+    // its own (~/car/<date and time>, or the project's name). The terminal: a new tab running a fresh Claude there,
+    // where the next questions go; a chat: its session forgotten, the next one made there.
+    fun newConversation(project: String = "") {
         if (state != State.IDLE) return
         settings.carSession = ""
+        val folder = CarClaude.folderName(project)
+        settings.carFolder = folder
+        follow = null
+        pendingAsk = null
+        askThen = null
+        val line = if (project.isEmpty()) "New conversation." else "New project: $project."
         if (settings.carTarget == "chat") {
             CarSounds.play(CarSounds.Sound.READY)
-            return say("New conversation.")
+            return say(line)
         }
         val server = host.carServer() ?: return fail("Add a server for Claude in Vox first.")
         state = State.THINKING
@@ -1066,26 +1539,41 @@ class CarMode(private val context: Context, private val host: CarHost) {
         h.postDelayed(pulse, 1200)
         val id = ++request
         val tmux = host.carTmux(server)
-        Log.i(ScouterService.TAG, "car: a new Claude tab in tmux $tmux on ${server.name}")
+        Log.i(ScouterService.TAG, "car: a new Claude tab in tmux $tmux on ${server.name}, in ~/car/$folder")
         Thread {
-            val a = CarClaude.newTab(host.carVault(), server, tmux)
+            val a = CarClaude.newTab(host.carVault(), server, tmux, folder)
             h.post {
                 if (id != request || state != State.THINKING) return@post
                 h.removeCallbacks(pulse)
                 if (a.error != null) return@post fail(a.error)
-                voicePane = a.session?.takeIf { it.startsWith("%") }
+                settings.carPane = a.session?.takeIf { it.startsWith("%") } ?: ""
                 CarSounds.play(CarSounds.Sound.READY)
-                host.carBand("$MIC New conversation: press next to talk", false)
-                say("New conversation. Press next to talk.")
+                host.carBand("$MIC $line Its folder: car/$folder", false)
+                say("$line Press next to talk.")
             }
         }.start()
     }
 
     companion object {
         const val MIC = ScouterService.MIC
+        // What a separate chat may use: the web, and files (its own folder's, without asking).
+        const val CHAT_TOOLS = "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep"
         private val NEW_CHAT = setOf("new conversation", "new chat", "start over", "start a new conversation", "reset",
-            "new topic", "forget that")
+            "new topic", "forget that", "a new conversation", "open a new conversation", "start a new chat")
+        private val NEW_PROJECT = Regex("^(?:start |open |make |begin )?(?:a )?new project(?: called| named| for)? (.+)$")
         private val NEVER_MIND = setOf("never mind", "nevermind", "cancel", "stop", "nothing")
+        private val READ_BACK_WORDS = setOf("repeat", "repeat that", "say that again", "what did you say", "come again",
+            "read back", "read it back", "read that back", "again", "one more time", "say it again")
+        private val READ_BACK = Regex("^(?:(?:can|could|would) you |please )?(?:read|say|repeat|tell)(?: me)? (?:that|it|" +
+            "the last (?:answer|response|message|one|thing)|what you (?:just )?said|your (?:last )?(?:answer|response))" +
+            "(?: back| again)?(?: to me)?(?: again)?(?: please)?$")
+        private val YES = setOf("yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go ahead", "do it", "allow", "allow it",
+            "approve", "approved", "yes please", "proceed", "go", "yes go ahead", "please do", "run it", "yes do it",
+            "yes you can", "sounds good", "go for it", "affirmative", "correct", "that s fine", "fine")
+        private val ALWAYS = setOf("always", "yes always", "always allow", "allow always", "yes and don t ask again",
+            "don t ask again", "yes don t ask again", "yes and dont ask again", "dont ask again", "always yes")
+        private val NO = setOf("no", "nope", "don t", "dont", "deny", "no thanks", "no thank you", "don t do it",
+            "dont do it", "stop", "cancel", "never mind", "nevermind", "no don t", "negative", "not now")
 
         // A car's audio (or its hands-free): Bluetooth class car audio or hands-free.
         fun isCar(d: android.bluetooth.BluetoothDevice): Boolean = runCatching {
