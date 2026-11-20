@@ -59,6 +59,10 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private var playChip: TextView? = null
     private var dragging = false
     private var voiceText: TextView? = null
+    private var voiceBar: Progress? = null
+    private var writeBar: Progress? = null
+    private var rowBar: Progress? = null // the list's row of the episode being made
+    private var rowText: TextView? = null
     private var builtWith: File? = null // what played when the page was built
     private val rowChips = HashMap<File, TextView>() // the list's Play chips, by episode
 
@@ -122,6 +126,10 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         timeText = null
         playChip = null
         voiceText = null
+        voiceBar = null
+        writeBar = null
+        rowBar = null
+        rowText = null
         rowChips.clear()
         builtWith = PodcastPlayer.file
     }
@@ -232,7 +240,12 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             audio.exists() -> "Ready  ·  ${Podcasts.minutes(audio)}" + if (at > 30_000) "  ·  stopped at ${clock(at)}" else ""
             else -> "Not made yet"
         }
-        c.addView(text(status, 13f, if (audio.exists() && !making) Ui.GOOD else Ui.MUTED).apply { setPadding(0, dp(2), 0, 0) })
+        val st = text(status, 13f, if (audio.exists() && !making) Ui.GOOD else Ui.MUTED).apply { setPadding(0, dp(2), 0, 0) }
+        c.addView(st)
+        if (making) {
+            c.addView(Progress(this).also { rowBar = it }, lp().apply { topMargin = dp(8) })
+            rowText = st
+        }
         val chips = ArrayList<View>()
         if (audio.exists() && !making) {
             val on = PodcastPlayer.file == audio && PodcastPlayer.playing
@@ -327,6 +340,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             "Wi-Fi is best. It goes on where it stopped if interrupted. Car mode reads with it too.")
         val label = text("", 13.5f, Ui.MUTED).also { voiceText = it }
         if (KokoroModel.progress >= 0) {
+            c.addView(Progress(this).also { voiceBar = it }, lp().apply { topMargin = dp(6); bottomMargin = dp(8) })
             c.addView(label)
         } else {
             c.addView(button("Download the voice", 0) {
@@ -347,6 +361,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private fun updateVoice() {
         val t = voiceText ?: return
         t.text = if (KokoroModel.progress >= 0) "Downloading…  ${KokoroModel.progress / 1_000_000} of ${KokoroModel.bytes / 1_000_000} MB" else ""
+        voiceBar?.fraction = if (KokoroModel.bytes > 0) (KokoroModel.progress.toFloat() / KokoroModel.bytes).coerceIn(0f, 1f) else 0f
     }
 
     // Claude writing a script: the topic, the time so far, then Open it (or why it failed).
@@ -359,6 +374,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             else -> "Claude is writing"
         })
         c.addView(text(w.topic, 16f, Ui.TEXT, Ui.BOLD))
+        if (w.error == null) c.addView(Progress(this).also { writeBar = it }, lp().apply { topMargin = dp(10); bottomMargin = dp(4) })
         c.addView(text("", 13.5f, Ui.MUTED).also { writeText = it }, lp().apply { topMargin = dp(4) })
         if (w.finished) {
             val chips = ArrayList<View>()
@@ -379,11 +395,16 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
         t.text = when {
             w.error != null -> w.error
             w.result != null -> if (w.make) "Written, and being made into the episode." else "Written. Open it to make the episode."
-            else -> "About ${w.minutes} minutes long  ·  %d:%02d so far (often a minute or three)".format(s / 60, s % 60)
+            else -> "About ${w.minutes} minutes long  ·  %d:%02d so far, usually about ${expected(w) / 60 + 1} min".format(s / 60, s % 60)
         }
+        // Claude says nothing until it is done: the bar is the usual time, slowing near the end so it never sits full.
+        writeBar?.fraction = if (w.result != null) 1f else 0.95f * (1f - Math.exp(-s.toDouble() / expected(w)).toFloat())
         t.setTextColor(if (w.error != null) Ui.BAD else Ui.MUTED)
         if (w.finished && !writeFinished) refresh()
     }
+
+    // How long Claude usually takes to write one this long, in seconds (looking things up included).
+    private fun expected(w: Podcasts.Writing) = 60 + w.minutes * 12
 
     // The episode being made: a bar, the time left, and Stop (Dismiss once it is over).
     private fun jobCard(): View? = with(a) {
@@ -427,6 +448,8 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             else -> "${100 * j.done / j.total}%  ·  about ${eta(j.etaMs)} left"
         }
         t.setTextColor(if (j.error != null && j.error != "Stopped") Ui.BAD else Ui.MUTED)
+        rowBar?.fraction = bar.fraction
+        if (!j.finished && j.etaMs >= 0 && j.stage != "Encoding") rowText?.text = "Being made…  ${100 * j.done / j.total}%  ·  about ${eta(j.etaMs)} left"
         if (j.finished && !builtFinished) refresh() // over: Stop becomes Play and Dismiss, and the list shows it ready
     }
 
