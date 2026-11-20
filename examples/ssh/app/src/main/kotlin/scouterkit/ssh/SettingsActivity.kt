@@ -68,6 +68,9 @@ class SettingsActivity : Activity() {
         })
         showGrid(settings.dx, settings.dy)
         glasses.addView(grid)
+        glasses.addToggle(toggle("Charging alerts in the case", "A buzz and a notice when an arm charges or doesn't", settings.caseAlerts) {
+            settings.caseAlerts = it
+        })
         if (BuildConfig.DEBUG) glasses.addToggle(toggle("Debug: show with the glasses folded", null, settings.ignoreWorn) {
             settings.ignoreWorn = it
         })

@@ -260,6 +260,13 @@ class ScouterService : Service() {
             is CaseCheck.Event.Fixed -> Triple("${CaseCheck.name(e.arm)} arm charging ✓", "It's charging now (${pct(e.pct)})", longArrayOf(0, 120))
         }
         Log.i(TAG, "case: $title: $text")
+        if (!settings.caseAlerts) { // optional (Settings > Glasses): off, the log line only, and no notice left up
+            runCatching {
+                val manager = getSystemService(NotificationManager::class.java)
+                for (i in 0..2) manager.cancel(CASE_ID + i)
+            }
+            return
+        }
         runCatching {
             getSystemService(android.os.VibratorManager::class.java).defaultVibrator
                 .vibrate(android.os.VibrationEffect.createWaveform(buzz, -1))

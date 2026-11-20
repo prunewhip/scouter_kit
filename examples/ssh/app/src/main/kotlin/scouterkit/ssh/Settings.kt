@@ -23,6 +23,11 @@ class Settings(context: Context) {
     var keyboard: Boolean
         get() = prefs.getBoolean("keyboard", false)
         set(v) = prefs.edit().putBoolean("keyboard", v).apply()
+    // The case check's buzzes and notifications ("charging ✓" / "isn't charging"); off: only its log lines (1.21: an
+    // arm that cannot charge, the left one's charger fault, buzzed again at every reconnect).
+    var caseAlerts: Boolean
+        get() = prefs.getBoolean("case_alerts", false)
+        set(v) = prefs.edit().putBoolean("case_alerts", v).apply()
     // Debug builds: the terminal shows with the glasses folded (WORN 0), for tests on the table.
     var ignoreWorn: Boolean
         get() = prefs.getBoolean("ignore_worn", false)
