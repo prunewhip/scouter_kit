@@ -3048,7 +3048,8 @@ def test_videot(name):
 def charger_body(e, res):
     """Charger recovery (0.5.69, DEVELOPMENT.md "0.5.69"): with VBUS and the battery at 3.9 V, a latched charger error is
     released about 20 s later (counted, its registers kept); constant current without current flowing for 60 s
-    restarts the charger; battery replies while powered (VRECT 5.74 V) but not charging no longer carry the 0x80
+    restarts the charger; an error latched while the battery is not detected is released as well; battery replies
+    while powered (VRECT 5.74 V) but not charging no longer carry the 0x80
     that makes the case reboot, within its 3 minutes."""
     arm = e.arm
     out = res.setdefault("charger", {})
@@ -3072,6 +3073,17 @@ def charger_body(e, res):
     c2 = arm.case_stats()
     out["noflow"] = {"restarts": [c1["charger_restarts"], c2["charger_restarts"]], "park": c2["park"]}
     assert c2["charger_restarts"] == c1["charger_restarts"] + 1 and c2["park"]["status"] & 0x0C, out
+    # the left arm's case: an error latched while the battery is not (always) detected is released too
+    arm.tr.set_model(NPM, "BatteryDetected", "false")
+    common.model_call(arm, NPM, "InjectChargerErrorReason", "64")
+    arm.wait(25)
+    c3 = arm.case_stats()
+    arm.tr.set_model(NPM, "BatteryDetected", "true")
+    out["undetected"] = {"releases": [c2["charger_releases"], c3["charger_releases"]], "error": c3["charge_error"],
+                         "park": c3["park"]}
+    assert c3["charger_releases"] == c2["charger_releases"] + 1 and c3["charge_error"] == 0, out
+    assert c3["park"]["error"] == 64 and not c3["park"]["status"] & 0x01, out
+    arm.wait(2)
     common.case_request(arm, "130001006407", wait=2.0)   # the emulator loses the first GPO pulse after a boot
     replies = [common.case_request(arm, "130001006407") for _ in range(8)]
     out["replies"] = [r.hex() for r in replies]

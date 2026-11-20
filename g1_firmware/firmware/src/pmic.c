@@ -417,10 +417,11 @@ static int configure(void)
  * there (0 mA at VRECT 5.2 V although the enable is written after every battery reply), and stock's answer to that,
  * the 0x80 reply, makes the case switch its coils off and reboot, cutting both arms (caselink.c). Here, with VBUS,
  * charging allowed, the battery found and not full (COMPLETED, the case latch), no die-temperature pause and the
- * NTC neither cold nor hot: no charge phase for STALL_S seconds in a row, or trickle/constant current without
- * 2 mA flowing for NOFLOW_S, restarts the charger (BCHGENABLECLR, BCHGENABLESET); a latched charger error is
- * released instead (TASKCLEARCHGERR, TASKRELEASEERR), at most RELEASES_PER_H an hour so that a real fault (the
- * safety timer) stays honoured. The case's own reboot did both, for both arms, every few seconds. */
+ * NTC neither cold nor hot: a latched charger error for STALL_S seconds (whatever the status bits show) is
+ * released (TASKCLEARCHGERR, TASKRELEASEERR), at most RELEASES_PER_H an hour so that a real fault (the safety
+ * timer) stays honoured; else, the battery found, no charge phase for STALL_S seconds in a row, or trickle/constant
+ * current without 2 mA flowing for NOFLOW_S, restarts the charger (BCHGENABLECLR, BCHGENABLESET). The case's own
+ * reboot did both, for both arms, every few seconds. */
 #define STALL_S 20
 #define NOFLOW_S 60
 #define RELEASES_PER_H 3
@@ -437,12 +438,23 @@ static void charger_tick(void)
 		window_ms = now;
 		releases = 0;
 	}
-	if (!charge_allowed || !pmic_vbus_present() || !(cs & 0x01) || (cs & 0x72) || caselink.full_latched) {
+	if (!charge_allowed || !pmic_vbus_present() || (cs & 0x72) || caselink.full_latched) {
 		stalled = 0;
 		noflow = 0;
 		return;
 	}
-	if (phase) {
+	if (pmic_status.charge_error) {
+		/* a latched error, whatever the status shows: on the left arm (2026-11-19) TRICKLETIMEOUT 0x40 with the
+		 * status flipping every ~5 s between 0x00 (no battery) and 0x05 (trickle) at VBAT 4.07 V, 0 mA */
+		noflow = 0;
+		if (++stalled < STALL_S) {
+			return;
+		}
+	} else if (!(cs & 0x01)) {
+		stalled = 0;
+		noflow = 0;
+		return;
+	} else if (phase) {
 		stalled = 0;
 		noflow = power_ibat_ua() > -2000 ? noflow + 1 : 0;
 		if (noflow < NOFLOW_S) {

@@ -196,6 +196,14 @@ and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, 
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
 
+### What 0.5.70 adds (a latched charger error is released whatever the status bits show)
+
+- On the left arm with 0.5.69 (real hardware): BCHGERRREASON 0x40 (TRICKLETIMEOUT) latched, the charge status
+  flipping every ~5 s between 0x00 (battery not detected) and 0x05 (trickle) at VBAT 4.07 V, 0 mA, VBUS present:
+  0.5.69 waited for 20 s of one state and never acted. Now an error present for 20 s is released (still at most 3
+  an hour); emulator test `charger` covers it with the battery undetected. Also fixed in 0.5.69's last build: the
+  0x80 "stuck" clock (`now | 1` ran ahead of `now`, sending 0x80 at once on even milliseconds).
+
 ### What 0.5.69 adds (the charger restarts itself in the case; the case is no longer told to reboot)
 
 - Seen 2026-11-19 (case USB log, case firmware V2.67): the left arm's charger sat idle for minutes in the case with
