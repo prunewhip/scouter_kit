@@ -3072,6 +3072,7 @@ def charger_body(e, res):
     c2 = arm.case_stats()
     out["noflow"] = {"restarts": [c1["charger_restarts"], c2["charger_restarts"]], "park": c2["park"]}
     assert c2["charger_restarts"] == c1["charger_restarts"] + 1 and c2["park"]["status"] & 0x0C, out
+    common.case_request(arm, "130001006407", wait=2.0)   # the emulator loses the first GPO pulse after a boot
     replies = [common.case_request(arm, "130001006407") for _ in range(8)]
     out["replies"] = [r.hex() for r in replies]
     assert all(len(r) == 11 and r[4] == 0 and r[9] != 0x80 for r in replies), out
@@ -3081,7 +3082,7 @@ def charger_body(e, res):
 
 
 def test_charger(name):
-    return run(name, CUR_MIC, charger_body)
+    return run(name, CUR_MIC, charger_body, common.CASE_SETUP)
 
 def test_peer(name):
     return run(name, CUR_MIC, peer_body)
