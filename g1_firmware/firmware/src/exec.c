@@ -428,9 +428,19 @@ static int h_asset_read(void *c, const uint8_t *id, uint32_t off, uint8_t *dst, 
 	return assets_read(id, off, dst, n);
 }
 
+/* The app core at 128 MHz while a VIDEO or VIDEOX decodes and draws (CONFIG_G1_FAST_DECODE), 64 MHz otherwise:
+ * the decoder is CPU-bound (up to ~0.9 s for a worst-case 640 x 480 record at 64 MHz). Busy waits follow
+ * SystemCoreClock (nrfx_coredep on the nRF5340 app core), SPIM4 runs from its own 32 MHz clock. */
+static void h_boost(void *c, int on)
+{
+	if (IS_ENABLED(CONFIG_G1_FAST_DECODE)) {
+		g1_clock_boost(on != 0);
+	}
+}
+
 static const struct vm_host host = {
 	NULL, h_now, h_packet, h_packet_done, h_poll, h_prop, h_event, h_panel_begin, h_panel_row,
-	h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, h_panel_span, h_asset_read,
+	h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, h_panel_span, h_asset_read, h_boost,
 };
 
 /* RESET_SESSION: the window flushed (seq 0 again), a new epoch, the VM's session state reset */
@@ -606,8 +616,13 @@ static void exec_thread(void *a, void *b, void *c)
 }
 
 /* below the PMIC (6) and case-link (7) threads: host code is not capped, and a long burst of it must not
- * stop their 1 s cadence (VBUS, the nPM1300 watchdog kick, the case's replies) */
-K_THREAD_DEFINE(exec, 3072, exec_thread, NULL, NULL, NULL, 8, 0, K_TICKS_FOREVER);
+ * stop their 1 s cadence (VBUS, the nPM1300 watchdog kick, the case's replies).
+ * Also strictly below Bluetooth's RX thread (CONFIG_BT_RX_PRIO = 8, VM.md §5.4): at the same priority, with
+ * no time slicing, a long DRAW or VIDEO kept the RX thread from running until it ended, so the host's
+ * packets piled up in the controller (ACL flow control) and the link fell from ~105 to ~44 packets/s while
+ * drawing. Below it, the next packets arrive into the window while the panel is being written. */
+BUILD_ASSERT(CONFIG_BT_RX_PRIO < 9, "the executor must run below Bluetooth's RX thread");
+K_THREAD_DEFINE(exec, 3072, exec_thread, NULL, NULL, NULL, 9, 0, K_TICKS_FOREVER);
 
 void exec_start(void)
 {

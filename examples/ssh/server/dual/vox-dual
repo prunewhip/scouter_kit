@@ -1,0 +1,71 @@
+#!/bin/sh
+# vox-dual on [WxH] | off | status: the phone and the glasses as this laptop's two screens (Vox's Laptop screen
+# source with "Phone as the main screen").
+#   on    the unused HDMI port becomes a monitor for the glasses (no cable: vox-glasses-monitor, as root through
+#         sudo, says it is connected), WxH (the glasses' picture, default 640x480), centred above the laptop's own
+#         screen; vox-screen then sends only it to the glasses, the phone shows the laptop's screen
+#         (vox-dual-vnc), and the pointer goes up from one onto the other as with any two monitors.
+#   off   the laptop's own screen alone again.
+#   status "glasses WxH+X+Y main WxH+X+Y", or "off".
+# ~/.vox-dual holds the glasses monitor "W H X Y" while it is on (vox-screen and Vox's input read it).
+set -eu
+export DISPLAY="${DISPLAY:-:0}"
+if [ -z "${XAUTHORITY:-}" ]; then
+	for f in "/run/user/$(id -u)/gdm/Xauthority" "$HOME/.Xauthority"; do
+		[ -r "$f" ] && { export XAUTHORITY="$f"; break; }
+	done
+fi
+OUT=HDMI-1 MAIN=eDP-1 STATE="$HOME/.vox-dual"
+geo() { xrandr --query | sed -n "s/^$1 connected[a-z ]* \([0-9]*x[0-9]*+[0-9]*+[0-9]*\) .*/\1/p"; }
+connected() { xrandr --query | grep -q "^$OUT connected"; }
+
+# A mode for the glasses' picture: the HDMI port's own list, else a made-up one (640x480's 25.175 MHz timing
+# around a smaller picture: a port refuses anything slower).
+mode_for() {
+	W=$1 H=$2
+	if xrandr --query | sed -n "/^$OUT /,/^[^ ]/p" | grep -q "^ *${W}x${H} "; then echo "${W}x$H"; return; fi
+	N="vox${W}x$H"
+	HT=$((W + 160)) VT=$((H + 45)); [ $HT -ge 800 ] || HT=800; [ $VT -ge 525 ] || VT=525
+	xrandr --query | grep -q " $N " || xrandr --newmode "$N" 25.175 "$W" $((W + 16)) $((W + 112)) $HT "$H" $((H + 10)) $((H + 12)) $VT -hsync -vsync 2>/dev/null || true
+	xrandr --addmode "$OUT" "$N" 2>/dev/null || true
+	echo "$N"
+}
+
+case "${1:-status}" in
+on)
+	SIZE=${2:-640x480}
+	case "$SIZE" in *[!0-9x]*|x*|*x|*x*x*|'') echo "vox-dual: size must be WxH" >&2; exit 2;; esac
+	GW=${SIZE%x*} GH=${SIZE#*x}
+	[ "$GW" -ge 200 ] && [ "$GW" -le 1024 ] && [ "$GH" -ge 200 ] && [ "$GH" -le 768 ] || { echo "vox-dual: size out of range" >&2; exit 2; }
+	if ! connected; then
+		sudo -n /usr/local/sbin/vox-glasses-monitor on 2>/dev/null || {
+			echo "vox-dual: not set up (the one-time setup: sudo sh ~/vox-dual-setup.sh)" >&2; exit 1; }
+		i=0; until connected; do i=$((i + 1)); [ $i -gt 50 ] && { echo "vox-dual: $OUT didn't come up" >&2; exit 1; }; sleep 0.2; done
+		sleep 1.5 # GNOME arranges the new monitor its own way first
+	fi
+	M=$(mode_for "$GW" "$GH")
+	MG=$(geo $MAIN); MW=${MG%%x*}
+	tries=0
+	while :; do
+		xrandr --output "$OUT" --mode "$M" --pos "$(((MW - GW) / 2))x0" --output "$MAIN" --primary --pos "0x$GH" || true
+		sleep 0.7
+		G=$(geo $OUT)
+		[ "$G" = "${GW}x$GH+$(((MW - GW) / 2))+0" ] && break
+		tries=$((tries + 1))
+		[ $tries -ge 4 ] && { echo "vox-dual: couldn't place the glasses monitor (now: ${G:-off})" >&2; exit 1; }
+	done
+	echo "$GW $GH $(((MW - GW) / 2)) 0" > "$STATE"
+	echo "glasses $(geo $OUT) main $(geo $MAIN)"
+	;;
+off)
+	rm -f "$STATE"
+	[ -n "$(geo $OUT)" ] && xrandr --output "$OUT" --off --output "$MAIN" --primary --pos 0x0 || true
+	sudo -n /usr/local/sbin/vox-glasses-monitor off 2>/dev/null || true
+	echo off
+	;;
+status)
+	G=$(geo $OUT)
+	if [ -f "$STATE" ] && [ -n "$G" ]; then echo "glasses $G main $(geo $MAIN)"; else echo off; fi
+	;;
+*) echo "usage: vox-dual on [WxH] | off | status" >&2; exit 2 ;;
+esac

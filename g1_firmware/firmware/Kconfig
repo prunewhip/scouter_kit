@@ -35,6 +35,41 @@ config G1_REQUIRE_SECURITY
 	bool "Out of the case, require an encrypted, bonded link for every write (CMD, CTRL, SMP)"
 	default y
 
+config G1_VIDEOX_PIXELS
+	bool "VIDEOX pixel coding (record flag bit 3)"
+	default n
+	help
+	  The JBIG-style pixel coder for VIDEOX planes. Measured through Vox's mirror it saved ~9% on camera
+	  video and lost on cartoons against transition coding with auto greys, so no host uses it; off, a
+	  record with flag bit 3 is error 4 and its decoder is not built in.
+
+config G1_FAST_DECODE
+	bool "Run the app core at 128 MHz while VIDEO/VIDEOX decode and draw"
+	default y
+	help
+	  The decoders are CPU-bound; at 128 MHz a busy frame decodes in about half the time. The clock
+	  returns to 64 MHz (stock) when the instruction ends.
+
+config G1_LOCK_FLASH
+	bool "Lock the internal flash read + execute only until reset (bootloader and app code)"
+	default y
+	help
+	  At boot, before Bluetooth starts, the SPU makes every 16 KB flash region below the last two
+	  read + execute only and locks that until the next reset: no code running later (a VM bug, a
+	  crafted packet) can rewrite MCUboot or plant itself in the app's flash. The last two regions
+	  stay writable: the primary slot's trailer (an SMP image confirm) and the settings (bonds,
+	  g1_storage2). Updates are unaffected: they go to the external flash and MCUboot copies them
+	  at reset, before the lock.
+
+config G1_UPDATE_IN_CASE_ONLY
+	bool "Accept SMP image uploads and erases only in the case"
+	default y
+	help
+	  MCUboot on the arms checks images with MCUboot's public sample key, so an upload can install
+	  any code. With this on, an image upload or erase over SMP is refused unless IN_CASE is 1 (VBUS,
+	  the case's field or message); updates and restores, which always run in the open case, are
+	  unchanged. Off on the DK (no case).
+
 config G1_PAIRING_WINDOW_S
 	int "Seconds after boot during which a new bond may be created out of the case"
 	default 0

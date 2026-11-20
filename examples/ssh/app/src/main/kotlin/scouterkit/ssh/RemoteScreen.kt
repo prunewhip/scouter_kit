@@ -1,0 +1,237 @@
+package scouterkit.ssh
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Log
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.nio.ByteBuffer
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
+// A server's screen (the laptop's) on the glasses, over SSH: there `vox-screen WIDTH HEIGHT FPS` writes JPEG
+// images one after another (each the whole desktop inside WIDTH x HEIGHT). The newest goes to the glasses
+// (Native.screenFrame) the way the phone's own screen does, only while it is the source shown
+// (Session.screenSource); it feeds the preview too. One thread reads, one sends.
+class RemoteScreen(private val context: Context, val server: Settings.Server, private val onStopped: (String) -> Unit) {
+    val key get() = "screen:${server.id}"
+    @Volatile var state = Native.SCREEN_SAME
+    private var lastHead = -1 // Native.headPan() last seen
+    private var lastSlice = -1 // the panorama's screen the pointer was put on
+    @Volatile var images = 0 // images received so far (the service shows the screen once one has come)
+    @Volatile private var released = false
+    @Volatile private var stream: Bootstrap.Stream? = null
+    private val latest = AtomicReference<ByteArray?>(null)
+    private val wake = Semaphore(0)
+
+    fun start() {
+        Thread({ read() }, "remote-screen-read").start()
+        Thread({ send() }, "remote-screen-send").start()
+    }
+
+    // Another go now (a panel over the picture changed: the options carry it).
+    fun poke() = wake.release()
+
+    // The picture again (heads-up turned the panels on: they came on blank).
+    @Volatile private var again = false
+    fun redraw() {
+        again = true
+        wake.release()
+    }
+
+    fun release() {
+        if (released) return
+        released = true
+        runCatching { stream?.close() }
+        wake.release()
+    }
+
+    private fun read() {
+        val settings = Settings(context)
+        val w = settings.remoteWidth.coerceIn(320, 1920)
+        val h = w * 10 / 16
+        val fps = settings.screenFps.coerceIn(1, 30)
+        // The glasses' picture (native PictureSize: the binocular area at this depth): a server that honours VOX_SIZE
+        // draws its screen at exactly this size, pixel for pixel (sharp text, scrolls sent as row moves).
+        val pictureW = maxOf(2, (640 - minOf(kotlin.math.abs(settings.dx), 600)) and 1.inv())
+        val pictureH = maxOf(2, 480 - minOf(kotlin.math.abs(settings.dy), 400))
+        val why = try {
+            // A command over SSH gets no login shell: ~/.local/bin (where a user installs it) is not on its PATH.
+            // The laptop's two screens (Settings.laptopDual): the glasses get a monitor of their own, pixel for pixel.
+            val dual = if (!server.local && settings.laptopDual) "VOX_DUAL=1 " else ""
+            val s = Bootstrap(Vault(context)).stream(server.host, server.port, server.user,
+                "${dual}VOX_FORMAT=png VOX_SIZE=${pictureW}x$pictureH PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\" vox-screen $w $h $fps")
+            stream = s
+            if (released) {
+                s.close()
+                return
+            }
+            parse(s.input)
+            if (released) return
+            Thread.sleep(300) // the exit status and the last errors
+            val err = s.errors
+            s.close()
+            "${server.name} screen ended" + when {
+                err.contains("not found") || s.exitStatus == 127 -> ": vox-screen is not installed there"
+                err.isNotEmpty() -> ": " + err.lines().last().take(160)
+                else -> ""
+            }
+        } catch (e: Bootstrap.UnknownHost) {
+            "${server.name}: show its terminal once to trust the server first"
+        } catch (e: Exception) {
+            if (released) return
+            "${server.name} screen: ${Bootstrap.plain(e, server.host, server.port)}"
+        }
+        Log.i(ScouterService.TAG, "remote screen: $why")
+        if (!released) {
+            released = true
+            wake.release()
+            onStopped(why)
+        }
+    }
+
+    // Images one after another: JPEGs (FF D8 ... FF D9; the coded data stuffs every FF byte, so FF D9 ends one) or,
+    // from a vox-screen that honours VOX_FORMAT=png, lossless grey PNGs (the 8-byte signature ... the IEND chunk),
+    // sent only when the screen changed. A server that ignores VOX_FORMAT keeps sending JPEGs: both are read.
+    private fun parse(input: InputStream) {
+        val image = ByteArrayOutputStream(256 * 1024)
+        val chunk = ByteArray(64 * 1024)
+        var kind = 0 // 0 between images, 1 inside a JPEG, 2 inside a PNG
+        var tail = 0L // the last 8 bytes, for markers that span reads
+        while (!released) {
+            val n = input.read(chunk)
+            if (n < 0) return
+            var from = 0
+            for (i in 0 until n) {
+                val b = chunk[i].toLong() and 0xFF
+                tail = (tail shl 8) or b
+                when (kind) {
+                    0 -> if ((tail and 0xFFFF) == 0xFFD8L) {
+                        kind = 1
+                        image.reset()
+                        image.write(0xFF)
+                        from = i
+                    } else if (tail == PNG_SIGNATURE) {
+                        kind = 2
+                        image.reset()
+                        image.write(PNG_HEAD, 0, 7)
+                        from = i
+                    }
+                    1 -> if ((tail and 0xFFFF) == 0xFFD9L) {
+                        image.write(chunk, from, i - from + 1)
+                        done(image)
+                        kind = 0
+                    }
+                    else -> if (tail == PNG_IEND) {
+                        image.write(chunk, from, i - from + 1)
+                        done(image)
+                        kind = 0
+                    }
+                }
+            }
+            if (kind != 0) {
+                image.write(chunk, from, n - from)
+                if (image.size() > 16 * 1024 * 1024) { // not an image stream
+                    kind = 0
+                    image.reset()
+                }
+            }
+        }
+    }
+
+    private fun done(image: ByteArrayOutputStream) {
+        latest.set(image.toByteArray())
+        images++
+        wake.release()
+    }
+
+    private fun send() {
+        val settings = Settings(context)
+        val period = 1000L / settings.screenFps.coerceIn(1, 30)
+        var bitmap: Bitmap? = null
+        var buffer: ByteBuffer? = null
+        var due = false
+        var options = IntArray(0)
+        var previewAt = 0L
+        val previewPixels = ByteArray(640 * 480)
+        val info = IntArray(3)
+        val decode = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+        var wasMine = false
+        while (!released) {
+            // Unseen (another source in front), the newest image waits undecoded; shown again, it goes at once.
+            val mine = Session.screenSource == key
+            if (mine && !wasMine) due = true
+            if (again) {
+                again = false
+                due = true
+            }
+            wasMine = mine
+            if (mine) latest.getAndSet(null)?.let { jpeg ->
+                val b = runCatching { BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, decode) }.getOrNull()
+                if (b != null) {
+                    if (buffer == null || buffer!!.capacity() < b.byteCount) buffer = ByteBuffer.allocateDirect(b.byteCount)
+                    buffer!!.rewind()
+                    b.copyPixelsToBuffer(buffer!!)
+                    bitmap?.recycle()
+                    bitmap = b
+                    due = true
+                }
+            }
+            val now = settings.screenOptions()
+            if (!now.contentEquals(options)) {
+                options = now
+                due = true
+            }
+            // A panorama or a sphere: the head moved. The picture slides at once, and when the window is mostly on
+            // another of its screens the pointer goes to that one's middle (an X desktop without a window manager
+            // types into the window under the pointer).
+            // (Only a picture of several screens: a single one, as Chrome for tabs around you, keeps its pointer.)
+            val pic0 = bitmap
+            val head = if (pic0 != null && (pic0.width > 640 || pic0.height > 480)) Native.headPan() else -1
+            if (head != lastHead) {
+                val pic = bitmap
+                if (head >= 0 && pic != null) {
+                    val cx = head / 4096 + 320
+                    val cy = head % 4096 + 240
+                    val screenAt = (cy / 480) * 1000 + cx / 640
+                    if (screenAt != lastSlice) {
+                        lastSlice = screenAt
+                        RemoteInput.current?.takeIf { it.server.id == server.id }
+                            ?.send("p ${cx * 10000L / pic.width} ${cy * 10000L / pic.height}")
+                    }
+                } else if (head < 0) lastSlice = -1
+                lastHead = head
+                due = true
+            }
+            val b = bitmap
+            val buf = buffer
+            if (b != null && buf != null && mine) {
+                if (due) {
+                    buf.rewind()
+                    state = Native.screenFrame(buf, b.width, b.height, b.rowBytes, options)
+                    due = state == Native.SCREEN_BUSY || state == Native.SCREEN_LATER || state == Native.SCREEN_HIDDEN ||
+                        state == Native.SCREEN_STOPPED
+                }
+                val t = android.os.SystemClock.uptimeMillis()
+                if (Preview.wanted && t - previewAt >= 250) {
+                    previewAt = t
+                    buf.rewind()
+                    if (Native.screenPreview(buf, b.width, b.height, b.rowBytes, options, settings.dx, settings.dy,
+                            previewPixels, info))
+                        Preview.publish(previewPixels, info[0], info[1], info[2] == 1, Native.screenStats())
+                }
+            }
+            // A new image, or another go (soon while the link is busy).
+            wake.tryAcquire(if (due && state == Native.SCREEN_BUSY) 12L else period, TimeUnit.MILLISECONDS)
+        }
+        bitmap?.recycle()
+    }
+
+    companion object {
+        private const val PNG_SIGNATURE = -0x76afb1b8f2f5e5f6L // 89 50 4E 47 0D 0A 1A 0A
+        private const val PNG_IEND = 0x49454E44AE426082L // IEND and its CRC
+        private val PNG_HEAD = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A)
+    }
+}

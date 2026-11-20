@@ -67,14 +67,89 @@ void vm_draw_row(const uint8_t *arena, const struct vm_draw *d, int32_t r, uint8
  * vm_video_expand turns pixels x0..x1-1 of such a row into (x1 - x0 + 1) / 2 bytes of 4 bpp: level for ink,
  * else 0, a 0 nibble after an odd last pixel; it reads only the bytes of those pixels. */
 #define VM_VIDEO_STATE 1596u
+#define VM_VIDEO_MAXW 2048 /* VIDEOX planes may be this wide (a canvas the panel shows part of); VIDEO stays 640 */
 struct vm_video {
-	uint16_t t[2][VM_PANEL_W + 3], o[VM_PANEL_W + 4];
-	uint8_t cls[2][VM_PANEL_W + 3];
+	uint16_t t[2][VM_VIDEO_MAXW + 3], o[VM_VIDEO_MAXW + 4];
+	uint8_t cls[2][VM_VIDEO_MAXW + 3];
 };
 typedef void vm_span_fn(void *ctx, uint32_t y, uint32_t x0, uint32_t x1, const uint8_t *row);
 int vm_video_check(const uint8_t *arena, const uint32_t *v, uint32_t *detail);
+/* the same with planes up to maxw wide (VIDEOX's planes: VM_VIDEOX_MAXW) */
+int vm_video_check_w(const uint8_t *arena, const uint32_t *v, uint32_t *detail, uint32_t maxw);
 void vm_video_decode(uint8_t *arena, const uint32_t *v, struct vm_video *s, vm_span_fn *span, void *ctx);
 void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t level, uint8_t *out);
+
+/* VIDEOX planes, stride, w, h, x, y, levels, src, n, states (§3.8): VIDEO over 1-4 bit planes (greys) with an
+ * optional row move (scrolling). planes and states are tables of P u32 arena addresses: plane p is the 1-bpp
+ * bitmap at planes[p] (w x h, stride bytes a row), its VIDEO state at states[p]; each may be anywhere in the
+ * arena. A pixel's level is levels[Σ bit_p << p], the level map. The record: u8 flags (bit 0 a move follows,
+ * bit 1 redraw), u8 planes (1-4), the move if any (u16 y0, u16 rows, s16 dy), then per plane a u24 length and
+ * that many bytes of an ordinary VIDEO record (§3.7). vm_videox_check checks everything first (errors 3, 4, 5;
+ * nothing changes) and fills a layout (the tables read); vm_videox_move applies the move to every plane and
+ * calls mark for each row whose content it changed; vm_videox_plane gives plane p's VIDEO operands;
+ * vm_videox_compose makes pixels x0..x1-1 of row y as 4 bpp from the planes, like vm_video_expand. */
+#define VM_VIDEOX_PLANES 4
+#define VM_VX_SCALE2 4             /* record flag: the planes are drawn at twice their size */
+#define VM_VX_PIXELS 8             /* record flag: every plane is pixel coded (vm_videox_pixels) */
+#define VM_VX_BLOCK 16             /* record flag: a rectangle of every plane moves by (dx, dy) (window drags) */
+#define VM_VX_SPRITE 32            /* record flag: a redraw rectangle and a 16 x 16 sprite (the pointer) */
+#define VM_VIDEOX_MAXW VM_VIDEO_MAXW /* planes may be wider than the panel (a canvas the panel shows part of) */
+#define VM_VIDEOX_PIX_STATE 4100u  /* a pixel-coded plane's state: 2050 u16 probabilities */
+struct vm_videox {
+	uint32_t planes, flags, y0, rows;
+	int32_t dy;
+	uint32_t bx, by, bw, bh;  /* block move: the source rectangle */
+	int32_t bdx, bdy;         /* ... and its displacement */
+	uint32_t rx, ry, rw, rh;  /* redraw rectangle (rw or rh 0: none) */
+	int32_t sx, sy;           /* sprite position (sx = -32768: none) */
+	uint32_t sprite;          /* sprite: 16 rows of u16 mask, u16 ink (big-endian, bit 15 the left pixel) */
+	uint32_t at[VM_VIDEOX_PLANES], len[VM_VIDEOX_PLANES];   /* each plane's record */
+	uint32_t plane[VM_VIDEOX_PLANES], state[VM_VIDEOX_PLANES]; /* from the tables */
+};
+typedef void vm_mark_fn(void *ctx, uint32_t y);
+int vm_videox_check(const uint8_t *arena, const uint32_t *v, struct vm_videox *x, uint32_t *detail);
+void vm_videox_move(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx);
+/* the block move (VM_VX_BLOCK): every plane's rectangle to its new place (overlap safe); span gets each destination
+ * row's changed part */
+void vm_videox_block(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, vm_span_fn *span, void *ctx);
+/* the sprite's level for plane pixel (px, py): 0..15, or -1 where it is transparent or outside it */
+int vm_videox_sprite_at(const uint8_t *arena, const struct vm_videox *x, int32_t px, int32_t py);
+void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv);
+/* pixel coding (VM_VX_PIXELS): plane p's record decoded in place, spans as vm_video_decode's; planes are decoded
+ * from the top one down (the context reads the planes above); compose2: scale 2, one byte (two pixels) a pixel */
+void vm_videox_pixels(uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t p, vm_span_fn *span,
+		      void *ctx);
+void vm_videox_compose2(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, uint32_t y, uint32_t x0,
+			uint32_t x1, uint8_t *out);
+/* pair: 256 bytes from vm_videox_pairs (two pixels' levels for a byte of two indices), made once per VIDEOX */
+void vm_videox_pairs(const uint8_t *arena, const uint32_t *v, uint8_t *pair);
+void vm_videox_compose(const uint8_t *arena, const uint32_t *v, const struct vm_videox *x, const uint8_t *pair,
+		       uint32_t y, uint32_t x0, uint32_t x1, uint8_t *out);
+
+/* VIDEOT frame, w, h, x, y, src, n, state (§3.9, g1v0 0.5.68+): transform-coded 8-bit video drawn at twice its size
+ * (each pixel 2 x 2 panel pixels, 16 levels with a 2 x 2 ordered dither: ~61 apparent levels). frame: w x h bytes
+ * (w, h multiples of 8, 8...320 x 8...240), the last picture, updated in place; state: VM_VIDEOT_STATE bytes (the
+ * model, the band above as it was, the band being decoded, the dither table). The record: u8 flags (bit 0 reset the
+ * model, bit 1 redraw every band, bit 2 flat: predicted from grey 128, no motion), u8 q (1...63, the step is 4q),
+ * then range-coder bytes: per 8 x 8 block (rows of blocks top down) skip, a motion vector (|v| <= 7) and four 4 x 4
+ * Walsh-Hadamard blocks of residual. vm_videot_check checks everything first (errors 3, 4, 5; nothing changes);
+ * vm_videot_decode decodes band by band (8 rows) and calls band(ctx, b, x0, x1) when band b's pixels x0..x1-1
+ * changed (after it is in the frame); vm_videot_row makes one panel row (k = 0, 1) of frame row y, pixels
+ * x0..x1-1, one byte (two panel pixels) a pixel. Any bytes decode to some picture (every value is clamped): no
+ * error once the checks passed. */
+#define VM_VIDEOT_MAXW 320u
+#define VM_VIDEOT_MAXH 240u
+#define VM_VT_PROBS 128u
+#define VM_VT_TOP 256u                          /* u8 per block column: skipped in the band above */
+#define VM_VT_LUT 296u                          /* 2 x 256 bytes: a pixel's two panel pixels, rows k = 0, 1 */
+#define VM_VT_HIST 808u                         /* the band above as it was: 8 x w */
+#define VM_VT_CUR (VM_VT_HIST + 8u * VM_VIDEOT_MAXW) /* the band being decoded: 8 x w */
+#define VM_VIDEOT_STATE (VM_VT_CUR + 8u * VM_VIDEOT_MAXW)
+typedef void vm_band_fn(void *ctx, uint32_t band, uint32_t x0, uint32_t x1);
+int vm_videot_check(const uint8_t *arena, const uint32_t *v, uint32_t *detail);
+void vm_videot_decode(uint8_t *arena, const uint32_t *v, vm_band_fn *band, void *ctx);
+void vm_videot_row(const uint8_t *arena, const uint32_t *v, uint32_t y, uint32_t k, uint32_t x0, uint32_t x1,
+		   uint8_t *out);
 
 #ifdef __cplusplus
 }

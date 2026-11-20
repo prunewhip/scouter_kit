@@ -4,6 +4,7 @@
  * +0x55/+0x56, luminance base +0x78. */
 #include <string.h>
 #include <zephyr/kernel.h>
+#include <zephyr/irq.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/flash.h>
@@ -11,6 +12,7 @@
 #include <zephyr/init.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_uarte.h>
+#include <hal/nrf_clock.h>
 #include <soc.h>
 #include "g1.h"
 
@@ -176,4 +178,46 @@ int board_init(void)
 	read_settings();
 	LOG_INF("role %s", role ? "left (slave)" : "right (master)");
 	return 0;
+}
+
+static int clock_users;
+static bool clock_fast;
+
+static void clock_set(bool fast)
+{
+	nrf_clock_hfclk_div_set(NRF_CLOCK_S, fast ? NRF_CLOCK_HFCLK_DIV_1 : NRF_CLOCK_HFCLK_DIV_2);
+	SystemCoreClockUpdate();
+	clock_fast = fast;
+}
+
+/* 64 MHz again CLOCK_HOLD_MS after the last user let go: frames back to back (video) keep 128 MHz between them
+ * instead of switching twice a frame */
+#define CLOCK_HOLD_MS 40
+
+static void clock_down(struct k_work *w)
+{
+	unsigned int key = irq_lock();
+
+	if (clock_users == 0 && clock_fast) {
+		clock_set(false);
+	}
+	irq_unlock(key);
+}
+
+static K_WORK_DELAYABLE_DEFINE(clock_down_work, clock_down);
+
+void g1_clock_boost(bool on)
+{
+	unsigned int key = irq_lock();   /* the divider and SystemCoreClock change together for every ISR */
+	bool idle;
+
+	clock_users += on ? 1 : (clock_users > 0 ? -1 : 0);
+	if (clock_users && !clock_fast) {
+		clock_set(true);
+	}
+	idle = clock_users == 0;
+	irq_unlock(key);
+	if (idle) {
+		k_work_reschedule(&clock_down_work, K_MSEC(CLOCK_HOLD_MS));
+	}
 }

@@ -93,6 +93,8 @@ in programs.
 | 0x54 | `LINE` | 7 | | 5 + 2e | H | §3.6 |
 | 0x55 | `VIDEO` | 10 | | 6 + 2e | H | §3.7 |
 | 0x56 | `ASSET_LOAD` | id, dst, off, n | | 3 + 2e | H | bytes off…off + n − 1 of the stored asset whose ID is at id to dst (§2.4) |
+| 0x57 | `VIDEOX` | 10 | | 6 + 2e | H | §3.8 (g1v0 0.5.62+) |
+| 0x58 | `VIDEOT` | 8 | | 5 + 2e | H | §3.9 (g1v0 0.5.68+) |
 
 Every other opcode is invalid (error 2). 0x00 is never an instruction, so running into zeroed memory
 stops at once. Host code (the bytes of a packet) uses the instructions marked H; stored code reached from
@@ -330,6 +332,120 @@ a0 = −1 and colour = 0 at the start, until the row ends:
 The library's `VideoEncoder` makes the records (`scouter_kit_g1.hpp`); at 480 × 360 the user's Bad Apple
 clip takes 261 bytes per frame on average at 30 frames/s, 6.4 times less than row runs
 (`docs/fps-codec.md`, development tree).
+
+### 3.8 VIDEOX planes, stride, w, h, x, y, levels, src, n, states (g1v0 0.5.62+)
+`VIDEO` over 1–4 bit planes, for greys, with an optional row move, for scrolling. `planes` and `states` are the
+addresses of two tables of P u32 arena addresses: plane p (0 … P − 1) is the 1-bpp bitmap of w × h pixels at
+planes[p] (rows stride bytes apart), its `VIDEO` state at states[p]; each may be anywhere in the arena, so the
+planes of a large picture fit a fragmented arena. A pixel's index is Σ bit_p·2^p and the panel shows
+levels[index], the byte at levels + index (the level map: 2^P bytes, each ≤ 15; a Gray-coded map lets neighbouring
+greys differ in one plane). The record of n bytes at src:
+
+| Offset | Size | What |
+|---|---|---|
+| 0 | u8 | flags: bit 0 a move follows, bit 1 *redraw* (every row of the rectangle is drawn whole), bit 2 *scale 2* (0.5.64+: each plane pixel is drawn as 2 × 2 panel pixels), bit 3 *pixel coding* (0.5.64+: every plane's record is pixel coded, below), bit 4 *block move* (0.5.66+), bit 5 *sprite* (0.5.66+); other bits error 4 |
+| 1 | u8 | P, the number of planes, 1…4 (else error 4) |
+| 2 | 6 | if flags bit 0: u16 y0, u16 rows, s16 dy |
+| | 12 | if flags bit 4: u16 bx, by, bw, bh, s16 dx, dy |
+| | 16 | if flags bit 5: u16 rx, ry, rw, rh, s16 sx, sy, u32 sprite |
+| | | then for each plane in order: u24 length L ≥ 1, then L bytes, an ordinary `VIDEO` record (§3.7) for that plane |
+
+The lengths must end exactly at n (error 4, detail the offset). Checked before anything changes, in this order:
+w, h and stride as `VIDEO` (error 5); n ≥ 2 and the record inside the arena; the first two bytes; the two tables
+(4·P bytes each) and the level map (16 bytes) inside the arena (error 3); every plane (up to planes[p] + (h −
+1)·stride + ceil(w/8)) and every state (`VIDEO_STATE` bytes) inside the arena, none overlapping another, and none
+overlapping the record, the level map or a table (error 3, detail the address); every level ≤ 15 (error 5, detail
+the level); the move: y0 + rows ≤ h and 0 < |dy| < rows (error 4); each plane's record as `VIDEO` checks its own
+(§3.7). Then:
+1. The move, if any: within rows y0 … y0 + rows − 1 of every plane, each row y takes the row y − dy (rows left
+   behind keep their pixels), so a page scrolled by dy needs only its new rows coded. The rows whose content the
+   move changed are drawn.
+2. Each plane's record is decoded into its bitmap with its state, exactly as `VIDEO` would.
+3. Every row that a move or any plane changed is drawn once, from its first to its last changed pixel (widened
+   as `VIDEO`), its pixels composed from all the planes through the level map; then the panel is latched once.
+**Pixel coding** (flag bit 3, g1v0 0.5.64+). Each state is `VIDEOX_PIX_STATE` = 4100 bytes (2050 u16
+probabilities in VIDEO's model; checked as above with that size). Planes are decoded from the top plane down. A
+plane's record is a flags byte (bit 0 reset: every probability 2048 first; bit 1 redraw; other bits error 4) and
+range-coder bytes as VIDEO's. Each row first decodes *same* = bit(2048 + s), s = the row above's *same* (1 for row 0):
+a same row keeps its pixels. Otherwise every pixel x is bit(c), c = W | WW<<1 | NW<<2 | N<<3 | NE<<4 | T<<5 |
+TE<<6 | TS<<7 | U<<8: W, WW = pixels x − 1, x − 2 of this row (decoded), NW, N, NE = x − 1, x, x + 1 of the row above
+(decoded), T, TE = pixels x, x + 1 of this row as the plane held them (the previous frame), TS = pixel x of the row
+below (the previous frame), U = the pixel's bits of planes p + 1 … p + 3 (bit 0 = plane p + 1; 0 for planes that do
+not exist); positions outside the plane read 0. The plane is written in place. At most w + 1 decisions a row.
+On natural video it takes 1.4–1.7× fewer bytes than transition coding (cartoons 1.1–1.3×; `tests/videox_test.cpp`).
+
+**Block move** (flag bit 4, 0.5.66+): after the row move and before the planes decode, the rectangle (bx, by, bw,
+bh) of every plane moves by (dx, dy) (as `memmove`: overlap is safe); both rectangles must lie inside the planes
+and bw, bh ≥ 1 (else error 4, detail the field's offset). The destination rows' changed parts are drawn. A dragged
+window or a sideways scroll costs its newly shown part (the library's `FindBlockMove` finds it: ~300 bytes a drag
+step in Vox's mirror). **Sprite** (flag bit 5, 0.5.66+): rows ry … ry + rh − 1, pixels rx … rx + rw − 1 (clipped;
+rw or rh 0: none) are drawn whatever the planes did, and unless sx = −32768 a 16 × 16 sprite is drawn over the
+picture with its top-left at plane pixel (sx, sy): 64 bytes at `sprite` (inside the arena, else error 3), 16 rows
+of a u16 mask and a u16 ink, big-endian, bit 15 the left pixel; where the mask is 1 the panel shows 15 for ink 1,
+0 for ink 0 (at scale 2 each sprite pixel is 2 × 2). The sprite's rows are drawn too. A pointer move is a record
+of unchanged planes with the old place as the redraw rectangle (a few bytes, no frame).
+**Wide planes** (0.5.66+): w may be up to 2048 (both codings; `VIDEO` keeps w ≤ 640): a canvas wider than the
+panel, of which the rectangle at (x, y) shows the part on the panel (x negative pans it). Vox puts a whole panorama
+(e.g. 1920 × 471, 4 greys) on the arms this way; a head turn is a new x and a record of unchanged planes with the
+redraw flag (~20 bytes), and with the head-turn view on, a 20 ms `TIMER` program on each arm moves x itself from
+its own `GYR_Y` between the phone's anchors (8 bytes), so a turn shows without waiting for the link.
+**Pixel coding in g1v0**: off by default from 0.5.66 (`CONFIG_G1_VIDEOX_PIXELS=n`: flag bit 3 is error 4); it
+measured ~9% smaller than Vox's motion mode on real video, not worth a decoder no host uses.
+
+**Scale 2** (flag bit 2): plane pixel (c, r) is panel pixels (x + 2c … x + 2c + 1, y + 2r … y + 2r + 1); the
+rectangle is 2w × 2h, clipped as `DRAW`. With pixel coding at half size, natural video takes ~1.5 KB a frame at 4
+greys instead of ~2.5 KB for transitions (512 × 480 picture).
+
+As `VIDEO`: nothing visible changed, no power-on and no latch; error 7 in safe mode; the microphone indicator stays;
+it counts as a `DRAW` for §6.6; `now` is called every 16 rows of every plane. Its time is about P times `VIDEO`'s
+for the same pixels (bound: about 1 s per plane at 64 MHz; g1v0 0.5.62 runs `VIDEO` and `VIDEOX` at 128 MHz).
+The library's `PlaneVideoEncoder` makes the records and `FindMove` finds a scroll; one 640 × 480 page of grey
+text at 16 levels takes ~7.5 KB, the same page scrolled 37 rows ~4.4 KB (`tests/videox_records.cpp`); in Vox's
+mirror a 540 × 471 page scrolled 40 rows takes 811 bytes instead of 8465.
+
+### 3.9 VIDEOT frame, w, h, x, y, src, n, state (g1v0 0.5.68+)
+Natural video (camera, films, games) as 8-bit pictures, transform coded with motion, drawn at twice their size.
+`frame` is the last picture, w × h bytes (0 black … 255), row by row, updated in place; w and h are multiples of 8,
+8 ≤ w ≤ 320, 8 ≤ h ≤ 240 (error 5, detail the value). `state` is `VIDEOT_STATE` = 5928 bytes: the model (128 u16
+probabilities at offset 0), a skip flag per block column (256), the dither table (296: 2 × 256 bytes), the band above
+as it was (808: 8 × 320 bytes) and the band being decoded (3368: 8 × 320). Checked before anything changes: the sizes;
+the frame, the record and the state inside the arena and not overlapping (error 3, detail the address); n ≥ 2, flags
+≤ 7 and 1 ≤ q ≤ 63 (error 4). Once the checks pass any bytes decode to some picture (every value is clamped): no
+error after a change.
+
+**Record.** u8 flags: bit 0 *reset* (every probability 2048 first), bit 1 *redraw* (every band drawn), bit 2 *flat*
+(every block predicted from grey 128, no motion vectors: a first picture); u8 q: the step is 4q; then range-coder bytes
+(the coder of §3.7, plus *raw* bits: range halved, no model). The picture is coded as 8 × 8 blocks, bands of 8 rows top
+down, left to right. Per block: *skip* = bit(0 + L + T) with L, T = 1 when the block to the left / above was skipped
+(0 outside); a skipped block keeps its pixels (flat: grey 128). Otherwise, unless flat, a motion vector: for c = x, y
+with p = the left block's vector component (0 for the first column or a skipped block): bit(3 + 2c + (p ≠ 0)) says
+it differs from p; then sign = bit(7 + c) and magnitude 1 + U(9 + 8c), clamped to 15; the vector p ± magnitude is
+clamped to −7 … 7. Then four 4 × 4 blocks (top left, top right, bottom left, bottom right): coded = bit(25 + 0, 1, 1, 2
+for blocks 0, 1, 2, 3); a coded block's levels in zigzag order (0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15):
+for i = 0 … 15: nonzero = bit(28 + 3i + min(k, 2)), k the nonzero levels so far; a nonzero level has a raw sign bit,
+magnitude 1, or 2 + U(96 + 8⌊i/4⌋) when bit(92 + ⌊i/4⌋) (clamped to 2047), and end = bit(76 + i) ends the block.
+U(m) is unary on models m … m + 7 up to 8, then Exp-Golomb in raw bits (at most 15 leading zeros).
+A coefficient is level × 4q; the residual is the 4 × 4 Walsh-Hadamard transform of the coefficients (rows then
+columns, ±1 entries in the order + + + +, + + − −, + − − +, + − + −), each value (r + 8) >> 4 (arithmetic). A pixel is
+clamp(prediction + residual, 0, 255), the prediction the frame's pixel at (x + vx, y + vy), coordinates clamped to
+the frame, as the frame was before this record (the decoder keeps the band above as it was: |vy| ≤ 7).
+
+**Drawing.** Each band is drawn when it is decoded (its pixels x0 … x1 − 1 that any block not skipped covers, all with
+the redraw or flat flag) and the panel is latched once at the end: frame pixel (c, r) is panel pixels x + 2c … x + 2c +
+1, y + 2r … y + 2r + 1 (clipped as `DRAW`), each min(15, (60v + 255b + 127) / 1020) with b = 0, 2 (even panel row,
+left and right) and 3, 1 (odd row): an ordered dither, 16 levels whose 2 × 2 average follows v within 2/255. As
+`VIDEO`: nothing changed, nothing drawn; error 7 in safe mode; it counts as a `DRAW` for §6.6; `now` is called every
+band; 128 MHz while it decodes. Bound: 1200 blocks of at most 64 coefficients (~0.8 s at 128 MHz for adversarial
+bytes; a real frame decodes in ~10–20 ms).
+
+The library's `TransformVideoEncoder` makes the records and keeps exactly the arm's picture (closed loop; `tests/
+videot_test.cpp` checks it bit for bit). On real camera video at 256 × 240: ~1.9 KB a frame at 29 dB (q 45), ~2.9 KB
+at 32 dB (q 30); Vox's motion mode with 4 grey planes took ~2.6 KB at 19 dB. Its rate-distortion choices (each level
+lowered, a 4 × 4 block dropped or a block skipped when the bits saved outweigh the squared error, λ = 0.25 q²; the
+bitstream is the same) take a further 19–26% fewer bytes at the same PSNR on two camera clips. Vox (0.5.68+) sends
+moving pictures this way at half size, the quantiser following the link's budget, and the exact 16-grey picture by
+`VIDEOX` once they hold still; a video in part of a still picture (a player in a page) goes this way alone, at the
+record's own w, h, x, y, while the rest stays exact 16 greys.
 
 ## 4. Fonts
 

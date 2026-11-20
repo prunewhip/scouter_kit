@@ -725,7 +725,8 @@ OPS = {
     "SLEEP_UNTIL": (0x40, 1, 0), "WAIT_EVENT": (0x41, 2, 0), "RAISE": (0x42, 1, 0), "NOTIFY": (0x43, 2, 0),
     "SYS_READ": (0x44, 2, 0), "SYS_WRITE": (0x45, 2, 0),
     "FILL": (0x50, 7, 0), "BLIT": (0x51, 12, 0), "GLYPHS": (0x52, 9, 0), "DRAW": (0x53, 8, 0), "LINE": (0x54, 7, 0),
-    "VIDEO": (0x55, 10, 0), "ASSET_LOAD": (0x56, 4, 0),
+    "VIDEO": (0x55, 10, 0), "ASSET_LOAD": (0x56, 4, 0), "VIDEOX": (0x57, 10, 0),
+    "VIDEOT": (0x58, 8, 0),
 }
 OP_NAMES = {v[0]: k for k, v in OPS.items()} | {0x01: "WRITE", 0x02: "WRITE_RLE"}
 
@@ -1460,6 +1461,15 @@ class Arm:
         if len(body) >= 123:   # the LEDs off while the case talks to the arm, its panel on
             v.update(zip(("blanks", "blank_pulses", "blanked_s"), struct.unpack_from("<3I", body, 110)))
             v["blanked"] = bool(body[122])
+        if len(body) >= 140:   # 0.5.69: the charger and its recovery, the case resets asked (0x80)
+            v.update(charge_status=body[123], charge_error=body[124],
+                     charger_restarts=struct.unpack_from("<H", body, 125)[0],
+                     charger_releases=struct.unpack_from("<H", body, 127)[0],
+                     park=dict(zip(("status", "error", "vbus", "ntc", "ilim"), body[129:134])),
+                     park_age_ms=struct.unpack_from("<I", body, 134)[0],
+                     resets_asked=struct.unpack_from("<H", body, 138)[0])
+            if v["park_age_ms"] == M32:
+                v["park_age_ms"] = None
         return v
 
     def case_trace(self):

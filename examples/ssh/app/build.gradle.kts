@@ -8,6 +8,16 @@ plugins {
 // native/third_party/build.sh's output directory.
 val thirdParty: String = providers.gradleProperty("thirdPartyDir")
     .getOrElse(rootProject.file("native/third_party/out").path)
+// native/third_party/fetch_sherpa.sh's output directory (the speech engine for voice commands; without it the
+// app builds and says voice is not in this build).
+val sherpa: String = providers.gradleProperty("sherpaDir")
+    .getOrElse(rootProject.file("native/third_party/sherpa").path)
+// native/third_party/fetch_llama.sh's llama.cpp (the on-phone language models; without it the app says so).
+val llama: String = providers.gradleProperty("llamaDir")
+    .getOrElse(rootProject.file("native/third_party/llama/llama.cpp").path)
+// native/third_party/fetch_opencl.sh's headers and link stub (the language models on the GPU; without it, the CPU).
+val opencl: String = providers.gradleProperty("openclDir")
+    .getOrElse(rootProject.file("native/third_party/opencl").path)
 
 // Release signing: only from keystore.properties next to settings.gradle.kts (git-ignored; storeFile,
 // storePassword, keyAlias, keyPassword; storeFile absolute or relative to that file). Without it the release
@@ -25,11 +35,13 @@ android {
         applicationId = "io.github.pruittcolon.scouter" // this fork's ID; the code stays in package scouterkit.ssh (JNI names)
         minSdk = 31
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 127
+        versionName = "1.25"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
-            cmake { arguments += listOf("-DTHIRD_PARTY_DIR=$thirdParty", "-DANDROID_STL=c++_static") }
+            // 16 KB pages: newer Android builds may use them; the library loads either way.
+            cmake { arguments += listOf("-DTHIRD_PARTY_DIR=$thirdParty", "-DANDROID_STL=c++_static",
+                "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON") }
         }
     }
 
@@ -38,7 +50,7 @@ android {
     productFlavors {
         create("glasses") {
             dimension = "arms"
-            externalNativeBuild { cmake { arguments += "-DARMS=glasses" } }
+            externalNativeBuild { cmake { arguments += listOf("-DARMS=glasses", "-DVOX_LLM=ON", "-DLLAMA_DIR=$llama", "-DOPENCL_DIR=$opencl") } }
         }
         create("emulated") {
             dimension = "arms"
@@ -85,6 +97,8 @@ android {
 
 android.buildFeatures.buildConfig = true
 android.packaging.resources.excludes += "META-INF/versions/*/OSGI-INF/MANIFEST.MF"
+// The OpenCL link stub is never shipped: the phone's own libOpenCL.so is used.
+android.packaging.jniLibs.excludes += "**/libOpenCL.so"
 
 // Assets and the launcher icon from elsewhere in the tree, copied at build time (the tree has no symlinks):
 // NOTICE, licenses/ and icon.png next to settings.gradle.kts, the fonts from scouter_kit.
@@ -107,6 +121,9 @@ val copyRes = tasks.register<Sync>("copyRes") {
 android.sourceSets.getByName("main") {
     assets.srcDir(copiedAssets)
     res.srcDir(copiedRes)
+    // Voice: sherpa-onnx's Kotlin API (scouter_kit/third_party/sherpa_onnx_kotlin) and its JNI library.
+    java.srcDir(scouterKit.resolve("third_party/sherpa_onnx_kotlin"))
+    jniLibs.srcDir("$sherpa/jniLibs")
 }
 // The merge tasks do not take task dependencies from srcDir; they all run after preBuild.
 tasks.named("preBuild") { dependsOn(copyAssets, copyRes) }
@@ -114,4 +131,6 @@ tasks.named("preBuild") { dependsOn(copyAssets, copyRes) }
 dependencies {
     implementation("com.github.mwiede:jsch:2.28.8")
     implementation("org.bouncycastle:bcprov-jdk18on:1.86") // ed25519 and curve25519 for JSch on Android
+    // Voice control's live speech model comes as a .tar.bz2 (sherpa-onnx's release): unpacked in the app
+    implementation("org.apache.commons:commons-compress:1.27.1")
 }

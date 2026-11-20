@@ -10,6 +10,9 @@ bool GlassesStart(const GlassesConfig &config, g1::Transport *transport, std::st
   connection.left = config.left;
   connection.right = config.right;
   connection.transport = transport;
+  // Both arms within a minute: an arm that connected is not let go (and connected again from scratch) because
+  // the other one took longer than 30 s (out of the case later, a slow reconnection).
+  connection.timeout_ms = 60000;
   if (g1::Init(&gray, error, &connection) != g1::ERROR_NONE) return false;
 #ifdef SCOUTER_G1_EMULATOR
   for (int arm = 0; arm < 2; arm++) { // worn, the head down, as the sensors would say

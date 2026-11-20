@@ -593,6 +593,11 @@ struct rc {
 
 int vm_video_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
 {
+	return vm_video_check_w(a, v, detail, VM_PANEL_W);
+}
+
+int vm_video_check_w(const uint8_t *a, const uint32_t *v, uint32_t *detail, uint32_t maxw)
+{
 	uint32_t bmp = v[0], stride = v[1], w = v[2], h = v[3], level = v[6], src = v[7], n = v[8], st = v[9];
 	int64_t bend;
 
@@ -600,8 +605,8 @@ int vm_video_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
 		*detail = level;
 		return VM_E_ARG;
 	}
-	if (w == 0 || w > VM_PANEL_W || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
-		*detail = w == 0 || w > VM_PANEL_W ? w : h == 0 || h > VM_PANEL_H ? h : stride;
+	if (w == 0 || w > maxw || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
+		*detail = w == 0 || w > maxw ? w : h == 0 || h > VM_PANEL_H ? h : stride;
 		return VM_E_ARG;
 	}
 	bend = bmp + (int64_t)(h - 1) * stride + (w + 7) / 8;
@@ -982,3 +987,674 @@ void vm_video_expand(const uint8_t *row, uint32_t x0, uint32_t x1, uint32_t leve
 		*out = (uint8_t)((hi ? level << 4 : 0) | (lo ? level : 0));
 	}
 }
+
+/* VIDEOX (§3.8) */
+static int overlap(int64_t a0, int64_t a1, int64_t b0, int64_t b1)
+{
+	return a0 < b1 && b0 < a1;
+}
+
+int vm_videox_check(const uint8_t *a, const uint32_t *v, struct vm_videox *x, uint32_t *detail)
+{
+	uint32_t pt = v[0], stride = v[1], w = v[2], h = v[3], lv = v[6], src = v[7], n = v[8], stt = v[9];
+	uint32_t i, p, pos, nw = 0;
+	int64_t rend = (int64_t)src + n, wr[2 * VM_VIDEOX_PLANES][2], rd[4][2];
+
+	uint32_t maxw;
+
+	maxw = VM_VIDEOX_MAXW;   /* a canvas wider than the panel: (x, y) places it, the panel shows its part */
+	if (w == 0 || w > maxw || h == 0 || h > VM_PANEL_H || (uint64_t)stride * 8 < w) {
+		*detail = w == 0 || w > maxw ? w : h == 0 || h > VM_PANEL_H ? h : stride;
+		return VM_E_ARG;
+	}
+	if (n < 2 || rend > ARENA) {
+		*detail = src;
+		return n < 2 ? VM_E_FORMAT : VM_E_ARENA;
+	}
+	x->flags = a[src];
+	x->planes = a[src + 1];
+	if (x->flags > 63 || x->planes == 0 || x->planes > VM_VIDEOX_PLANES) {
+		*detail = x->flags > 63 ? x->flags : x->planes;
+		return VM_E_FORMAT;
+	}
+#ifdef VM_NO_PIXEL_CODING
+	if (x->flags & VM_VX_PIXELS) { /* this build has no pixel coding */
+		*detail = x->flags;
+		return VM_E_FORMAT;
+	}
+#endif
+	if ((int64_t)pt + 4 * x->planes > ARENA || (int64_t)stt + 4 * x->planes > ARENA || (int64_t)lv + 16 > ARENA) {
+		*detail = (int64_t)pt + 4 * x->planes > ARENA ? pt : (int64_t)stt + 4 * x->planes > ARENA ? stt : lv;
+		return VM_E_ARENA;
+	}
+	/* written: every plane and state; read only: the record, the level map and the two tables */
+	for (p = 0; p < x->planes; p++) {
+		x->plane[p] = get32(a + pt + 4 * p);
+		x->state[p] = get32(a + stt + 4 * p);
+		wr[nw][0] = x->plane[p];
+		wr[nw++][1] = x->plane[p] + (int64_t)(h - 1) * stride + (w + 7) / 8;
+		wr[nw][0] = x->state[p];
+		wr[nw++][1] = (int64_t)x->state[p] + (x->flags & VM_VX_PIXELS ? VM_VIDEOX_PIX_STATE : VM_VIDEO_STATE);
+	}
+	for (i = 0; i < nw; i++) {
+		if (wr[i][1] > ARENA) {
+			*detail = (uint32_t)wr[i][0];
+			return VM_E_ARENA;
+		}
+	}
+	rd[0][0] = src, rd[0][1] = rend;
+	rd[1][0] = lv, rd[1][1] = (int64_t)lv + 16;
+	rd[2][0] = pt, rd[2][1] = (int64_t)pt + 4 * x->planes;
+	rd[3][0] = stt, rd[3][1] = (int64_t)stt + 4 * x->planes;
+	for (i = 0; i < nw; i++) {
+		for (uint32_t k = i + 1; k < nw; k++) {
+			if (overlap(wr[i][0], wr[i][1], wr[k][0], wr[k][1])) {
+				*detail = (uint32_t)wr[k][0];
+				return VM_E_ARENA;
+			}
+		}
+		for (uint32_t k = 0; k < 4; k++) {
+			if (overlap(wr[i][0], wr[i][1], rd[k][0], rd[k][1])) {
+				*detail = (uint32_t)rd[k][0];
+				return VM_E_ARENA;
+			}
+		}
+	}
+	for (i = 0; i < (1u << x->planes); i++) {
+		if (a[lv + i] > 15) {
+			*detail = a[lv + i];
+			return VM_E_ARG;
+		}
+	}
+	pos = src + 2;
+	x->y0 = x->rows = 0;
+	x->dy = 0;
+	if (x->flags & 1) {
+		if ((int64_t)pos + 6 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->y0 = get16(a + pos);
+		x->rows = get16(a + pos + 2);
+		x->dy = s16(a + pos + 4);
+		pos += 6;
+		if ((uint64_t)x->y0 + x->rows > h || x->dy == 0 || (uint32_t)(x->dy < 0 ? -x->dy : x->dy) >= x->rows) {
+			*detail = x->y0 + x->rows > h ? x->y0 : (uint32_t)x->dy;
+			return VM_E_FORMAT;
+		}
+	}
+	x->bw = x->bh = 0;
+	if (x->flags & VM_VX_BLOCK) {
+		int64_t tx, ty;
+
+		if ((int64_t)pos + 12 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->bx = get16(a + pos);
+		x->by = get16(a + pos + 2);
+		x->bw = get16(a + pos + 4);
+		x->bh = get16(a + pos + 6);
+		x->bdx = s16(a + pos + 8);
+		x->bdy = s16(a + pos + 10);
+		tx = (int64_t)x->bx + x->bdx;
+		ty = (int64_t)x->by + x->bdy;
+		if (x->bw == 0 || x->bh == 0 || (uint64_t)x->bx + x->bw > w || (uint64_t)x->by + x->bh > h || tx < 0 ||
+		    tx + x->bw > w || ty < 0 || ty + x->bh > h) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		pos += 12;
+	}
+	x->rw = x->rh = 0;
+	x->sx = -32768;
+	x->sy = 0;
+	x->sprite = 0;
+	if (x->flags & VM_VX_SPRITE) {
+		if ((int64_t)pos + 16 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->rx = get16(a + pos);
+		x->ry = get16(a + pos + 2);
+		x->rw = get16(a + pos + 4);
+		x->rh = get16(a + pos + 6);
+		x->sx = s16(a + pos + 8);
+		x->sy = s16(a + pos + 10);
+		x->sprite = get32(a + pos + 12);
+		if (x->sx != -32768 && (int64_t)x->sprite + 64 > ARENA) {
+			*detail = x->sprite;
+			return VM_E_ARENA;
+		}
+		pos += 16;
+	}
+	for (p = 0; p < x->planes; p++) {
+		uint32_t pv[10];
+		int err;
+
+		if ((int64_t)pos + 3 > rend) {
+			*detail = pos;
+			return VM_E_FORMAT;
+		}
+		x->len[p] = (uint32_t)a[pos] | (uint32_t)a[pos + 1] << 8 | (uint32_t)a[pos + 2] << 16;
+		x->at[p] = pos + 3;
+		pos += 3 + x->len[p];
+		if (x->len[p] == 0 || pos > rend) {
+			*detail = x->at[p];
+			return VM_E_FORMAT;
+		}
+		vm_videox_plane(v, x, p, pv);
+		err = vm_video_check_w(a, pv, detail, VM_VIDEOX_MAXW);   /* the plane's record flags */
+		if (err) {
+			return err;
+		}
+	}
+	if (pos != rend) {
+		*detail = pos;
+		return VM_E_FORMAT;
+	}
+	return 0;
+}
+
+void vm_videox_plane(const uint32_t *v, const struct vm_videox *x, uint32_t p, uint32_t *pv)
+{
+	pv[0] = x->plane[p];
+	pv[1] = v[1];
+	pv[2] = v[2];
+	pv[3] = v[3];
+	pv[4] = v[4];
+	pv[5] = v[5];
+	pv[6] = 15;
+	pv[7] = x->at[p];
+	pv[8] = x->len[p];
+	pv[9] = x->state[p];
+}
+
+/* rows y0..y0+rows-1 of every plane move by dy (the rows left behind keep their pixels); a row is marked when
+ * any plane's bytes there changed */
+void vm_videox_move(uint8_t *a, const uint32_t *v, const struct vm_videox *x, vm_mark_fn *mark, void *ctx)
+{
+	uint32_t stride = v[1], nb = (v[2] + 7) / 8;
+	int32_t step = x->dy > 0 ? -1 : 1, d = x->dy;
+	int32_t first = d > 0 ? (int32_t)(x->y0 + x->rows) - 1 : (int32_t)x->y0;
+	int32_t last = d > 0 ? (int32_t)x->y0 + d : (int32_t)(x->y0 + x->rows) - 1 + d;
+
+	for (int32_t y = first; step < 0 ? y >= last : y <= last; y += step) {
+		int diff = 0;
+
+		for (uint32_t p = 0; p < x->planes; p++) {
+			uint8_t *dst = a + x->plane[p] + (uint32_t)y * stride;
+			const uint8_t *s = a + x->plane[p] + (uint32_t)(y - d) * stride;
+
+			if (memcmp(dst, s, nb)) {
+				memmove(dst, s, nb);
+				diff = 1;
+			}
+		}
+		if (diff) {
+			mark(ctx, (uint32_t)y);
+		}
+	}
+}
+
+/* bit i of a byte (pixel 7 - i of 8) to bit 4i of a word: the 8 pixels as 8 nibbles, pixel 0 in the top one */
+#define SP(b) ((uint32_t)((b) & 1) | (uint32_t)((b) >> 1 & 1) << 4 | (uint32_t)((b) >> 2 & 1) << 8 | \
+	       (uint32_t)((b) >> 3 & 1) << 12 | (uint32_t)((b) >> 4 & 1) << 16 | (uint32_t)((b) >> 5 & 1) << 20 | \
+	       (uint32_t)((b) >> 6 & 1) << 24 | (uint32_t)((b) >> 7 & 1) << 28)
+#define SP4(b) SP(b), SP((b) + 1), SP((b) + 2), SP((b) + 3)
+#define SP16(b) SP4(b), SP4((b) + 4), SP4((b) + 8), SP4((b) + 12)
+#define SP64(b) SP16(b), SP16((b) + 16), SP16((b) + 32), SP16((b) + 48)
+static const uint32_t v_spread[256] = {SP64(0), SP64(64), SP64(128), SP64(192)};
+
+void vm_videox_pairs(const uint8_t *a, const uint32_t *v, uint8_t *pair)
+{
+	const uint8_t *lv = a + v[6];
+
+	for (uint32_t i = 0; i < 256; i++) {
+		pair[i] = (uint8_t)((lv[i >> 4] & 15) << 4 | (lv[i & 15] & 15));
+	}
+}
+
+/* 8 pixels from x of a 1-bpp row (x + 8 <= the row's pixels) */
+static inline uint32_t get8(const uint8_t *row, uint32_t x)
+{
+	uint32_t i = x >> 3, s = x & 7;
+
+	return s ? (uint32_t)(row[i] << s | row[i + 1] >> (8 - s)) & 0xFF : row[i];
+}
+
+void vm_videox_compose(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, const uint8_t *pair,
+		       uint32_t y, uint32_t x0, uint32_t x1, uint8_t *out)
+{
+	const uint8_t *lv = a + v[6];
+	const uint8_t *row[VM_VIDEOX_PLANES];
+	uint32_t planes = xl->planes, x = x0;
+
+	for (uint32_t p = 0; p < planes; p++) {
+		row[p] = a + xl->plane[p] + y * v[1];
+	}
+	/* 8 pixels at a time: each plane's 8 bits spread to nibbles, the 4 index pairs through the pair table */
+	for (; x + 8 <= x1; x += 8, out += 4) {
+		uint32_t idx = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			idx |= v_spread[get8(row[p], x)] << p;
+		}
+		out[0] = pair[idx >> 24];
+		out[1] = pair[idx >> 16 & 0xFF];
+		out[2] = pair[idx >> 8 & 0xFF];
+		out[3] = pair[idx & 0xFF];
+	}
+	for (; x < x1; x += 2, out++) {
+		uint32_t i0 = 0, i1 = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			i0 |= get1(row[p], (int32_t)x) << p;
+			if (x + 1 < x1) {
+				i1 |= get1(row[p], (int32_t)x + 1) << p;
+			}
+		}
+		*out = (uint8_t)((lv[i0] & 15) << 4 | (x + 1 < x1 ? lv[i1] & 15 : 0));
+	}
+}
+
+/* VIDEOX's pixel coding (flags bit 3, §3.8): plane p's record (u8 flags: bit 0 reset, bit 1 redraw; then range
+ * coder bytes as VIDEO's) decoded in place, row by row: a "row same" decision (context: the row above's), then
+ * each pixel from 11 bits of context: W, WW, NW, N, NE of this frame, the previous frame's pixel and its right and
+ * lower neighbours (still in the plane: in-place decoding writes a pixel after reading it), and the pixel's bits of
+ * the next three planes up, decoded first. At most w + 1 decisions a row. */
+#define PX_ROW 2048 /* + the row above's "same" */
+
+static inline uint32_t bit1(const uint8_t *row, uint32_t x)
+{
+	return (uint32_t)(row[x >> 3] >> (7 - (x & 7))) & 1;
+}
+
+void vm_videox_pixels(uint8_t *a, const uint32_t *v, const struct vm_videox *x, uint32_t p, vm_span_fn *span,
+		      void *ctx)
+{
+#ifdef VM_NO_PIXEL_CODING
+	(void)a, (void)v, (void)x, (void)p, (void)span, (void)ctx; /* never called: the check refuses the flag */
+	return;
+#endif
+	uint32_t stride = v[1], w = v[2], h = v[3], src = x->at[p], n = x->len[p], st = x->state[p];
+	uint32_t flags = a[src], prev = 1;
+	const uint8_t *up_plane[3] = {0, 0, 0};
+	struct rc r;
+
+	if (flags & 1) {
+		for (uint32_t i = 0; i < VM_VIDEOX_PIX_STATE / 2; i++) {
+			a[st + 2 * i] = 0;
+			a[st + 2 * i + 1] = 8;
+		}
+	}
+	for (uint32_t k = 0; k < 3; k++) {
+		if (p + 1 + k < x->planes) {
+			up_plane[k] = a + x->plane[p + 1 + k];
+		}
+	}
+	r.range = 0xFFFFFFFFu;
+	r.code = 0;
+	r.p = a + src + 1;
+	r.end = a + src + n;
+	r.prob = a + st;
+	for (int i = 0; i < 4; i++) {
+		r.code = r.code << 8 | (r.p < r.end ? *r.p++ : 0);
+	}
+	for (uint32_t y = 0; y < h; y++) {
+		uint8_t *row = a + x->plane[p] + y * stride;
+		const uint8_t *above = y ? row - stride : 0, *below = y + 1 < h ? row + stride : 0;
+		uint32_t lo = w, hi = 0;
+
+		if (!(y & 15)) {
+			span(ctx, y, 0, 0, row);
+		}
+		prev = rc_bit(&r, PX_ROW + prev);
+		if (prev) {
+			if (flags & 2) {
+				span(ctx, y, 0, w, row);
+			}
+			continue;
+		}
+		for (uint32_t xx = 0; xx < w; xx++) {
+			uint32_t t = bit1(row, xx), c, b, up = 0;
+
+			c = (xx ? bit1(row, xx - 1) : 0) | (xx > 1 ? bit1(row, xx - 2) : 0) << 1;
+			if (above) {
+				c |= (xx ? bit1(above, xx - 1) : 0) << 2 | bit1(above, xx) << 3 |
+				     (xx + 1 < w ? bit1(above, xx + 1) : 0) << 4;
+			}
+			c |= t << 5 | (xx + 1 < w ? bit1(row, xx + 1) : 0) << 6 | (below ? bit1(below, xx) : 0) << 7;
+			for (uint32_t k = 0; k < 3; k++) {
+				if (up_plane[k]) {
+					up |= bit1(up_plane[k] + y * stride, xx) << k;
+				}
+			}
+			c |= up << 8;
+			b = rc_bit(&r, c);
+			if (b != t) {
+				row[xx >> 3] ^= (uint8_t)(0x80 >> (xx & 7));
+				if (xx < lo) {
+					lo = xx;
+				}
+				hi = xx + 1;
+			}
+		}
+		if (flags & 2) {
+			span(ctx, y, 0, w, row);
+		} else if (hi > lo) {
+			span(ctx, y, lo, hi, row);
+		}
+	}
+}
+
+/* scale 2 (flags bit 2): pixels x0..x1-1 of plane row y, each drawn twice: one byte (two equal nibbles) a pixel */
+void vm_videox_compose2(const uint8_t *a, const uint32_t *v, const struct vm_videox *xl, uint32_t y, uint32_t x0,
+			uint32_t x1, uint8_t *out)
+{
+	const uint8_t *lv = a + v[6];
+	const uint8_t *row[VM_VIDEOX_PLANES];
+	uint8_t twice[16];
+	uint32_t planes = xl->planes;
+
+	for (uint32_t i = 0; i < 16; i++) {
+		twice[i] = (uint8_t)((lv[i] & 15) << 4 | (lv[i] & 15));
+	}
+	for (uint32_t p = 0; p < planes; p++) {
+		row[p] = a + xl->plane[p] + y * v[1];
+	}
+	for (uint32_t x = x0; x < x1; x++) {
+		uint32_t i = 0;
+
+		for (uint32_t p = 0; p < planes; p++) {
+			i |= bit1(row[p], x) << p;
+		}
+		*out++ = twice[i];
+	}
+}
+
+
+/* the block move: plane pixels (bx..bx+bw-1, by..by+bh-1) to (bx+bdx, by+bdy) in every plane; rows and pixels are
+ * walked away from the overlap (as memmove), and each destination row's changed part goes to span */
+void vm_videox_block(uint8_t *a, const uint32_t *v, const struct vm_videox *x, vm_span_fn *span, void *ctx)
+{
+	uint32_t stride = v[1];
+	int32_t rows = (int32_t)x->bh, cols = (int32_t)x->bw;
+	int32_t ystep = x->bdy > 0 ? -1 : 1, xstep = x->bdx > 0 ? -1 : 1;
+
+	for (int32_t k = 0; k < rows; k++) {
+		int32_t r = ystep < 0 ? rows - 1 - k : k;
+		uint32_t sy = x->by + (uint32_t)r, dy = (uint32_t)((int32_t)sy + x->bdy);
+		uint32_t lo = UINT32_MAX, hi = 0;
+
+		for (uint32_t p = 0; p < x->planes; p++) {
+			const uint8_t *srow = a + x->plane[p] + sy * stride;
+			uint8_t *drow = a + x->plane[p] + dy * stride;
+
+			for (int32_t j = 0; j < cols; j++) {
+				int32_t c = xstep < 0 ? cols - 1 - j : j;
+				uint32_t sx = x->bx + (uint32_t)c, dx = (uint32_t)((int32_t)sx + x->bdx);
+				uint32_t b = bit1(srow, sx);
+
+				if (bit1(drow, dx) != b) {
+					drow[dx >> 3] ^= (uint8_t)(0x80 >> (dx & 7));
+					if (dx < lo) {
+						lo = dx;
+					}
+					if (dx + 1 > hi) {
+						hi = dx + 1;
+					}
+				}
+			}
+		}
+		if (!(k & 15)) {
+			span(ctx, dy, 0, 0, a + x->plane[0] + dy * stride);
+		}
+		if (hi > lo) {
+			span(ctx, dy, lo, hi, a + x->plane[0] + dy * stride);
+		}
+	}
+}
+
+int vm_videox_sprite_at(const uint8_t *a, const struct vm_videox *x, int32_t px, int32_t py)
+{
+	int32_t c = px - x->sx, r = py - x->sy;
+	uint32_t mask, ink;
+
+	if (!(x->flags & VM_VX_SPRITE) || x->sx == -32768 || c < 0 || c >= 16 || r < 0 || r >= 16) {
+		return -1;
+	}
+	mask = (uint32_t)a[x->sprite + 4 * (uint32_t)r] << 8 | a[x->sprite + 4 * (uint32_t)r + 1];
+	ink = (uint32_t)a[x->sprite + 4 * (uint32_t)r + 2] << 8 | a[x->sprite + 4 * (uint32_t)r + 3];
+	if (!(mask >> (15 - c) & 1)) {
+		return -1;
+	}
+	return (ink >> (15 - c) & 1) ? 15 : 0;
+}
+
+/* ---- VIDEOT (§3.9) ---- */
+
+enum { VT_SKIP = 0, VT_MVZ = 3, VT_MVS = 7, VT_MVM = 9, VT_CBP = 25, VT_NZ = 28, VT_EOB = 76, VT_GT1 = 92,
+       VT_MAG = 96 }; /* ... 128 = VM_VT_PROBS */
+static const uint8_t vt_zig[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
+
+int vm_videot_check(const uint8_t *a, const uint32_t *v, uint32_t *detail)
+{
+	uint32_t w = v[1], h = v[2], src = v[5], n = v[6], st = v[7];
+	int64_t fr = v[0], fend = fr + (int64_t)w * h, s0 = src, s1 = (int64_t)src + n, t0 = st,
+		t1 = (int64_t)st + VM_VIDEOT_STATE;
+
+	if (w < 8 || w > VM_VIDEOT_MAXW || (w & 7) || h < 8 || h > VM_VIDEOT_MAXH || (h & 7)) {
+		*detail = w < 8 || w > VM_VIDEOT_MAXW || (w & 7) ? w : h;
+		return VM_E_ARG;
+	}
+	if (fend > ARENA || s1 > ARENA || t1 > ARENA) {
+		*detail = fend > ARENA ? v[0] : s1 > ARENA ? src : st;
+		return VM_E_ARENA;
+	}
+	if (overlap(fr, fend, s0, s1) || overlap(fr, fend, t0, t1) || overlap(s0, s1, t0, t1)) {
+		*detail = overlap(fr, fend, s0, s1) ? src : st;
+		return VM_E_ARENA;
+	}
+	if (n < 2 || a[src] > 7 || a[src + 1] == 0 || a[src + 1] > 63) {
+		*detail = n < 2 ? n : a[src] > 7 ? 0 : 1;
+		return VM_E_FORMAT;
+	}
+	return 0;
+}
+
+V_INLINE uint32_t rc_raw(struct rc *r)
+{
+	uint32_t b;
+
+	r->range >>= 1;
+	b = r->code >= r->range;
+	if (b) {
+		r->code -= r->range;
+	}
+	while (r->range < 1u << 24) {
+		r->range <<= 8;
+		r->code = r->code << 8 | (r->p < r->end ? *r->p++ : 0);
+	}
+	return b;
+}
+
+/* v >= 0: unary on models m...m + 7 up to 8, then Exp-Golomb in raw bits (at most 15 leading zeros) */
+static uint32_t vt_uval(struct rc *r, uint32_t m)
+{
+	uint32_t v, k = 0, x = 1;
+
+	for (v = 0; v < 8; v++) {
+		if (!rc_bit(r, m + v)) {
+			return v;
+		}
+	}
+	while (k < 15 && !rc_raw(r)) {
+		k++;
+	}
+	for (uint32_t i = 0; i < k; i++) {
+		x = x << 1 | rc_raw(r);
+	}
+	return 8 + x - 1;
+}
+
+/* 2-D 4 x 4 Hadamard, unnormalised (gain 16 both ways): the inverse is the same divided by 16, rounded */
+static void vt_wht(const int32_t *in, int32_t *out)
+{
+	int32_t t[16];
+
+	for (int i = 0; i < 4; i++) {
+		int32_t p = in[i * 4], q = in[i * 4 + 1], u = in[i * 4 + 2], s = in[i * 4 + 3];
+
+		t[i * 4] = p + q + u + s;
+		t[i * 4 + 1] = p + q - u - s;
+		t[i * 4 + 2] = p - q - u + s;
+		t[i * 4 + 3] = p - q + u - s;
+	}
+	for (int j = 0; j < 4; j++) {
+		int32_t p = t[j], q = t[4 + j], u = t[8 + j], s = t[12 + j];
+
+		out[j] = p + q + u + s;
+		out[4 + j] = p + q - u - s;
+		out[8 + j] = p - q - u + s;
+		out[12 + j] = p - q + u - s;
+	}
+}
+
+static int32_t vt_clamp(int32_t v, int32_t lo, int32_t hi)
+{
+	return v < lo ? lo : v > hi ? hi : v;
+}
+
+void vm_videot_decode(uint8_t *a, const uint32_t *v, vm_band_fn *band, void *ctx)
+{
+	static const uint8_t bayer[4] = {0, 2, 3, 1};
+	const uint32_t w = v[1], h = v[2], mw = w / 8, mh = h / 8, src = v[5], n = v[6];
+	uint8_t *fr = a + v[0], *st = a + v[7], *top = st + VM_VT_TOP, *hist = st + VM_VT_HIST, *cur = st + VM_VT_CUR;
+	const uint32_t flags = a[src], step = 4u * a[src + 1];
+	struct rc r;
+
+	if (flags & 1) {
+		for (uint32_t i = 0; i < VM_VT_PROBS; i++) {
+			st[2 * i] = 0;
+			st[2 * i + 1] = 8;
+		}
+	}
+	for (uint32_t k = 0; k < 2; k++) {
+		for (uint32_t x = 0; x < 256; x++) {
+			uint32_t l0 = (x * 60 + 255 * bayer[2 * k] + 127) / 1020, l1 = (x * 60 + 255 * bayer[2 * k + 1] + 127) / 1020;
+
+			st[VM_VT_LUT + 256 * k + x] = (uint8_t)((l0 > 15 ? 15 : l0) << 4 | (l1 > 15 ? 15 : l1));
+		}
+	}
+	memset(top, 0, VM_VIDEOT_MAXW / 8);
+	r.range = 0xFFFFFFFFu;
+	r.code = 0;
+	r.p = a + src + 2;
+	r.end = a + src + n;
+	r.prob = st;
+	for (int i = 0; i < 4; i++) {
+		r.code = r.code << 8 | (r.p < r.end ? *r.p++ : 0);
+	}
+	for (uint32_t by = 0; by < mh; by++) {
+		int32_t pmx = 0, pmy = 0;
+		uint32_t lskip = 0, x0 = w, x1 = 0;
+
+		for (uint32_t bx = 0; bx < mw; bx++) {
+			int32_t mv[2] = {0, 0}, res[4][16];
+			uint32_t cb[4] = {0, 0, 0, 0}, skip = rc_bit(&r, VT_SKIP + (bx ? lskip : 0) + top[bx]);
+
+			if (!skip) {
+				if (!(flags & 4)) {
+					int32_t pm[2] = {pmx, pmy};
+
+					for (uint32_t c = 0; c < 2; c++) {
+						int32_t d = 0;
+
+						if (rc_bit(&r, VT_MVZ + 2 * c + (pm[c] != 0))) {
+							uint32_t neg = rc_bit(&r, VT_MVS + c), m = 1 + vt_uval(&r, VT_MVM + 8 * c);
+
+							d = (int32_t)(m > 15 ? 15 : m);
+							d = neg ? -d : d;
+						}
+						mv[c] = vt_clamp(pm[c] + d, -7, 7);
+					}
+				}
+				for (uint32_t b = 0; b < 4; b++) {
+					int32_t coef[16] = {0};
+					uint32_t nnz = 0;
+
+					cb[b] = rc_bit(&r, VT_CBP + (b == 0 ? 0 : b == 3 ? 2 : 1));
+					if (!cb[b]) {
+						continue;
+					}
+					for (uint32_t i = 0; i < 16; i++) {
+						uint32_t neg, m = 1, cls = i / 4;
+
+						if (!rc_bit(&r, VT_NZ + 3 * i + (nnz < 2 ? nnz : 2))) {
+							continue;
+						}
+						nnz++;
+						neg = rc_raw(&r);
+						if (rc_bit(&r, VT_GT1 + cls)) {
+							m = 2 + vt_uval(&r, VT_MAG + 8 * cls);
+							m = m > 2047 ? 2047 : m;
+						}
+						coef[vt_zig[i]] = (neg ? -(int32_t)m : (int32_t)m) * (int32_t)step;
+						if (rc_bit(&r, VT_EOB + i)) {
+							break;
+						}
+					}
+					vt_wht(coef, res[b]);
+				}
+			}
+			for (uint32_t y = 0; y < 8; y++) {
+				for (uint32_t x = 0; x < 8; x++) {
+					uint32_t b = (y / 4) * 2 + x / 4;
+					int32_t p = 128, d = 0;
+
+					if (!(flags & 4)) {
+						int32_t X = vt_clamp((int32_t)(bx * 8 + x) + mv[0], 0, (int32_t)w - 1);
+						int32_t Y = vt_clamp((int32_t)(by * 8 + y) + mv[1], 0, (int32_t)h - 1);
+
+						/* rows above this band: as they were (the band above is in the frame already) */
+						p = Y < (int32_t)(by * 8) ? hist[(uint32_t)(Y - (int32_t)(by * 8 - 8)) * w + (uint32_t)X]
+									  : fr[(uint32_t)Y * w + (uint32_t)X];
+					}
+					if (cb[b]) {
+						d = (res[b][(y % 4) * 4 + x % 4] + 8) >> 4;
+					}
+					cur[y * w + bx * 8 + x] = (uint8_t)vt_clamp(p + d, 0, 255);
+				}
+			}
+			if (!skip || (flags & 4)) {
+				x0 = bx * 8 < x0 ? bx * 8 : x0;
+				x1 = bx * 8 + 8;
+			}
+			top[bx] = (uint8_t)skip;
+			lskip = skip;
+			pmx = skip ? 0 : mv[0];
+			pmy = skip ? 0 : mv[1];
+		}
+		if (by + 1 < mh) {
+			memcpy(hist, fr + by * 8 * w, 8 * w);
+		}
+		memcpy(fr + by * 8 * w, cur, 8 * w);
+		if (flags & 2) {
+			x0 = 0;
+			x1 = w;
+		}
+		band(ctx, by, x0 < x1 ? x0 : 0, x0 < x1 ? x1 : 0);
+	}
+}
+
+void vm_videot_row(const uint8_t *a, const uint32_t *v, uint32_t y, uint32_t k, uint32_t x0, uint32_t x1,
+		   uint8_t *out)
+{
+	const uint8_t *row = a + v[0] + y * v[1], *lut = a + v[7] + VM_VT_LUT + 256 * k;
+
+	for (uint32_t x = x0; x < x1; x++) {
+		out[x - x0] = lut[row[x]];
+	}
+}
+

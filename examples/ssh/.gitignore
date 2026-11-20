@@ -6,8 +6,11 @@
 /app/build/
 /app/.cxx/
 /native/third_party/out/
+/native/third_party/sherpa/
 /local.properties
 # release signing: keystore.properties (storeFile, storePassword, keyAlias, keyPassword) and the keystore
 /keystore.properties
 *.jks
 *.keystore
+/native/third_party/llama/
+/native/third_party/opencl/

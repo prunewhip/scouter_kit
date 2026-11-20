@@ -25,7 +25,7 @@ in the case or folded uses the library's `PanelPolicy`).
 | `g1mirror.c` | The mirror's platform around the VM core (`../src/vm`), loaded by `g1host.py` |
 | `vm_check.py` | VM checks: VM.md §9.2's clock and §9.3's battery programs from the bytes printed in VM.md, each frame compared with the mirror by `PANEL_READ`; a TIMER handler's lateness; the microphone indicator |
 | `asset_check.py` | The asset store's acceptance on one arm (0.5.56+): the fingerprints of the flash the store never writes, a font put (`--step`: single-stepped with the fingerprints after every flash call), a bitmap put with its step times while PING and a TIMER program run, the log checked, a reboot, a timed `ASSET_LOAD` restore, the fingerprints again |
-| `draw_bench.py` | DRAW timing by the arm's own clock for a set of rectangle sizes |
+| `draw_bench.py` | DRAW timing by the arm's own clock for a set of rectangle sizes; `--video`, `--videox`, `--videot` time each video opcode |
 | `peer_check.py` | The arm-to-arm link with both arms connected: values from the right arm's program to the left's and back (round trip, one-way time), two programs drawing together without the host (both panels read back), the left following the right's brightness: `python3 -I peer_check.py LEFT_ADDR RIGHT_ADDR` |
 | `imu_check.py` | Accelerometer checks that need no movement (readings at rest, MOTION and TILT as events and as program triggers, CPU wake-ups) |
 | `imu_cal.py` | The two-pose head-frame calibration, glasses worn: prints the per-arm axis map for the firmware |
