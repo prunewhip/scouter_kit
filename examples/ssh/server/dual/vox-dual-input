@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+# vox-dual-input: the laptop's pointer moved for the phone (laptop-edge, over SSH) while it is on the glasses'
+# monitor. One line each on its input:
+#   m X Y      the pointer to X, Y (the desktop's pixels)
+#   b N 1|0    button N (1 left, 2 middle, 3 right, 4-7 the wheel) down or up
+# It says "ok" once it works. Its input closing lets go of every button.
+import ctypes, os, sys
+
+os.environ.setdefault("DISPLAY", ":0")
+if not os.environ.get("XAUTHORITY"):
+    for p in ("/run/user/%d/gdm/Xauthority" % os.getuid(), os.path.expanduser("~/.Xauthority")):
+        if os.path.exists(p):
+            os.environ["XAUTHORITY"] = p
+            break
+X = ctypes.CDLL("libX11.so.6")
+T = ctypes.CDLL("libXtst.so.6")
+X.XOpenDisplay.restype = ctypes.c_void_p
+X.XOpenDisplay.argtypes = [ctypes.c_char_p]
+d = X.XOpenDisplay(None)
+if not d:
+    print("err no X11 desktop on " + os.environ["DISPLAY"], flush=True)
+    sys.exit(1)
+T.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+T.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+X.XFlush.argtypes = [ctypes.c_void_p]
+down = set()
+print("ok", flush=True)
+for line in sys.stdin:
+    p = line.split()
+    try:
+        if p[0] == "m":
+            T.XTestFakeMotionEvent(d, -1, int(p[1]), int(p[2]), 0)
+        elif p[0] == "b":
+            b, press = int(p[1]), p[2] == "1"
+            # (a release always goes: the button may have been pressed through the phone's viewer)
+            if 1 <= b <= 7 and (not press or b not in down):
+                T.XTestFakeButtonEvent(d, b, 1 if press else 0, 0)
+                (down.add if press else down.discard)(b)
+    except (ValueError, IndexError):
+        continue
+    X.XFlush(d)
+for b in list(down):
+    T.XTestFakeButtonEvent(d, b, 0, 0)
+X.XFlush(d)

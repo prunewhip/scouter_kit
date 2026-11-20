@@ -3617,6 +3617,7 @@ class ScouterService : Service() {
                 } else render(if (remote!!.images > 0) Settings.SCREEN else Settings.TERMINAL)
                 remote?.poke() // kept connected: its picture now
                 laptopInput() // its keyboard and mouse
+                if (!s.local && settings.laptopDual) laptopDual(true)
                 update(screen = "starting")
                 work.removeCallbacks(screenTicker)
                 work.postDelayed(screenTicker, 1000)
@@ -3653,11 +3654,37 @@ class ScouterService : Service() {
 
     private fun stopRemote() {
         work.removeCallbacks(remotePark)
+        if (dualOn) laptopDual(false)
         laptopInputStop()
         remote?.release()
         remote = null
         Session.remote = ""
         if (Session.screenSource.startsWith("screen:")) Session.screenSource = ""
+    }
+
+    // The laptop's two screens (Settings.laptopDual): while its screen streams, the laptop gives the glasses a monitor
+    // of their own above its screen (vox-screen VOX_DUAL=1), and the phone shows the laptop's screen in the
+    // Termux:X11 app, sideways (the phone's server: `laptop-dual on`, TigerVNC's viewer full screen); the pointer
+    // pushed past the top of the phone's screen goes up onto the glasses. The app comes to the front each time the
+    // laptop's screen is chosen; all of it ends with the laptop's stream (parked PARK_MS, or stopped).
+    private var dualOn = false
+    private val dualJobs = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    private fun laptopDual(on: Boolean) {
+        if (on) runCatching {
+            val intent = packageManager.getLaunchIntentForPackage(Desktop.PACKAGE) ?: return note("Termux:X11 isn't installed", 4000)
+            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }.onFailure { Log.w(TAG, "laptop dual: Termux:X11: ${it.message}") }
+        if (on == dualOn) return
+        val local = settings.servers().firstOrNull { it.local } ?: return note("No phone server saved for the laptop's screen", 4000)
+        dualOn = on
+        dualJobs.execute {
+            val out = runCatching {
+                Bootstrap(Vault(this)).run(local.host, local.port, local.user, "laptop-dual " + if (on) "on" else "off")
+            }.getOrElse { it.message ?: it.toString() }.trim().lines().lastOrNull().orEmpty()
+            Log.i(TAG, "laptop dual: $out")
+            if (on && !out.startsWith("on")) work.post { note(out.removePrefix("laptop-dual: ").take(140), 7000) }
+        }
     }
 
     // A server's screen stopped by itself (not reachable, no vox-screen there, ended): it stays the choice, its

@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# laptop-edge GW GH GX GY MW MH MX MY -- SSH...: the phone's screen and the glasses as one desk for the laptop
+# (laptop-dual). The phone's screen (Termux:X11, :1) shows the laptop's own screen (MW x MH at MX, MY) in TigerVNC's
+# viewer; the glasses show the laptop's monitor above it (GW x GH at GX, GY). Pushed off the top of the phone's
+# screen, the pointer goes up onto the glasses: the phone's pointer is held then (grabbed, hidden, put back in the
+# middle after each move, as x2x does) and its moves and clicks move the laptop's own pointer there (SSH... runs
+# vox-dual-input on the laptop). Past the glasses' bottom edge it comes back down onto the phone's screen.
+# (A button held while crossing waits: the viewer holds the pointer until it is let go.)
+import ctypes, os, subprocess, sys, time
+
+GW, GH, GX, GY, MW, MH, MX, MY = (int(a) for a in sys.argv[1:9])
+SSH = sys.argv[sys.argv.index("--") + 1:]
+P, I, U, L = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_ulong
+R = ctypes.POINTER
+X = ctypes.CDLL("libX11.so.6")
+
+
+def fn(name, res, *args):
+    f = getattr(X, name)
+    f.restype = res
+    f.argtypes = list(args)
+    return f
+
+
+open_display = fn("XOpenDisplay", P, ctypes.c_char_p)
+d = open_display(os.environ.get("DISPLAY", ":1").encode())
+if not d:
+    sys.exit("laptop-edge: no X display")
+root = fn("XDefaultRootWindow", L, P)(d)
+SW, SH = fn("XDisplayWidth", I, P, I)(d, 0), fn("XDisplayHeight", I, P, I)(d, 0)
+query = fn("XQueryPointer", I, P, L, R(L), R(L), R(I), R(I), R(I), R(I), R(U))
+warp = fn("XWarpPointer", I, P, L, L, I, I, U, U, I, I)
+grab = fn("XGrabPointer", I, P, L, I, U, I, I, L, L, L)
+ungrab = fn("XUngrabPointer", I, P, L)
+pending = fn("XPending", I, P)
+next_event = fn("XNextEvent", I, P, P)
+flush = fn("XFlush", I, P)
+
+
+class Color(ctypes.Structure):
+    _fields_ = [("pixel", L), ("red", ctypes.c_ushort), ("green", ctypes.c_ushort), ("blue", ctypes.c_ushort),
+                ("flags", ctypes.c_char), ("pad", ctypes.c_char)]
+
+
+# An empty cursor: the phone's pointer hidden while the laptop's is on the glasses.
+bits = fn("XCreateBitmapFromData", L, P, L, ctypes.c_char_p, U, U)(d, root, b"\0", 1, 1)
+black = Color()
+blank = fn("XCreatePixmapCursor", L, P, L, L, R(Color), R(Color), U, U)(d, bits, bits, ctypes.byref(black),
+                                                                        ctypes.byref(black), 0, 0)
+link = None
+
+
+def connect():
+    global link
+    if link is None or link.poll() is not None:
+        link = subprocess.Popen(SSH, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+
+def send(line):
+    global link
+    for _ in range(2):
+        connect()
+        try:
+            link.stdin.write(line + "\n")
+            link.stdin.flush()
+            return
+        except (BrokenPipeError, OSError):
+            link = None
+
+
+def where():
+    r, c, rx, ry, wx, wy, m = L(), L(), I(), I(), I(), I(), U()
+    query(d, root, ctypes.byref(r), ctypes.byref(c), ctypes.byref(rx), ctypes.byref(ry), ctypes.byref(wx),
+          ctypes.byref(wy), ctypes.byref(m))
+    return rx.value, ry.value
+
+
+connect()  # the link up ahead: the first move up then goes at once
+cx, cy = SW // 2, SH // 2
+gain = MW / SW  # the phone's pixels to the laptop's
+event = ctypes.create_string_buffer(192)
+up = False
+lx = ly = 0.0
+while True:
+    if not up:
+        x, y = where()
+        if y <= 0 and grab(d, root, 0, 4 | 8, 1, 1, 0, blank, 0) == 0:  # buttons; async; CurrentTime
+            up = True
+            lx, ly = GX + x * GW / SW, GY + GH - 1
+            warp(d, 0, root, 0, 0, 0, 0, cx, cy)
+            flush(d)
+            send("m %d %d" % (lx, ly))
+        time.sleep(0.03)
+        continue
+    while pending(d):
+        next_event(d, event)
+        kind = int.from_bytes(event.raw[0:4], "little")
+        if kind in (4, 5):  # ButtonPress, ButtonRelease (XButtonEvent.button at 84 on 64-bit)
+            send("b %d %d" % (int.from_bytes(event.raw[84:88], "little"), 1 if kind == 4 else 0))
+    x, y = where()
+    if (x, y) != (cx, cy):
+        warp(d, 0, root, 0, 0, 0, 0, cx, cy)
+        flush(d)
+        lx = min(max(lx + (x - cx) * gain, GX), GX + GW - 1)
+        ly = max(ly + (y - cy) * gain, GY)
+        if ly > GY + GH - 1:  # down past the glasses: the phone's screen again, where it came in
+            ungrab(d, 0)
+            warp(d, 0, root, 0, 0, 0, 0, int((lx - GX) * SW / GW), 1)
+            flush(d)
+            up = False
+            continue
+        send("m %d %d" % (lx, ly))
+    time.sleep(0.012)

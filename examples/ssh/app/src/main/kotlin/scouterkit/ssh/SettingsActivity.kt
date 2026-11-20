@@ -68,6 +68,9 @@ class SettingsActivity : Activity() {
         })
         showGrid(settings.dx, settings.dy)
         glasses.addView(grid)
+        glasses.addToggle(toggle("Laptop screen: the phone as its main screen", "The phone shows the laptop's screen " +
+            "(Termux:X11, sideways) and the glasses a screen above it: push the pointer past the top to go up",
+            settings.laptopDual) { settings.laptopDual = it })
         glasses.addToggle(toggle("Charging alerts in the case", "A buzz and a notice when an arm charges or doesn't", settings.caseAlerts) {
             settings.caseAlerts = it
         })

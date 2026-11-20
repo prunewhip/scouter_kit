@@ -59,8 +59,10 @@ class RemoteScreen(private val context: Context, val server: Settings.Server, pr
         val pictureH = maxOf(2, 480 - minOf(kotlin.math.abs(settings.dy), 400))
         val why = try {
             // A command over SSH gets no login shell: ~/.local/bin (where a user installs it) is not on its PATH.
+            // The laptop's two screens (Settings.laptopDual): the glasses get a monitor of their own, pixel for pixel.
+            val dual = if (!server.local && settings.laptopDual) "VOX_DUAL=1 " else ""
             val s = Bootstrap(Vault(context)).stream(server.host, server.port, server.user,
-                "VOX_FORMAT=png VOX_SIZE=${pictureW}x$pictureH PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\" vox-screen $w $h $fps")
+                "${dual}VOX_FORMAT=png VOX_SIZE=${pictureW}x$pictureH PATH=\"\$HOME/.local/bin:\$HOME/bin:/usr/local/bin:\$PATH\" vox-screen $w $h $fps")
             stream = s
             if (released) {
                 s.close()

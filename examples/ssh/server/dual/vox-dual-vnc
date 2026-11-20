@@ -1,0 +1,13 @@
+#!/bin/sh
+# vox-dual-vnc: the laptop's own screen (the main one while vox-dual is on) as VNC on stdin/stdout, for the phone's
+# viewer (Termux:X11): it comes through SSH, so no port is open anywhere. One viewer; ends with it.
+export DISPLAY="${DISPLAY:-:0}"
+if [ -z "${XAUTHORITY:-}" ]; then
+	for f in "/run/user/$(id -u)/gdm/Xauthority" "$HOME/.Xauthority"; do
+		[ -r "$f" ] && { export XAUTHORITY="$f"; break; }
+	done
+fi
+G=$(xrandr --query | sed -n 's/^eDP-1 connected[a-z ]* \([0-9]*x[0-9]*+[0-9]*+[0-9]*\) .*/\1/p')
+[ -n "$G" ] || { echo "vox-dual-vnc: no laptop screen on $DISPLAY" >&2; exit 1; }
+exec x11vnc -inetd -display "$DISPLAY" -clip "$G" -nopw -shared -quiet -nowf -noxrecord -cursor most \
+	-o "$HOME/.vox-dual-vnc.log"

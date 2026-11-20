@@ -1,0 +1,74 @@
+#!/bin/bash
+# laptop-dual on|off|status: the phone's screen as the laptop's main screen, the glasses as the one above it (Vox's
+# Laptop screen source with "Phone as the main screen"; Vox runs this and brings the Termux:X11 app to the front).
+# The laptop gives the glasses a monitor of their own while Vox streams it (vox-screen VOX_DUAL=1 -> vox-dual);
+# here:
+#   - Termux:X11's X server (:1; plain Termux starts it for us: vox-native), landscape, the laptop screen's size;
+#   - TigerVNC's viewer, full screen on it, showing the laptop's own screen: x11vnc runs there per connection
+#     through SSH (vox-dual-vnc; socat hands it to the viewer on 127.0.0.1), so no port is open anywhere;
+#   - laptop-edge: past the top of the phone's screen, the pointer goes up onto the glasses, and back down.
+# The laptop: ~/.laptop-dual.conf (HOST, LOGIN, KEY).
+set -u
+. /root/.laptop-dual.conf
+T=/data/data/com.termux/files/usr/tmp
+FIFO=$T/vox-native.fifo
+RUN=/root/.laptop-dual
+PORT=5917
+SSH=(ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -i "$KEY" "$LOGIN@$HOST")
+export DISPLAY=:1
+mkdir -p "$RUN" /tmp/.X11-unix
+[ -e /tmp/.X11-unix/X1 ] || ln -sf "$T/.X11-unix/X1" /tmp/.X11-unix/X1
+
+native() { timeout 3 sh -c 'printf "%s\n" "$1" > "$2"' _ "$1" "$FIFO" 2>/dev/null; }
+x_up() { timeout 4 xdpyinfo > /dev/null 2>&1; }
+stop() {
+	for n in edge viewer socat; do
+		[ -f "$RUN/$n.pid" ] && kill -TERM -- "-$(cat "$RUN/$n.pid")" 2>/dev/null
+		rm -f "$RUN/$n.pid"
+	done
+}
+# Started in a session of its own: stop() ends it with all it started.
+spawn() { local n=$1; shift; setsid "$@" > "$RUN/$n.log" 2>&1 < /dev/null & echo $! > "$RUN/$n.pid"; }
+
+case "${1:-status}" in
+link) exec "${SSH[@]}" .local/bin/vox-dual-vnc ;; # socat's end: one VNC connection
+on)
+	# The laptop's layout: Vox's stream there makes the glasses monitor (a moment after it starts).
+	geo=""
+	for i in $(seq 25); do
+		geo=$("${SSH[@]}" .local/bin/vox-dual status 2>/dev/null)
+		case "$geo" in glasses*) break ;; esac
+		echo "waiting for the laptop's glasses monitor" # (a line now and then: Vox's SSH read has a timeout)
+		sleep 0.8
+	done
+	case "$geo" in glasses*) ;; *) echo "laptop-dual: the laptop has no glasses monitor (${geo:-not reachable})"; exit 1 ;; esac
+	# glasses WxH+X+Y main WxH+X+Y
+	read -r GW GH GX GY MW MH MX MY <<< "$(echo "$geo" | sed 's/glasses \([0-9]*\)x\([0-9]*\)+\([0-9]*\)+\([0-9]*\) main \([0-9]*\)x\([0-9]*\)+\([0-9]*\)+\([0-9]*\)/\1 \2 \3 \4 \5 \6 \7 \8/')"
+	# Termux:X11: landscape, exactly the laptop screen's size, the phone's screen a touchpad (a pointer that can be
+	# pushed past the edge).
+	native "x11-laptop ${MW}x$MH"
+	if ! x_up; then
+		native x11 || { echo "laptop-dual: Termux:X11 isn't running and plain Termux can't start it yet: open a new Termux session once (vox-native)"; exit 1; }
+		for i in $(seq 30); do x_up && break; echo "waiting for Termux:X11"; sleep 0.5; done
+		x_up || { echo "laptop-dual: Termux:X11's X server didn't start"; exit 1; }
+	fi
+	stop
+	spawn socat socat "TCP-LISTEN:$PORT,bind=127.0.0.1,reuseaddr,fork" "EXEC:/usr/local/bin/laptop-dual link"
+	touch "$RUN/on"
+	# The viewer again after a dropped link (mobile data), while this stays on.
+	spawn viewer bash -c 'while [ -f "$0/on" ]; do
+		vncviewer -FullScreen -FullscreenSystemKeys=0 -RemoteResize=0 -AlertOnFatalError=0 -ReconnectOnError=0 \
+			-Shared -DotWhenNoCursor 127.0.0.1::'$PORT'
+		sleep 2
+	done' "$RUN"
+	spawn edge /usr/local/bin/laptop-edge "$GW" "$GH" "$GX" "$GY" "$MW" "$MH" "$MX" "$MY" -- "${SSH[@]}" .local/bin/vox-dual-input
+	echo "on: phone ${MW}x$MH, glasses ${GW}x$GH above"
+	;;
+off)
+	rm -f "$RUN/on"
+	stop
+	echo off
+	;;
+status) if [ -f "$RUN/on" ]; then echo on; else echo off; fi ;;
+*) echo "usage: laptop-dual on|off|status"; exit 2 ;;
+esac

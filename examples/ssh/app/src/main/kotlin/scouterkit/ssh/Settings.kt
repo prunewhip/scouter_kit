@@ -28,6 +28,11 @@ class Settings(context: Context) {
     var caseAlerts: Boolean
         get() = prefs.getBoolean("case_alerts", false)
         set(v) = prefs.edit().putBoolean("case_alerts", v).apply()
+    // The laptop's screen source: the phone as the laptop's main screen (Termux:X11) and the glasses as a monitor
+    // above it (laptop-dual on the phone's server, vox-dual on the laptop).
+    var laptopDual: Boolean
+        get() = prefs.getBoolean("laptop_dual", true)
+        set(v) = prefs.edit().putBoolean("laptop_dual", v).apply()
     // Debug builds: the terminal shows with the glasses folded (WORN 0), for tests on the table.
     var ignoreWorn: Boolean
         get() = prefs.getBoolean("ignore_worn", false)
