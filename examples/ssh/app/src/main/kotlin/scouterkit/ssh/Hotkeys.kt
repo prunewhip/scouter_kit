@@ -15,7 +15,7 @@ import android.view.accessibility.AccessibilityEvent
 
 // A keyboard's shortcuts (a Bluetooth keyboard paired with the phone): Alt with an arrow moves around the
 // sources as a grid (left and right: this phone, then each other server; up and down: terminal, screen),
-// Alt+1 ... Alt+8 picks Home's source of that number, Alt+9 Termux on the phone, Alt+0 heads-up mode (look-up only), Alt+L the display off
+// Alt+1 ... Alt+8 picks Home's source of that number, Alt+9 Termux on the phone (again: back), Alt+0 heads-up mode (look-up only), Alt+L the display off
 // or on, Alt+V voice mode (talking to the terminal), Alt+Space
 // listens for a voice command, Alt+M the pointer (then arrows, Enter, Escape), Alt+T / [ / ] / W the tabs,
 // Alt+A the help on the glasses (every hotkey: Panels.GROUPS; also while Alt is held by itself), Alt+S the quick
@@ -447,7 +447,7 @@ object Hotkeys {
             }
             return true
         }
-        // Alt+9: Termux on the phone (the phone's terminal), the keyboard typing into it.
+        // Alt+9: Termux on the phone (the phone's terminal), the keyboard typing into it; in Termux, back to the app before.
         if (e.keyCode == KeyEvent.KEYCODE_9) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Desktop.terminal(context)
             return true
@@ -752,11 +752,16 @@ class VoxKeys : AccessibilityService() {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         if (confirmUntil > 0L) ui.post(confirmTick)
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName || pkg == "com.android.systemui" || pkg == "android") return
+        if (pkg == "com.android.systemui" || pkg == "android") return
         val keyboards = imes ?: runCatching {
             getSystemService(android.view.inputmethod.InputMethodManager::class.java).inputMethodList.map { it.packageName }.toSet()
         }.getOrDefault(emptySet()).also { imes = it }
-        if (pkg in keyboards || pkg == app) return
+        if (pkg in keyboards) return
+        if (pkg != shown) {
+            if (shown.isNotEmpty()) before = shown
+            shown = pkg
+        }
+        if (pkg == packageName || pkg == app) return
         app = pkg
         onApp?.invoke(pkg)
     }
@@ -784,6 +789,9 @@ class VoxKeys : AccessibilityService() {
         // The app in front changed (its package), and the last one.
         @Volatile var onApp: ((String) -> Unit)? = null
         @Volatile var app = ""
+        // The app in front (Vox too) and the one before it: Alt+9 goes back there from Termux.
+        @Volatile var shown = ""
+        @Volatile var before = ""
         @Volatile private var captured = false
         @Volatile private var wantCapture = false
 

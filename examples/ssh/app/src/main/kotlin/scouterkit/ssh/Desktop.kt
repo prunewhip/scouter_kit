@@ -25,17 +25,34 @@ object Desktop {
             .onFailure { android.util.Log.w(ScouterService.TAG, "desktop: open failed", it) }
     }
 
-    // Alt+9: Termux, the phone's terminal, to the front; the keyboard types into it (Alt+K gives it back to the
-    // glasses' terminal).
+    // Alt+9: Termux, the phone's terminal, to the front, the keyboard typing into it (Alt+K gives it back to the
+    // glasses' terminal). Termux in front already: back to the app before it (Home when that was the home screen),
+    // the keyboard back where it was.
+    private const val TERMUX = "com.termux"
+    @Volatile private var tookKeys = false
+
     fun terminal(context: Context) {
         val app = context.applicationContext
-        val intent = app.packageManager.getLaunchIntentForPackage("com.termux")
+        if (VoxKeys.shown == TERMUX && VoxKeys.service() != null) {
+            val back = VoxKeys.before.takeIf { it.isNotEmpty() && it != TERMUX }
+            val intent = back?.let { app.packageManager.getLaunchIntentForPackage(it) }
+            val went = intent != null && runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
+            if (!went) VoxKeys.global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
+            android.util.Log.i(ScouterService.TAG, "terminal: back to " + (if (went) back else "home"))
+            if (tookKeys && ScouterService.running) ScouterService.send(app, ScouterService.ACTION_KEYS, "to" to "glasses")
+            tookKeys = false
+            return
+        }
+        val intent = app.packageManager.getLaunchIntentForPackage(TERMUX)
         if (intent == null) {
             Toast.makeText(app, "Termux isn't installed", Toast.LENGTH_SHORT).show()
             return
         }
         runCatching { app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             .onFailure { android.util.Log.w(ScouterService.TAG, "terminal: open failed", it) }
-        if (ScouterService.running) ScouterService.send(app, ScouterService.ACTION_KEYS, "to" to "phone")
+        if (ScouterService.running && !Session.keysToPhone) {
+            tookKeys = true
+            ScouterService.send(app, ScouterService.ACTION_KEYS, "to" to "phone")
+        }
     }
 }
