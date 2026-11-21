@@ -11,14 +11,16 @@ import java.time.LocalDate
 
 // Learn: whole subjects, casually, by ear (made for driving). Claude writes each lesson as a podcast episode (the
 // Podcasts script format, voices and player) with a short quiz after it. A drive is hands-free: a warm-up of
-// questions missed before (spaced review), the lesson, then its quiz read aloud and answered by voice, judged on
-// the phone (no network needed in the car), with points, runs, levels and a day streak. What was missed comes back
-// on later drives, and the next lesson Claude writes builds on the lessons so far and on what was missed.
+// questions missed before (spaced review), the lesson, then its quiz read aloud like a game show and answered by
+// voice, judged on the phone (no network needed in the car), with points, runs, levels, ranks, a daily goal and a
+// day streak. What was missed comes back on later drives, and the next lesson builds on what was missed.
 object Learn {
     const val QUIZ_MARK = "=== QUIZ ==="
     const val REPEAT = -10
     const val SKIP = -11
     const val STOP = -12
+    const val DAILY_GOAL = 50
+    const val PER_LEVEL = 150
 
     class Question(val q: String, val options: List<String>, val answer: Int, val why: String) {
         val trueFalse get() = options.size == 2 && options[0].equals("true", true) && options[1].equals("false", true)
@@ -65,9 +67,20 @@ object Learn {
             }.getOrNull()
         }.sortedWith(compareBy({ it.script.lastModified() }, { it.n }))
 
-    fun lesson(c: Context, key: String) = lessons(c).firstOrNull { it.key == key }
+    // The lesson a drive plays: the first one made and not quizzed yet, else the newest made.
+    fun upNext(c: Context): Lesson? {
+        val all = lessons(c)
+        return all.firstOrNull { it.audio.exists() && score(c, it) == null } ?: all.lastOrNull { it.audio.exists() }
+    }
 
-    // The quiz Claude wrote after QUIZ_MARK: blocks of Q: / A: B: C: D: / ANSWER: / WHY:, then NEXT: (the next lesson).
+    // Claude's answer: the script, and what follows the quiz line (also "## Quiz" or "QUIZ" alone, if it strayed).
+    private val QUIZ_LINE = Regex("^\\s*(=+\\s*QUIZ\\s*=+|#+\\s*QUIZ|QUIZ:?)\\s*$", setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE))
+    fun split(text: String): Pair<String, String> {
+        val m = QUIZ_LINE.find(text) ?: return text to ""
+        return text.substring(0, m.range.first) to text.substring(m.range.last + 1)
+    }
+
+    // The quiz: blocks of Q: / A: B: C: D: / ANSWER: / WHY:, then NEXT: (forgiving numbering, bullets and bold).
     fun parseQuiz(text: String): Pair<List<Question>, String> {
         val out = ArrayList<Question>()
         var q: String? = null
@@ -83,17 +96,19 @@ object Learn {
             ans = -1
             why = ""
         }
-        val line = Regex("^([A-Za-z]+)\\s*[:.)]\\s*(.*)$")
+        val line = Regex("^[-*>#\\s]*(?:\\d+[.)]\\s*)?(QUESTION\\s*\\d*|Q\\s*\\d*|ANSWER|WHY|NEXT|[A-D])\\s*[:.)-]\\s*(.*)$",
+            RegexOption.IGNORE_CASE)
         for (raw in text.lines()) {
-            val m = line.find(raw.replace("*", "").trim()) ?: continue
-            val key = m.groupValues[1].uppercase()
+            val m = line.find(raw.replace("*", "").replace("_", " ").trim()) ?: continue
+            val key = m.groupValues[1].uppercase().replace(Regex("\\s*\\d+$"), "")
             val v = m.groupValues[2].trim()
-            when {
-                key == "Q" || key == "QUESTION" -> { flush(); q = v }
-                key.length == 1 && key[0] in 'A'..'D' -> if (q != null && key[0] - 'A' == opts.size && v.isNotEmpty()) opts += v
-                key == "ANSWER" -> ans = Regex("\\b([A-D])\\b").find(v.uppercase())?.groupValues?.get(1)?.let { it[0] - 'A' } ?: -1
-                key == "WHY" -> why = v
-                key == "NEXT" -> { flush(); next = v }
+            when (key) {
+                "Q", "QUESTION" -> { flush(); q = v }
+                "ANSWER" -> ans = Regex("\\b([A-D])\\b").find(v.uppercase())?.groupValues?.get(1)?.let { it[0] - 'A' }
+                    ?: opts.indexOfFirst { it.equals(v, true) }
+                "WHY" -> why = v
+                "NEXT" -> { flush(); next = v }
+                else -> if (q != null && key.length == 1 && key[0] - 'A' == opts.size && v.isNotEmpty()) opts += v
             }
         }
         flush()
@@ -126,35 +141,56 @@ object Learn {
 
     // ---- points
 
-    fun level(xp: Int) = 1 + xp / 150
-    fun rank(xp: Int): String = listOf(0 to "Curious", 300 to "Learner", 1000 to "Student", 2500 to "Scholar",
-        5000 to "Expert", 10000 to "Polymath").last { xp >= it.first }.second
+    fun level(xp: Int) = 1 + xp / PER_LEVEL
+    private val RANKS = listOf(0 to "Curious", 300 to "Learner", 1000 to "Student", 2500 to "Scholar", 5000 to "Expert",
+        10000 to "Polymath")
+    fun rank(xp: Int): String = RANKS.last { xp >= it.first }.second
+    fun nextRank(xp: Int): Pair<Int, String>? = RANKS.firstOrNull { it.first > xp }
+    fun rankFloor(xp: Int): Int = RANKS.last { xp >= it.first }.first
 
-    class Stats(val xp: Int, val days: Int, val answered: Int, val right: Int, val bestRun: Int)
+    class Stats(val xp: Int, val days: Int, val answered: Int, val right: Int, val bestRun: Int, val today: Int, val bestDrive: Int)
 
     fun stats(c: Context): Stats {
         val p = prefs(c)
         val days = if (today() - p.getLong("day", -10) <= 1) p.getInt("days", 0) else 0
-        return Stats(p.getInt("xp", 0), days, p.getInt("answered", 0), p.getInt("right", 0), p.getInt("best_run", 0))
+        return Stats(p.getInt("xp", 0), days, p.getInt("answered", 0), p.getInt("right", 0), p.getInt("best_run", 0),
+            todayPoints(c), p.getInt("best_drive", 0))
+    }
+
+    fun todayPoints(c: Context): Int = prefs(c).let { if (it.getLong("pts_day", -1) == today()) it.getInt("pts_today", 0) else 0 }
+
+    // Points to the total, the subject and today; returns the subject's points before.
+    private fun add(c: Context, subject: String, points: Int): Int {
+        val p = prefs(c)
+        val k = "xp:${subject.lowercase()}"
+        val before = p.getInt(k, 0)
+        val todayNow = todayPoints(c) + points
+        p.edit().putInt("xp", p.getInt("xp", 0) + points).putInt(k, before + points)
+            .putLong("pts_day", today()).putInt("pts_today", todayNow).apply()
+        return before
     }
 
     fun subjectXp(c: Context, s: String) = prefs(c).getInt("xp:${s.lowercase()}", 0)
 
     // An answer counted; returns the subject's new level when it went up, else 0.
     fun answered(c: Context, subject: String, ok: Boolean, points: Int, run: Int): Int {
+        val before = add(c, subject, points)
         val p = prefs(c)
-        val k = "xp:${subject.lowercase()}"
-        val before = p.getInt(k, 0)
-        p.edit().putInt("xp", p.getInt("xp", 0) + points).putInt(k, before + points)
-            .putInt("answered", p.getInt("answered", 0) + 1).putInt("right", p.getInt("right", 0) + if (ok) 1 else 0)
+        p.edit().putInt("answered", p.getInt("answered", 0) + 1).putInt("right", p.getInt("right", 0) + if (ok) 1 else 0)
             .putInt("best_run", maxOf(p.getInt("best_run", 0), run)).apply()
         return if (level(before + points) > level(before)) level(before + points) else 0
     }
 
     fun bonus(c: Context, subject: String, points: Int) {
+        add(c, subject, points)
+    }
+
+    // A drive's points: true when it beats the best before it.
+    fun drove(c: Context, points: Int): Boolean {
         val p = prefs(c)
-        val k = "xp:${subject.lowercase()}"
-        p.edit().putInt("xp", p.getInt("xp", 0) + points).putInt(k, p.getInt(k, 0) + points).apply()
+        val best = p.getInt("best_drive", 0)
+        if (points > best) p.edit().putInt("best_drive", points).apply()
+        return points > best && best > 0
     }
 
     // A drive today: the day streak goes on (or starts again).
@@ -224,37 +260,80 @@ object Learn {
     fun style(): Podcasts.Style = Podcasts.style("podcast")
 
     private fun levelWord(lvl: Int, n: Int) = when {
-        n == 1 -> "new to it"
-        lvl <= 2 -> "a beginner who has had ${n - 1} lessons"
-        lvl <= 5 -> "comfortable with the basics, ready for depth"
-        else -> "advanced: give nuance, debates and expert-level ideas"
+        n == 1 -> "new to it: start from the big picture and why it matters"
+        lvl <= 2 -> "a beginner with ${n - 1} lessons behind them"
+        lvl <= 5 -> "comfortable with the basics, ready for depth and real cases"
+        else -> "advanced: bring nuance, debates and expert-level ideas"
     }
 
+    // The request: who it is for, the episode's shape, the quiz, and the exact format, with a small example.
     fun prompt(c: Context, subject: String, minutes: Int): String {
         val mine = lessons(c).filter { it.subject.equals(subject, true) }
         val n = mine.size + 1
         val weak = weak(c, subject)
         val next = mine.lastOrNull()?.next?.takeIf { it.isNotBlank() }
-        val topic = "lesson $n of a casual audio course on $subject" + (next?.let { ": $it" } ?: "")
-        return "You are a brilliant, warm teacher making $topic. The listener learns only by ear, often while driving, " +
-            "and wants to grow as a person: make it genuinely useful in everyday life, not trivia.\n" +
-            "Their level in this subject: ${levelWord(level(subjectXp(c, subject)), n)}.\n" +
-            (if (mine.isEmpty()) "This is the first lesson: start from the big picture and why it matters.\n"
-            else "Lessons so far: ${mine.joinToString("; ") { it.title }}. Build on them; do not repeat them.\n") +
-            (if (weak.isNotEmpty()) "Ideas they got wrong in earlier quizzes; bring them back from a new angle: ${weak.joinToString("; ")}.\n" else "") +
-            "Teach for memory: one big idea per part, a vivid story or example for each, a one-line takeaway at the end " +
-            "of each part, and a short recap at the end. One host teaches, the other is a curious, smart learner who " +
-            "asks what the listener would.\n\n" +
-            Podcasts.prompt(topic, style(), minutes) +
-            "\n\nAfter the script, a line \"$QUIZ_MARK\" and then 6 quiz questions on the lesson's key ideas " +
-            "(understanding, not trivia): 4 with three options and 2 true or false, each in exactly this form:\n" +
-            "Q: <the question, short, written for the ear>\nA: <option>\nB: <option>\nC: <option>\nANSWER: <letter>\n" +
-            "WHY: <one sentence that teaches the point>\n" +
-            "For true or false: A: True and B: False only. Options short and clearly different when heard aloud. Vary " +
-            "which letter is right. A blank line between questions.\n" +
-            "Last, a line \"NEXT: <the title of the best next lesson in this course>\".\n\n" +
-            "Reply with the script and the quiz only, nothing before or after them. Check facts on the web when the " +
-            "topic needs it."
+        val so = if (mine.isEmpty()) "This is the first lesson."
+        else "Lessons so far: ${mine.joinToString("; ") { it.title }}. Build on them; do not repeat them."
+        return """
+You are writing lesson $n of "$subject", a fun audio course for one listener who learns only by ear, usually while driving. They want to grow as a person: make it practical, surprising and memorable, never dry.
+Their level: ${levelWord(level(subjectXp(c, subject)), n)}.
+$so
+${next?.let { "Planned topic for this lesson: $it." } ?: ""}
+${if (weak.isNotEmpty()) "They got these wrong in earlier quizzes; teach them again from a fresh angle: ${weak.joinToString("; ")}." else ""}
+
+THE EPISODE: about $minutes minutes read aloud (about ${minutes * 150} words), two voices:
+- HOST: the curious, upbeat co-host. Asks what the listener is thinking, reacts, jokes lightly, keeps it moving.
+- EXPERT: the warm teacher. Explains with stories, examples and comparisons from everyday life.
+Shape:
+1. A cold open of 2 to 4 lines: a surprising fact, puzzle or story that makes the listener want the answer.
+2. Three or four parts. Each part starts with a line "## <part title>" and teaches ONE big idea with a vivid story or example and a memory hook (an image, rhyme or tiny acronym), said naturally. In each part HOST once asks the listener to guess or think, then a line [pause 3], then the answer. Each part ends with HOST saying "Takeaway:" and the idea in one short sentence.
+3. A last part "## Recap": the takeaways again in three short lines, one small "try this today" challenge, and one line teasing the next lesson.
+Writing for the ear: short sentences; no lists, tables, links or emoji; numbers, symbols and abbreviations written the way they are said ("twenty percent", "doctor"). Every spoken line starts with HOST: or EXPERT: and nothing else. The only other lines are the "## " part lines and [pause 3].
+
+THE QUIZ: after the script, a line that is exactly
+$QUIZ_MARK
+then exactly 6 questions on the lesson's key ideas: understanding and use, not trivia, each answerable from this episode alone. Questions 1 to 4 have three options; questions 5 and 6 are true or false. Each question is these lines, then a blank line:
+Q: <the question, at most 20 words, easy to follow by ear>
+A: <option, at most 6 words>
+B: <option, at most 6 words>
+C: <option, at most 6 words>
+ANSWER: <the letter only>
+WHY: <one sentence, at most 20 words, that teaches the point>
+True or false questions have only A: True and B: False (no C line). Options must sound clearly different when heard aloud; no "all of the above" or "none of the above"; spread the right answers over A, B and C.
+After the last question, one line: NEXT: <the title of the best next lesson in this course>
+
+EXACT FORMAT (a tiny example; yours is much longer and about $subject):
+---
+title: The Two-Minute Start
+style: podcast
+---
+HOST: Here's a puzzle. Why is the first minute of anything the hardest?
+EXPERT: Because your brain prices the whole task, not the first step.
+## Make it tiny
+HOST: So what's the trick? Take a guess.
+[pause 3]
+EXPERT: Shrink the start until it feels almost silly. One push-up. One sentence.
+HOST: Takeaway: a tiny start beats a big plan.
+## Recap
+HOST: One: a tiny start beats a big plan. Try this today: pick one thing and do just its first two minutes.
+$QUIZ_MARK
+Q: What makes starting a new habit easier?
+A: Planning every step
+B: Shrinking the first step
+C: Waiting for motivation
+ANSWER: B
+WHY: A tiny first step lowers what your brain thinks starting will cost.
+
+Q: Motivation often comes after you start, not before.
+A: True
+B: False
+ANSWER: A
+WHY: Action tends to create motivation, so starting small gets you moving.
+
+NEXT: Stacking habits onto routines you already have
+
+Reply with only the script and the quiz, starting with the --- line: no words before or after them and no code fences. Check facts on the web when the subject needs it.
+""".trim().replace(Regex("\n{3,}"), "\n\n")
     }
 
     fun writeNext(c: Context, subject: String): Boolean {
@@ -262,10 +341,13 @@ object Learn {
         val minutes = minutes(app)
         val n = lessons(app).count { it.subject.equals(subject, true) } + 1
         return Podcasts.write(app, "$subject, lesson $n", style(), minutes, true, prompt(app, subject, minutes)) { f, text ->
-            val (quiz, next) = parseQuiz(text.substringAfter(QUIZ_MARK, ""))
-            val title = Podcasts.parse(text.substringBefore(QUIZ_MARK), subject).title
+            val (script, rest) = split(text)
+            val (quiz, next) = parseQuiz(rest)
+            val title = Podcasts.parse(script, subject).title
             save(f, subject, n, title, quiz, next)
+            if (quiz.size < 3) Log.w(ScouterService.TAG, "learn: '$title' came with ${quiz.size} questions (format off?)")
             Log.i(ScouterService.TAG, "learn: '$title' ($subject $n) with ${quiz.size} questions; next: $next")
+            changed()
         } != null
     }
 
@@ -318,9 +400,9 @@ object Learn {
     fun changed() { version++ }
 }
 
-// A drive: [warm-up of due review questions] → [the lesson's episode] → [its quiz] → a summary, all by voice. It runs
-// in Vox's service (its microphone and handler, through Car mode's host), whatever the screen shows. [key]: the
-// lesson (else the first one ready and not quizzed yet); [quizOnly] skips the episode.
+// A drive: [warm-up of due review questions] → [the lesson's episode] → [its quiz, game-show style] → a summary, all
+// by voice. It runs in Vox's service (its microphone and handler, through Car mode's host), whatever the screen
+// shows. [key]: the lesson (else Learn.upNext); [quizOnly] skips the episode.
 class LearnSession(private val c: Context, private val host: CarHost, private val key: String?, private val quizOnly: Boolean) {
     private val h = host.handler
     private val main = Handler(Looper.getMainLooper())
@@ -333,15 +415,20 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
     // What the page shows.
     @Volatile var step = "Starting"
     @Volatile var question: Learn.Question? = null
+    @Volatile var qNo = 0 // the quiz question (1-based), 0 in the warm-up
+    @Volatile var qOf = 0
+    @Volatile var picked = -1 // the option given (after the answer), -1 none
+    @Volatile var revealed = false
     @Volatile var heard = ""
     @Volatile var feedback = ""
+    @Volatile var good = false
     @Volatile var listening = false
     @Volatile var points = 0
     @Volatile var run = 0
     @Volatile var right = 0
     @Volatile var asked = 0
     @Volatile var lesson: Learn.Lesson? = null
-    val inEpisode get() = step.startsWith("Listening")
+    val inEpisode get() = step.startsWith("Now playing")
 
     private var warm: List<Pair<Learn.Lesson, Int>> = emptyList()
     private var answered: ((Boolean) -> Unit)? = null
@@ -349,26 +436,26 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
     private var review = false
     private var tries = 0
     private var lessonRight = 0
-    private var news = "" // a level reached, said after the answer's feedback
     private var listenId = 0 // the listening going on: one ended by repeat / tap / skip is not "no answer"
+    private val startXp = Learn.stats(c).xp
+    private val startToday = Learn.todayPoints(c)
     private val timeout = Runnable { if (listening) host.carStopListening() }
 
     private fun changed() = Learn.changed()
 
     fun start() {
-        val all = Learn.lessons(c)
-        lesson = if (key != null) all.firstOrNull { it.key == key }
-        else all.firstOrNull { it.audio.exists() && Learn.score(c, it) == null } ?: all.lastOrNull { it.audio.exists() }
+        lesson = if (key != null) Learn.lessons(c).firstOrNull { it.key == key } else Learn.upNext(c)
         warm = if (key == null) Learn.due(c, 3) else emptyList()
         val l = lesson
         if (l == null && warm.isEmpty())
             return say("No lesson is ready yet. Add a subject in Learn, and Claude will write your first one.") { finish() }
+        CarSounds.play(CarSounds.Sound.ON)
         val st = Learn.stats(c)
         val hello = buildString {
-            append("Learn drive. ")
-            if (st.days > 0) append("Day streak ${st.days}. ")
-            if (warm.isNotEmpty()) append("A quick warm-up first: ${warm.size} from before. ")
-            else if (l != null) append(if (quizOnly) "Quiz on ${l.title}. " else "Today: ${l.title}. ")
+            append("Welcome to your learning drive. ")
+            if (st.days > 1) append("You're on a ${st.days} day streak. ")
+            if (warm.isNotEmpty()) append("First, a quick warm-up: ${warm.size} from before, 5 points each. ")
+            else if (l != null) append(if (quizOnly) "Quiz time on ${l.title}. " else "Today: ${l.title}. ")
         }
         say(hello) { warmup(0) }
     }
@@ -390,16 +477,19 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
     private fun warmup(i: Int) {
         if (i >= warm.size) return episode()
         val (l, qi) = warm[i]
-        ask(l.quiz[qi], l.subject, true) { ok -> Learn.reviewed(c, l, qi, ok); warmup(i + 1) }
+        step = "Warm-up ${i + 1} of ${warm.size}"
+        ask(l.quiz[qi], l.subject, true, 0, 0) { ok -> Learn.reviewed(c, l, qi, ok); warmup(i + 1) }
     }
 
     private fun episode() {
         val l = lesson ?: return finishUp()
         if (quizOnly || !l.audio.exists()) return quiz()
-        step = "Listening: ${l.title}"
+        step = "Now playing"
         question = null
         changed()
-        say("Lesson ${l.n} of ${l.subject}: ${l.title}. The quiz comes right after it.") {
+        val intro = (if (warm.isNotEmpty()) "Nice warm-up. " else "") +
+            "Now, lesson ${l.n} of ${l.subject}: ${l.title}. Listen closely: ${l.quiz.size} questions come right after."
+        say(intro) {
             main.post {
                 PodcastPlayer.onEnded = { f -> if (f == l.audio) h.post { if (inEpisode && !ended) quiz() } }
                 if (PodcastPlayer.file != l.audio || !PodcastPlayer.playing) PodcastPlayer.toggle(c, l.audio, l.title)
@@ -418,35 +508,49 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
         main.post { PodcastPlayer.onEnded = null }
         val l = lesson ?: return finishUp()
         if (l.quiz.isEmpty()) return finishUp()
-        step = "Quiz: ${l.title}"
+        step = "Quiz"
         question = null
         changed()
-        say("Quiz time: ${l.quiz.size} questions. Answer with the letter, or say the answer. Say repeat to hear one " +
-            "again, or skip.") { ask(l.quiz[0], l.subject, false) { ok -> after(l, 0, ok) } }
+        say("Quiz time! ${l.quiz.size} questions, 10 points each, more for a run in a row, and the last one counts double. " +
+            "Say the letter or the answer. Ready? Here we go.") { quizAsk(l, 0) }
     }
 
-    private fun after(l: Learn.Lesson, i: Int, ok: Boolean) {
-        if (ok) lessonRight++ else Learn.missed(c, l, i)
-        if (i + 1 >= l.quiz.size) finishUp() else ask(l.quiz[i + 1], l.subject, false) { o -> after(l, i + 1, o) }
+    private fun quizAsk(l: Learn.Lesson, i: Int) {
+        step = "Quiz"
+        ask(l.quiz[i], l.subject, false, i + 1, l.quiz.size) { ok ->
+            if (ok) lessonRight++ else Learn.missed(c, l, i)
+            if (i + 1 >= l.quiz.size) finishUp() else quizAsk(l, i + 1)
+        }
     }
 
-    private fun ask(q: Learn.Question, subject: String, review: Boolean, done: (Boolean) -> Unit) {
+    private fun ask(q: Learn.Question, subject: String, review: Boolean, no: Int, of: Int, done: (Boolean) -> Unit) {
         question = q
+        qNo = no
+        qOf = of
+        picked = -1
+        revealed = false
         heard = ""
         feedback = ""
         tries = 0
         this.subject = subject
         this.review = review
         answered = done
-        if (review) step = "Warm-up"
         changed()
-        read()
+        read(true)
     }
 
-    private fun read() {
+    private val last get() = !review && qNo == qOf && qOf >= 4
+
+    private fun read(first: Boolean = false) {
         val q = question ?: return
+        val lead = when {
+            !first -> ""
+            review -> "From before. "
+            last -> "Final question, for double points! "
+            else -> "Question $qNo. "
+        }
         val opts = if (q.trueFalse) "True or false?" else q.options.mapIndexed { i, o -> "${'A' + i}: $o." }.joinToString(" ")
-        say("${q.q} $opts") { listen() }
+        say("$lead${q.q} $opts") { listen() }
     }
 
     private fun listen() {
@@ -503,34 +607,32 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
 
     private fun letters(q: Learn.Question) = q.options.indices.joinToString(", ") { "${'A' + it}" }
 
-    // From the page: an option tapped (a passenger, or at a stop).
+    // From the page: an option tapped (a passenger, or parked).
     fun tap(i: Int) {
         val q = question ?: return
         if (answered == null || i !in q.options.indices) return
-        h.removeCallbacks(timeout)
-        listenId++
-        if (listening) host.carStopListening()
-        speech.stop()
-        then = null
+        quiet()
         result(i)
     }
 
     fun repeat() {
         if (answered == null) return
-        h.removeCallbacks(timeout)
-        listenId++
-        if (listening) host.carStopListening()
+        quiet()
         read()
     }
 
     fun skip() {
         if (answered == null) return
+        quiet()
+        result(-1)
+    }
+
+    private fun quiet() {
         h.removeCallbacks(timeout)
         listenId++
         if (listening) host.carStopListening()
         speech.stop()
         then = null
-        result(-1)
     }
 
     private fun result(pick: Int) {
@@ -539,27 +641,40 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
         answered = null
         val ok = pick == q.answer
         asked++
+        picked = pick
+        revealed = true
+        good = ok
         val gained: Int
         val text: String
         if (ok) {
             run++
             right++
-            gained = if (review) 5 else 10 + minOf(run - 1, 5) * 2
+            gained = (if (review) 5 else 10 + minOf(run - 1, 5) * 2) * (if (last) 2 else 1)
             points += gained
-            CarSounds.play(CarSounds.Sound.READY)
-            text = listOf("Correct!", "Yes!", "Nailed it.", "Exactly.", "That's right.").random() +
-                (if (run >= 3) " $run in a row!" else "") + " Plus $gained. ${q.why}"
+            val hype = when {
+                run == 3 -> " Three in a row!"
+                run == 5 -> " Five in a row. You're on fire!"
+                run >= 7 -> " $run in a row. Unstoppable!"
+                else -> ""
+            }
+            text = listOf("Correct!", "Yes!", "Nailed it!", "Exactly right.", "That's it!", "Spot on.").random() + hype +
+                " Plus $gained${if (last) ", double points" else ""}. ${q.why}"
         } else {
             run = 0
             gained = 0
-            CarSounds.play(CarSounds.Sound.ERROR)
-            text = (if (pick < 0) "The answer is ${q.said(q.answer)}." else "Not quite: it's ${q.said(q.answer)}.") + " ${q.why}"
+            text = (if (pick < 0) "The answer is ${q.said(q.answer)}."
+            else listOf("Not quite.", "Close, but no.", "Not this time.").random() + " It's ${q.said(q.answer)}.") + " ${q.why}"
         }
         val up = Learn.answered(c, subject, ok, gained, run)
-        news = if (up > 0) " Level up! You're level $up in $subject." else ""
+        CarSounds.play(when {
+            up > 0 -> CarSounds.Sound.LEVEL
+            ok && (run == 3 || run == 5 || run >= 7) -> CarSounds.Sound.STREAK
+            ok -> CarSounds.Sound.CORRECT
+            else -> CarSounds.Sound.WRONG
+        })
         feedback = text
         changed()
-        say(text + news) { done(ok) }
+        say(text + if (up > 0) " Level up! You're now level $up in $subject." else "") { done(ok) }
     }
 
     private fun finishUp() {
@@ -568,25 +683,31 @@ class LearnSession(private val c: Context, private val host: CarHost, private va
         question = null
         changed()
         if (l != null) Learn.played(c, l, lessonRight, l.quiz.size)
-        var extra = ""
+        val parts = ArrayList<String>()
+        parts += "That's the drive!"
+        if (asked > 0) parts += "You got $right of $asked, for $points points."
         if (l != null && l.quiz.size >= 4 && lessonRight == l.quiz.size) {
             Learn.bonus(c, l.subject, 20)
             points += 20
-            extra = " A perfect quiz: 20 bonus points."
+            parts += "A perfect quiz: 20 bonus points!"
         }
+        if (asked > 0 && Learn.drove(c, points)) parts += "That's your best drive yet."
         Learn.dayDone(c)
         val st = Learn.stats(c)
-        var next = ""
+        if (Learn.rank(st.xp) != Learn.rank(startXp)) parts += "New rank: you're now a ${Learn.rank(st.xp)}!"
+        if (startToday < Learn.DAILY_GOAL && st.today >= Learn.DAILY_GOAL) parts += "And you hit today's goal."
+        if (st.days > 1) parts += "Day streak: ${st.days}."
         if (l != null && Learn.autoNext(c) && Podcasts.writing?.finished != false &&
             Learn.lessons(c).none { it.subject.equals(l.subject, true) && Learn.score(c, it) == null && it.key != l.key } &&
-            Learn.writeNext(c, l.subject)) next = " Claude is writing your next lesson" + (l.next.takeIf { it.isNotBlank() }?.let { ": $it." } ?: ".")
-        val total = if (asked > 0) "You got $right of $asked, for $points points." else ""
-        say("That's the drive. $total$extra You're ${Learn.rank(st.xp)}, with ${st.xp} points. Day streak ${st.days}.$next") { finish() }
+            Learn.writeNext(c, l.subject)) parts += "Claude is writing your next lesson" +
+            (l.next.takeIf { it.isNotBlank() }?.let { ": $it." } ?: ".")
+        CarSounds.play(CarSounds.Sound.FANFARE)
+        say(parts.joinToString(" ")) { finish() }
     }
 
     private fun stopSaying() {
         answered = null
-        say("Okay, stopping here." + if (asked > 0) " $right of $asked, $points points." else "") { finish() }
+        say("Okay, stopping here." + if (asked > 0) " $right of $asked, $points points. Nice work." else "") { finish() }
     }
 
     // Ends at once (the page's Stop, or the end).

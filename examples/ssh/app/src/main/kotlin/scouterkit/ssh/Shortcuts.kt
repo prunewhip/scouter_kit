@@ -17,6 +17,16 @@ object Shortcuts {
     const val EXTRA = "source"
     const val DISPLAY = "display" // the display off / on
     const val NEXT = Settings.ACTION_NEXT
+    const val LEARN = "learn" // Learn's drive, started at once (LearnActivity)
+
+    // "Learning drive" on the home screen: one tap starts a drive.
+    fun pinLearn(context: Context): Boolean {
+        val manager = context.getSystemService(ShortcutManager::class.java) ?: return false
+        if (!manager.isRequestPinShortcutSupported) return false
+        val info = ShortcutInfo.Builder(context, "learn-drive").setShortLabel("Learning drive").setLongLabel("Start a learning drive")
+            .setIcon(Icon.createWithResource(context, R.mipmap.ic_vox)).setIntent(intent(context, LEARN)).build()
+        return runCatching { manager.requestPinShortcut(info, null) }.getOrDefault(false)
+    }
 
     // The launcher's list: the sources first, then the display.
     fun update(context: Context) {
@@ -68,6 +78,8 @@ class ShortcutActivity : Activity() {
         val settings = Settings(this)
         when {
             key.isEmpty() -> {}
+            key == Shortcuts.LEARN -> startActivity(Intent(this, LearnActivity::class.java).setAction(LearnActivity.DRIVE)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             key == Shortcuts.DISPLAY -> ScouterService.send(this, ScouterService.ACTION_DISPLAY)
             key == Settings.PHONE && !(Session.capturing && ScouterService.running) ->
                 startActivity(Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_SHARE, true)

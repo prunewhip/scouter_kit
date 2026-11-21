@@ -40,7 +40,7 @@ import kotlin.math.sin
 
 // The chimes, made here: soft bell-like sines (a quick attack, a long tail), through the car like the speech.
 object CarSounds {
-    enum class Sound { ON, LISTEN, SEND, THINK, ERROR, CANCEL, READY }
+    enum class Sound { ON, LISTEN, SEND, THINK, ERROR, CANCEL, READY, CORRECT, WRONG, STREAK, LEVEL, FANFARE }
 
     private const val RATE = 44100
     private val made = HashMap<Sound, ShortArray>()
@@ -92,6 +92,19 @@ object CarSounds {
             Sound.CANCEL -> synth(note(659.3f, 0f, 0.22f, 0.7f), note(523.3f, 0.09f, 0.34f, 0.7f))
             // A single clear tone: done, ready again.
             Sound.READY -> synth(note(1318.5f, 0f, 0.3f, 0.5f))
+            // Learn's quiz: C then E above, bright: right.
+            Sound.CORRECT -> synth(note(1046.5f, 0f, 0.2f, 0.7f), note(1318.5f, 0.08f, 0.4f, 0.8f))
+            // Two soft low steps down: not this time.
+            Sound.WRONG -> synth(note(311.1f, 0f, 0.28f, 0.6f), note(261.6f, 0.15f, 0.45f, 0.6f))
+            // C E G C, quick: a run of right answers.
+            Sound.STREAK -> synth(note(1046.5f, 0f, 0.25f, 0.6f), note(1318.5f, 0.07f, 0.25f, 0.6f),
+                note(1568f, 0.14f, 0.25f, 0.6f), note(2093f, 0.21f, 0.5f, 0.7f))
+            // G C E G, slower, the last held: a level up.
+            Sound.LEVEL -> synth(note(784f, 0f, 0.3f, 0.6f), note(1046.5f, 0.12f, 0.3f, 0.6f),
+                note(1318.5f, 0.24f, 0.3f, 0.6f), note(1568f, 0.36f, 0.9f, 0.8f), note(1046.5f, 0.36f, 0.9f, 0.4f))
+            // The drive's end: C E G, then the C above with its fifth.
+            Sound.FANFARE -> synth(note(523.3f, 0f, 0.3f, 0.6f), note(659.3f, 0.13f, 0.3f, 0.6f), note(784f, 0.26f, 0.3f, 0.6f),
+                note(1046.5f, 0.4f, 1.1f, 0.8f), note(784f, 0.4f, 1.1f, 0.4f))
         }
     }
 

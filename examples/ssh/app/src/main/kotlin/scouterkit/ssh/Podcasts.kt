@@ -672,7 +672,7 @@ object Podcasts {
                 val body = out.substring(minOf(out.length, eol + 1))
                 if (rc != 0) throw IllegalStateException(body.lines().lastOrNull { it.isNotBlank() }?.take(200) ?: "Claude had a problem")
                 val all = scriptOf(body)
-                val text = all.substringBefore(Learn.QUIZ_MARK).trim()
+                val text = Learn.split(all).first.trim()
                 if (parse(text, topic).blocks.none { it is Block.Line }) throw IllegalStateException("Claude's answer had no script in it")
                 val f = add(app, text.take(MAX_CHARS), null)
                 val st = parse(text, topic).style ?: style.id
