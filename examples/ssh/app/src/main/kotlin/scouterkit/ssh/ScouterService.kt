@@ -637,6 +637,7 @@ class ScouterService : Service() {
     }
 
     override fun onDestroy() {
+        Learn.session?.finish()
         running = false
         ended = true
         look.removeCallbacks(lookTick)
@@ -1623,6 +1624,28 @@ class ScouterService : Service() {
     }
 
     // Vox in front (MainActivity): the service becomes a microphone service too, if the microphone is allowed.
+    // Learn's drive (LearnActivity): "start" (or "start:<lesson>"), "quiz:<lesson>", "stop", "tap:<n>", "repeat",
+    // "skip", "quiznow" (the episode left for its quiz). Through Car mode's host: its microphone and speech.
+    private fun learn(cmd: String) {
+        val s = Learn.session
+        when {
+            cmd == "start" || cmd.startsWith("start:") || cmd.startsWith("quiz:") -> {
+                s?.finish()
+                micForeground()
+                val key = cmd.substringAfter(':', "").ifEmpty { null }
+                val n = LearnSession(this, carHost, key, cmd.startsWith("quiz:"))
+                Learn.session = n
+                Learn.changed()
+                n.start()
+            }
+            cmd == "stop" -> s?.finish()
+            cmd.startsWith("tap:") -> s?.tap(cmd.removePrefix("tap:").toIntOrNull() ?: -1)
+            cmd == "repeat" -> s?.repeat()
+            cmd == "skip" -> s?.skip()
+            cmd == "quiznow" -> s?.skipEpisode()
+        }
+    }
+
     private fun micForeground() {
         if (micService || checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
         micService = true
@@ -1713,6 +1736,7 @@ class ScouterService : Service() {
     // (Alt+C: the phone's screen, shared first if it is not).
     private fun hotkey(what: String) {
         when {
+            what.startsWith("learn:") -> learn(what.removePrefix("learn:"))
             what == "althold:on" -> if (Session.overlay.isEmpty() || Session.overlay == Panels.NOTE) {
                 altHelp = true
                 panelOpen(Panels.HELP)

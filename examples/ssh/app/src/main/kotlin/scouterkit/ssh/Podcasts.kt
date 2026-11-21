@@ -645,7 +645,10 @@ object Podcasts {
         return t
     }
 
-    fun write(c: Context, topic: String, style: Style, minutes: Int, make: Boolean): Writing? {
+    // [ask]: the whole request instead of prompt()'s (Learn's lessons); [after] gets the saved script and everything
+    // Claude wrote (a lesson's quiz comes after its script, cut off the saved script at Learn.QUIZ_MARK).
+    fun write(c: Context, topic: String, style: Style, minutes: Int, make: Boolean, ask: String? = null,
+              after: ((File, String) -> Unit)? = null): Writing? {
         if (writing?.finished == false) return null
         val app = c.applicationContext
         val w = Writing(topic, minutes, make)
@@ -655,7 +658,7 @@ object Podcasts {
                 val server = server(app) ?: throw IllegalStateException("Add a server for Claude in Vox first")
                 val name = slug(topic) + "-" + java.text.SimpleDateFormat("MMdd-HHmm", java.util.Locale.US).format(java.util.Date())
                 val out = try {
-                    Bootstrap(Vault(app)).run(server.host, server.port, server.user, writeCommand(prompt(topic, style, minutes) + WRITE_MORE, name))
+                    Bootstrap(Vault(app)).run(server.host, server.port, server.user, writeCommand(ask ?: (prompt(topic, style, minutes) + WRITE_MORE), name))
                 } catch (e: Bootstrap.UnknownHost) {
                     throw IllegalStateException("${server.name} is not trusted yet: open its terminal once in Vox")
                 } catch (e: Exception) {
@@ -668,11 +671,13 @@ object Podcasts {
                 val rc = out.substring(at + 7, eol).trim().toIntOrNull() ?: 1
                 val body = out.substring(minOf(out.length, eol + 1))
                 if (rc != 0) throw IllegalStateException(body.lines().lastOrNull { it.isNotBlank() }?.take(200) ?: "Claude had a problem")
-                val text = scriptOf(body)
+                val all = scriptOf(body)
+                val text = all.substringBefore(Learn.QUIZ_MARK).trim()
                 if (parse(text, topic).blocks.none { it is Block.Line }) throw IllegalStateException("Claude's answer had no script in it")
                 val f = add(app, text.take(MAX_CHARS), null)
                 val st = parse(text, topic).style ?: style.id
                 app.getSharedPreferences("podcasts", Context.MODE_PRIVATE).edit().putString("style:${f.name}", st).apply()
+                after?.let { a -> runCatching { a(f, all) }.onFailure { Log.w(ScouterService.TAG, "podcast: after writing: ${it.message}") } }
                 w.result = f
                 Log.i(ScouterService.TAG, "podcast: Claude wrote '${f.name}' in ${(SystemClock.elapsedRealtime() - w.started) / 1000} s")
                 if (make && KokoroModel.ready(app)) makeFile(app, f) else notice(app, "Script ready", parse(text, topic).title)
@@ -756,6 +761,7 @@ object PodcastPlayer {
     var title = ""
         private set
     var onChange: (() -> Unit)? = null
+    var onEnded: ((File) -> Unit)? = null // an episode heard to its end (Learn's drive goes on to the quiz)
 
     val playing: Boolean get() = out?.isPlaying == true
     val position: Int get() = out?.pos ?: 0
@@ -1003,6 +1009,7 @@ object PodcastPlayer {
         pausedAt = SystemClock.elapsedRealtime()
         dropFocus()
         changed()
+        onEnded?.invoke(audio)
     }
 
     fun play() {

@@ -406,6 +406,7 @@ class MainActivity : Activity() {
         talkApp = RoundAction(this, "terminal", "Talk") { ScouterService.send(this, ScouterService.ACTION_VOICE, "mode" to "voicemode") }
         val apps = listOf(listenApp, RoundAction(this, "chat", "Ask") { listen("ask") },
             RoundAction(this, "headphones", "Podcasts") { selectTab(PODCAST_TAB) }, carApp,
+            RoundAction(this, "bolt", "Learn") { startActivity(Intent(this, LearnActivity::class.java)) },
             RoundAction(this, "captions", "Captions") {
                 if (!ScouterService.running) android.widget.Toast.makeText(this, "Start Vox first", android.widget.Toast.LENGTH_SHORT).show()
                 else ScouterService.send(this, ScouterService.ACTION_PANEL, "do" to "captions")
