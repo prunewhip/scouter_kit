@@ -87,6 +87,8 @@ static_assert(std::endian::native == std::endian::little,
 
 namespace scouter_kit::g1 {
 
+std::atomic<int> g_link_units{SCOUTER_G1_LINK_MIN}; // the active interval asked for (SetActiveLink)
+
 Arm left, right;
 
 int64_t NowUs() {
@@ -101,6 +103,7 @@ namespace {
 
 constexpr uint32_t kArenaBytes = 262144;
 constexpr int kPanelW = 640;
+constexpr int kVideoMaxW = 2048; // VIDEOX planes up to this wide (a canvas the panel shows part of)
 constexpr int kPanelH = 480;
 constexpr int kRowBytes = kPanelW / 2;
 
@@ -166,6 +169,8 @@ enum Op : uint8_t {
   OP_DRAW = 0x53,
   OP_LINE = 0x54,
   OP_VIDEO = 0x55,
+  OP_VIDEOX = 0x57,
+  OP_VIDEOT = 0x58,
   OP_ASSET_LOAD = 0x56,
 };
 
@@ -241,8 +246,10 @@ int Operands(uint8_t op) {
   case OP_LINE: return 7;
   case OP_BLIT: return 12;
   case OP_GLYPHS: return 9;
-  case OP_DRAW: return 8;
-  case OP_VIDEO: return 10;
+  case OP_DRAW:
+  case OP_VIDEOT: return 8;
+  case OP_VIDEO:
+  case OP_VIDEOX: return 10;
   case OP_ASSET_LOAD: return 4;
   default:
     if (op >= OP_ADD && op <= OP_SAR) return 3;
@@ -262,7 +269,7 @@ const char *OpName(uint8_t op) {
       {OP_NOTIFY, "NOTIFY"}, {OP_SYS_READ, "SYS_READ"},   {OP_SYS_WRITE, "SYS_WRITE"},
       {OP_FILL, "FILL"},     {OP_BLIT, "BLIT"},           {OP_GLYPHS, "GLYPHS"},
       {OP_DRAW, "DRAW"},     {OP_LINE, "LINE"},           {OP_VIDEO, "VIDEO"},
-      {OP_ASSET_LOAD, "ASSET_LOAD"}};
+      {OP_VIDEOX, "VIDEOX"}, {OP_VIDEOT, "VIDEOT"}, {OP_ASSET_LOAD, "ASSET_LOAD"}};
   auto it = names.find(op);
   if (it != names.end()) return it->second;
   if (op >= OP_ADD && op <= OP_SAR) return "arithmetic";
@@ -562,7 +569,9 @@ void Program::Op(uint8_t opcode, std::initializer_list<ArenaWord> operands, Labe
     return;
   }
   std::vector<ArenaWord> ops(operands);
-  if (policy_start_ >= 0 && (opcode == OP_DRAW || opcode == OP_VIDEO)) ops[4] = PolicyX(ops[4]); // dst_x, x
+  if (policy_start_ >= 0 && (opcode == OP_DRAW || opcode == OP_VIDEO || opcode == OP_VIDEOX))
+    ops[4] = PolicyX(ops[4]); // dst_x, x
+  if (policy_start_ >= 0 && opcode == OP_VIDEOT) ops[3] = PolicyX(ops[3]);
   std::vector<uint8_t> head;
   PutIns(head, opcode, ops.data(), k, 0);
   if (!HasTarget(opcode)) {
@@ -675,6 +684,16 @@ void Program::Video(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h
   Op(OP_VIDEO, {bitmap, stride, w, h, x, y, level, src, n, state});
 }
 
+void Program::VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
+                     ArenaWord levels, ArenaWord src, ArenaWord n, ArenaWord state) {
+  Op(OP_VIDEOX, {bitmap, stride, w, h, x, y, levels, src, n, state});
+}
+
+void Program::VideoT(ArenaWord frame, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y, ArenaWord src, ArenaWord n,
+                     ArenaWord state) {
+  Op(OP_VIDEOT, {frame, w, h, x, y, src, n, state});
+}
+
 void Program::AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n) {
   Op(OP_ASSET_LOAD, {id, dst, off, n});
 }
@@ -750,6 +769,49 @@ struct RangeEncoder {
   }
 };
 
+// ---- VIDEOT (VM.md §3.9): the arm's decoder (vm_videot_decode) exactly, plus the choices ----
+namespace vt {
+enum : uint32_t { kSkip = 0, kMvz = 3, kMvs = 7, kMvm = 9, kCbp = 25, kNz = 28, kEob = 76, kGt1 = 92, kMag = 96,
+                  kProbs = 128 };
+constexpr uint8_t kZig[16] = {0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15};
+
+void Wht(const int32_t *in, int32_t *out) {
+  int32_t t[16];
+  for (int i = 0; i < 4; i++) {
+    int32_t p = in[i * 4], q = in[i * 4 + 1], u = in[i * 4 + 2], s = in[i * 4 + 3];
+    t[i * 4] = p + q + u + s, t[i * 4 + 1] = p + q - u - s, t[i * 4 + 2] = p - q - u + s, t[i * 4 + 3] = p - q + u - s;
+  }
+  for (int j = 0; j < 4; j++) {
+    int32_t p = t[j], q = t[4 + j], u = t[8 + j], s = t[12 + j];
+    out[j] = p + q + u + s, out[4 + j] = p + q - u - s, out[8 + j] = p - q - u + s, out[12 + j] = p - q + u - s;
+  }
+}
+
+struct Coder {
+  RangeEncoder &rc;
+  void Bit(uint32_t i, bool b) { rc.Bit(i, b); }
+  void Raw(bool b) {
+    rc.range >>= 1;
+    if (b) rc.low += rc.range;
+    while (rc.range < 1u << 24) {
+      rc.range <<= 8;
+      rc.ShiftLow();
+    }
+  }
+  void UVal(uint32_t m, uint32_t v) { // unary to 8, then Exp-Golomb (the arm's vt_uval)
+    for (uint32_t i = 0; i < 8; i++) {
+      Bit(m + i, v > i);
+      if (v <= i) return;
+    }
+    uint32_t x = v - 8 + 1, k = 0;
+    while (x >> (k + 1)) k++;
+    for (uint32_t i = 0; i < k; i++) Raw(false);
+    Raw(true);
+    for (uint32_t i = k; i-- > 0;) Raw((x >> i) & 1);
+  }
+};
+} // namespace vt
+
 uint32_t AboveClass(uint32_t b1, uint32_t w, uint32_t code) {
   if (b1 >= w) return 6;
   if (code == 0) return 0;
@@ -778,9 +840,538 @@ uint32_t Transitions(const uint8_t *row, uint32_t w, uint16_t *t) {
 
 } // namespace
 
-VideoEncoder::VideoEncoder(int width, int height)
+VideoEncoder::VideoEncoder(int width, int height) : VideoEncoder(width, height, kPanelW) {}
+
+VideoEncoder::VideoEncoder(int width, int height, int max_width)
     : w_(width), h_(height), nb_(width > 0 ? (width + 7) / 8 : 0), p_(kVProbs, 2048) {
-  if (w_ >= 1 && w_ <= kPanelW && h_ >= 1 && h_ <= kPanelH) prev_.assign(size_t(nb_) * size_t(h_), 0);
+  if (w_ >= 1 && w_ <= std::min(max_width, kVideoMaxW) && h_ >= 1 && h_ <= kPanelH)
+    prev_.assign(size_t(nb_) * size_t(h_), 0);
+}
+
+bool VideoEncoder::Move(int y0, int rows, int dy) {
+  if (prev_.empty() || y0 < 0 || rows < 2 || y0 + rows > h_ || dy == 0 || std::abs(dy) >= rows) return false;
+  const size_t nb = size_t(nb_);
+  if (dy > 0)
+    for (int y = y0 + rows - 1; y >= y0 + dy; y--)
+      std::memcpy(prev_.data() + size_t(y) * nb, prev_.data() + size_t(y - dy) * nb, nb);
+  else
+    for (int y = y0; y <= y0 + rows - 1 + dy; y++)
+      std::memcpy(prev_.data() + size_t(y) * nb, prev_.data() + size_t(y - dy) * nb, nb);
+  return true;
+}
+
+bool VideoEncoder::MoveRect(int x, int y, int w, int h, int dx, int dy) {
+  if (prev_.empty() || w < 1 || h < 1 || x < 0 || y < 0 || x + w > w_ || y + h > h_ || x + dx < 0 || y + dy < 0 ||
+      x + dx + w > w_ || y + dy + h > h_)
+    return false;
+  const size_t nb = size_t(nb_);
+  std::vector<uint8_t> tmp(size_t(w) * size_t(h));
+  for (int r = 0; r < h; r++)
+    for (int c = 0; c < w; c++) {
+      int sx = x + c;
+      tmp[size_t(r) * size_t(w) + size_t(c)] = prev_[size_t(y + r) * nb + size_t(sx) / 8] >> (7 - sx % 8) & 1;
+    }
+  for (int r = 0; r < h; r++)
+    for (int c = 0; c < w; c++) {
+      int tx = x + dx + c;
+      uint8_t &b = prev_[size_t(y + dy + r) * nb + size_t(tx) / 8];
+      b = uint8_t((b & ~(0x80 >> (tx % 8))) | (tmp[size_t(r) * size_t(w) + size_t(c)] << (7 - tx % 8)));
+    }
+  return true;
+}
+
+TransformVideoEncoder::TransformVideoEncoder(int width, int height)
+    : w_(width), h_(height), ref_(size_t(std::max(width, 0)) * size_t(std::max(height, 0)), 128),
+      p_(vt::kProbs, 2048) {}
+
+std::vector<uint8_t> TransformVideoEncoder::Encode(std::span<const uint8_t> luma, int q, bool redraw,
+                                                   size_t max_bytes) {
+  const int w = w_, h = h_, mw = w / 8, mh = h / 8;
+  if (w < 8 || w > 320 || w % 8 || h < 8 || h > 240 || h % 8 || q < 1 || q > 63 ||
+      luma.size() < size_t(w) * size_t(h))
+    return {};
+  const bool flat = !started_;
+  const size_t npx = size_t(w) * size_t(h);
+  const uint32_t flags = (flat ? 1u : 0u) | (redraw ? 2u : 0u) | (flat ? 4u : 0u);
+  const int32_t step = 4 * q;
+  const double lambda = rdo_ * double(q) * double(q);
+  std::vector<uint16_t> probs = flat ? std::vector<uint16_t>(vt::kProbs, 2048) : p_;
+  std::vector<uint8_t> out = {uint8_t(flags), uint8_t(q)}, rec(npx);
+  RangeEncoder rc{probs.data(), out};
+  vt::Coder co{rc};
+  // bits a decision costs with the model as it stands (the estimate the choices below are made on)
+  static const std::vector<float> kCost = [] {
+    std::vector<float> t(4097);
+    for (int i = 0; i <= 4096; i++) t[size_t(i)] = float(-std::log2(std::max(i, 1) / 4096.0));
+    return t;
+  }();
+  auto cost = [&](uint32_t i, bool b) { return double(kCost[size_t(b ? 4096 - probs[i] : probs[i])]); };
+  auto ucost = [&](uint32_t m, uint32_t v) {
+    double r = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+      r += cost(m + i, v > i);
+      if (v <= i) return r;
+    }
+    uint32_t x = v - 8 + 1, k = 0;
+    while (x >> (k + 1)) k++;
+    return r + 2 * k + 1;
+  };
+  std::vector<uint8_t> top(size_t(mw), 0);
+  for (int by = 0; by < mh; by++) {
+    int pmx = 0, pmy = 0;
+    bool lskip = false;
+    for (int bx = 0; bx < mw; bx++) {
+      auto at = [&](const std::vector<uint8_t> &f, int x, int y) {
+        return int32_t(f[size_t(std::clamp(y, 0, h - 1)) * size_t(w) + size_t(std::clamp(x, 0, w - 1))]);
+      };
+      auto cur = [&](int x, int y) { return int32_t(luma[size_t(y) * size_t(w) + size_t(x)]); };
+      // motion: +-7 around nothing, the left block's vector favoured (it codes in fewer bits)
+      int mx = 0, my = 0;
+      if (!flat) {
+        int best = INT32_MAX;
+        for (int dy = -7; dy <= 7; dy++)
+          for (int dx = -7; dx <= 7; dx++) {
+            int sad = (std::abs(dx - pmx) + std::abs(dy - pmy)) * 4;
+            for (int y = 0; y < 8 && sad < best; y++)
+              for (int x = 0; x < 8; x++)
+                sad += std::abs(cur(bx * 8 + x, by * 8 + y) - at(ref_, bx * 8 + x + dx, by * 8 + y + dy));
+            if (sad < best) best = sad, mx = dx, my = dy;
+          }
+      }
+      int32_t pred[64], lev[4][16], res[4][16];
+      bool cb[4] = {}, any = false;
+      for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) pred[y * 8 + x] = flat ? 128 : at(ref_, bx * 8 + x + mx, by * 8 + y + my);
+      double jcoded = 0;
+      for (int b = 0; b < 4; b++) {
+        int32_t in[16], c[16], src16[16], pr16[16];
+        for (int i = 0; i < 16; i++) {
+          int y = (b / 2) * 4 + i / 4, x = (b % 2) * 4 + i % 4;
+          src16[i] = cur(bx * 8 + x, by * 8 + y);
+          pr16[i] = pred[y * 8 + x];
+          in[i] = src16[i] - pr16[i];
+        }
+        vt::Wht(in, c);
+        for (int i = 0; i < 16; i++) { // the arm multiplies a level by step: rounded with a dead zone of a third
+          int32_t m = std::min<int32_t>((std::abs(c[i]) + step / 3) / step, 2047);
+          lev[b][i] = c[i] < 0 ? -m : m;
+        }
+        if (rdo_ > 0) {
+          const uint32_t cbx = vt::kCbp + (b == 0 ? 0 : b == 3 ? 2 : 1);
+          auto jof = [&](const int32_t *l16) { // error + lambda x bits of this 4 x 4 block as l16 codes it
+            int last = -1;
+            for (int i = 0; i < 16; i++)
+              if (l16[vt::kZig[i]]) last = i;
+            double r = cost(cbx, last >= 0), d = 0;
+            int32_t coef[16] = {}, rr[16];
+            uint32_t nnz = 0;
+            for (int i = 0; i <= last; i++) {
+              int32_t l = l16[vt::kZig[i]];
+              r += cost(vt::kNz + 3 * uint32_t(i) + std::min(nnz, 2u), l != 0);
+              if (!l) continue;
+              nnz++;
+              uint32_t m = uint32_t(std::abs(l)), cls = uint32_t(i) / 4;
+              r += 1 + cost(vt::kGt1 + cls, m > 1) + (m > 1 ? ucost(vt::kMag + 8 * cls, m - 2) : 0) +
+                   cost(vt::kEob + uint32_t(i), i == last);
+              coef[vt::kZig[i]] = l * step;
+            }
+            vt::Wht(coef, rr);
+            for (int i = 0; i < 16; i++) {
+              int32_t e = src16[i] - std::clamp(pr16[i] + (last >= 0 ? (rr[i] + 8) >> 4 : 0), 0, 255);
+              d += double(e) * double(e);
+            }
+            return d + lambda * r;
+          };
+          double best = jof(lev[b]);
+          for (int i = 15; i >= 0; i--) { // each level one step toward zero while that pays, last first
+            int32_t &l = lev[b][vt::kZig[i]];
+            while (l) {
+              int32_t keep = l;
+              l -= l > 0 ? 1 : -1;
+              double j = jof(lev[b]);
+              if (j < best) {
+                best = j;
+              } else {
+                l = keep;
+                break;
+              }
+            }
+          }
+          int32_t zero[16] = {};
+          double jz = jof(zero);
+          if (jz <= best) {
+            std::memcpy(lev[b], zero, sizeof zero);
+            best = jz;
+          }
+          jcoded += best;
+        }
+        for (int i = 0; i < 16; i++) cb[b] = cb[b] || lev[b][i];
+        any = any || cb[b];
+      }
+      bool skip = !any && mx == 0 && my == 0;
+      if (rdo_ > 0 && !skip) { // a skipped block keeps the frame's pixels (flat: grey 128): cheaper, if close enough
+        double dskip = 0, rmv = 0;
+        for (int y = 0; y < 8; y++)
+          for (int x = 0; x < 8; x++) {
+            int32_t e = cur(bx * 8 + x, by * 8 + y) - (flat ? 128 : at(ref_, bx * 8 + x, by * 8 + y));
+            dskip += double(e) * double(e);
+          }
+        if (!flat) {
+          int pm[2] = {pmx, pmy}, mv[2] = {mx, my};
+          for (int c = 0; c < 2; c++) {
+            int d = mv[c] - pm[c];
+            rmv += cost(vt::kMvz + 2 * uint32_t(c) + (pm[c] != 0), d != 0);
+            if (d) rmv += cost(vt::kMvs + uint32_t(c), d < 0) + ucost(vt::kMvm + 8 * uint32_t(c), uint32_t(std::abs(d) - 1));
+          }
+        }
+        const uint32_t sk = vt::kSkip + (bx ? lskip : 0) + top[size_t(bx)];
+        if (dskip + lambda * cost(sk, true) <= jcoded + lambda * (cost(sk, false) + rmv)) {
+          skip = true;
+          mx = my = 0;
+          for (int b = 0; b < 4; b++) cb[b] = false;
+          for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++) pred[y * 8 + x] = flat ? 128 : at(ref_, bx * 8 + x, by * 8 + y);
+        }
+      }
+      co.Bit(vt::kSkip + (bx ? lskip : 0) + top[size_t(bx)], skip);
+      if (!skip) {
+        if (!flat) {
+          int pm[2] = {pmx, pmy}, mv[2] = {mx, my};
+          for (int c = 0; c < 2; c++) {
+            int d = mv[c] - pm[c];
+            co.Bit(vt::kMvz + 2 * uint32_t(c) + (pm[c] != 0), d != 0);
+            if (d) {
+              co.Bit(vt::kMvs + uint32_t(c), d < 0);
+              co.UVal(vt::kMvm + 8 * uint32_t(c), uint32_t(std::abs(d) - 1));
+            }
+          }
+        }
+        for (int b = 0; b < 4; b++) {
+          co.Bit(vt::kCbp + (b == 0 ? 0 : b == 3 ? 2 : 1), cb[b]);
+          if (!cb[b]) continue;
+          int last = 0;
+          for (int i = 0; i < 16; i++)
+            if (lev[b][vt::kZig[i]]) last = i;
+          uint32_t nnz = 0;
+          int32_t coef[16] = {};
+          for (int i = 0; i <= last; i++) {
+            int32_t l = lev[b][vt::kZig[i]];
+            co.Bit(vt::kNz + 3 * uint32_t(i) + std::min(nnz, 2u), l != 0);
+            if (!l) continue;
+            nnz++;
+            co.Raw(l < 0);
+            uint32_t m = uint32_t(std::abs(l)), cls = uint32_t(i) / 4;
+            co.Bit(vt::kGt1 + cls, m > 1);
+            if (m > 1) co.UVal(vt::kMag + 8 * cls, m - 2);
+            coef[vt::kZig[i]] = l * step;
+            co.Bit(vt::kEob + uint32_t(i), i == last);
+          }
+          vt::Wht(coef, res[b]);
+        }
+      }
+      for (int y = 0; y < 8; y++)
+        for (int x = 0; x < 8; x++) {
+          int b = (y / 4) * 2 + x / 4;
+          int32_t d = cb[b] && !skip ? (res[b][(y % 4) * 4 + x % 4] + 8) >> 4 : 0;
+          rec[size_t(by * 8 + y) * size_t(w) + size_t(bx * 8 + x)] = uint8_t(std::clamp(pred[y * 8 + x] + d, 0, 255));
+        }
+      top[size_t(bx)] = skip;
+      lskip = skip;
+      pmx = skip ? 0 : mx;
+      pmy = skip ? 0 : my;
+    }
+  }
+  rc.Finish();
+  if (out.size() > max_bytes) return {};
+  ref_ = std::move(rec);
+  p_ = std::move(probs);
+  started_ = true;
+  return out;
+}
+
+PlaneVideoEncoder::PlaneVideoEncoder(int width, int height, int planes, Coding coding)
+    : w_(width), h_(height), n_(planes), coding_(coding) {
+  if (w_ < 1 || w_ > kVideoMaxW || h_ < 1 || h_ > kPanelH || n_ < 1 || n_ > 4) {
+    n_ = 0;
+    return;
+  }
+  for (int p = 0; p < n_; p++) enc_.emplace_back(w_, h_, kVideoMaxW); // VIDEOX planes may be wider (a canvas)
+  last_.assign(size_t(w_) * size_t(h_), 0);
+  pp_.assign(size_t(n_), std::vector<uint16_t>(kPixelState / 2, 2048));
+}
+
+// One plane pixel by pixel, as vm_videox_pixels decodes it (VM.md 3.8): a "row same" decision (context 2048 + the
+// row above's), then each pixel from W, WW, NW, N, NE of this frame, the previous frame's pixel and its right and
+// lower neighbours, and the pixel's bits of the next three planes up (already coded: planes go top down).
+std::vector<uint8_t> PlaneVideoEncoder::PixelPlane(const std::vector<uint8_t> &cur, const std::vector<uint8_t> &prev,
+                                                   int p, bool redraw, std::vector<uint16_t> &probs) const {
+  std::vector<uint8_t> out = {uint8_t((pstarted_ ? 0 : 1) | (redraw ? 2 : 0))};
+  if (!pstarted_) std::fill(probs.begin(), probs.end(), uint16_t(2048));
+  RangeEncoder e{probs.data(), out};
+  const int w = w_, h = h_;
+  auto bit = [&](const std::vector<uint8_t> &img, int x, int y) -> uint32_t {
+    return uint32_t(img[size_t(y) * size_t(w) + size_t(x)] >> p) & 1;
+  };
+  uint32_t prev_same = 1;
+  for (int y = 0; y < h; y++) {
+    bool same = true;
+    for (int x = 0; x < w && same; x++) same = bit(cur, x, y) == bit(prev, x, y);
+    e.Bit(2048 + prev_same, same);
+    prev_same = same;
+    if (same) continue;
+    for (int x = 0; x < w; x++) {
+      uint32_t c = (x ? bit(cur, x - 1, y) : 0) | (x > 1 ? bit(cur, x - 2, y) : 0) << 1;
+      if (y) c |= (x ? bit(cur, x - 1, y - 1) : 0) << 2 | bit(cur, x, y - 1) << 3 | (x + 1 < w ? bit(cur, x + 1, y - 1) : 0) << 4;
+      c |= bit(prev, x, y) << 5 | (x + 1 < w ? bit(prev, x + 1, y) : 0) << 6 | (y + 1 < h ? bit(prev, x, y + 1) : 0) << 7;
+      uint32_t up = 0;
+      for (int k = 0; k < 3; k++)
+        if (p + 1 + k < n_) up |= (uint32_t(cur[size_t(y) * size_t(w) + size_t(x)]) >> (p + 1 + k) & 1) << k;
+      e.Bit(c | up << 8, bit(cur, x, y));
+    }
+  }
+  e.Finish();
+  return out;
+}
+
+std::vector<uint8_t> PlaneVideoEncoder::Encode(std::span<const uint8_t> index, bool redraw, RowMove move,
+                                               size_t max_bytes, bool scale2, BlockMove block, const Sprite &sprite) {
+  if (n_ == 0) return {};
+  const size_t px = size_t(w_) * size_t(h_);
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  if (block.w && (block.w < 1 || block.h < 1 || block.x < 0 || block.y < 0 || block.x + block.w > w_ ||
+                  block.y + block.h > h_ || block.x + block.dx < 0 || block.y + block.dy < 0 ||
+                  block.x + block.dx + block.w > w_ || block.y + block.dy + block.h > h_))
+    return {};
+  std::vector<uint8_t> out = {uint8_t((move.rows ? 1 : 0) | (redraw ? 2 : 0) | (scale2 ? 4 : 0) |
+                                      (coding_ == kPixels ? 8 : 0) | (block.w ? 16 : 0) | (sprite.on ? 32 : 0)),
+                              uint8_t(n_)};
+  // the extension fields after the row move (written below, after it)
+  std::vector<uint8_t> ext;
+  auto p16 = [&](int v) {
+    ext.push_back(uint8_t(v));
+    ext.push_back(uint8_t(unsigned(v) >> 8));
+  };
+  if (block.w) {
+    for (int v : {block.x, block.y, block.w, block.h, block.dx & 0xFFFF, block.dy & 0xFFFF}) p16(v);
+  }
+  if (sprite.on) {
+    for (int v : {sprite.rx, sprite.ry, sprite.rw, sprite.rh, sprite.x & 0xFFFF, sprite.y & 0xFFFF}) p16(v);
+    for (int k = 0; k < 4; k++) ext.push_back(uint8_t(sprite.address >> (8 * k)));
+  }
+  // the frame the arm will hold before decoding: the row move, then the block move
+  std::vector<uint8_t> base = last_;
+  auto shift = [&](std::vector<uint8_t> &img) {
+    if (move.rows) {
+      std::vector<uint8_t> t = img;
+      for (int y = move.y0; y < move.y0 + move.rows; y++) {
+        int sy = y - move.dy;
+        if (sy >= move.y0 && sy < move.y0 + move.rows)
+          std::copy_n(t.begin() + std::ptrdiff_t(sy) * w_, w_, img.begin() + std::ptrdiff_t(y) * w_);
+      }
+    }
+    if (block.w) {
+      std::vector<uint8_t> t = img;
+      for (int r = 0; r < block.h; r++)
+        for (int c = 0; c < block.w; c++)
+          img[size_t(block.y + block.dy + r) * size_t(w_) + size_t(block.x + block.dx + c)] =
+              t[size_t(block.y + r) * size_t(w_) + size_t(block.x + c)];
+    }
+  };
+  if (coding_ == kPixels) {
+    if (move.rows) {
+      if (move.y0 < 0 || move.rows < 2 || move.y0 + move.rows > h_ || move.dy == 0 || std::abs(move.dy) >= move.rows)
+        return {};
+      for (int v : {move.y0, move.rows, move.dy & 0xFFFF}) {
+        out.push_back(uint8_t(v));
+        out.push_back(uint8_t(v >> 8));
+      }
+    }
+    out.insert(out.end(), ext.begin(), ext.end());
+    shift(base);
+    std::vector<uint8_t> cur(px), prev = base;
+    for (size_t i = 0; i < px; i++) cur[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
+    auto pp = pp_;
+    std::vector<std::vector<uint8_t>> recs(static_cast<size_t>(n_));
+    for (int p = n_ - 1; p >= 0; p--) recs[size_t(p)] = PixelPlane(cur, prev, p, redraw, pp[size_t(p)]);
+    for (int p = 0; p < n_; p++) {
+      const auto &r = recs[size_t(p)];
+      out.push_back(uint8_t(r.size()));
+      out.push_back(uint8_t(r.size() >> 8));
+      out.push_back(uint8_t(r.size() >> 16));
+      out.insert(out.end(), r.begin(), r.end());
+    }
+    if (out.size() > max_bytes) return {};
+    pp_ = std::move(pp);
+    pstarted_ = true;
+    last_ = std::move(cur);
+    return out;
+  }
+  if (move.rows) {
+    if (move.y0 < 0 || move.rows < 2 || move.y0 + move.rows > h_ || move.dy == 0 || std::abs(move.dy) >= move.rows)
+      return {};
+    for (int v : {move.y0, move.rows, move.dy & 0xFFFF}) {
+      out.push_back(uint8_t(v));
+      out.push_back(uint8_t(v >> 8));
+    }
+  }
+  out.insert(out.end(), ext.begin(), ext.end());
+  std::vector<VideoEncoder> enc = enc_; // committed only when the whole record fits
+  std::vector<uint8_t> plane(px);
+  for (int p = 0; p < n_; p++) {
+    if (move.rows) enc[size_t(p)].Move(move.y0, move.rows, move.dy);
+    if (block.w) enc[size_t(p)].MoveRect(block.x, block.y, block.w, block.h, block.dx, block.dy);
+    for (size_t i = 0; i < px; i++) plane[i] = i < index.size() ? uint8_t(index[i] >> p & 1) : 0;
+    size_t left = max_bytes > out.size() + 3 ? max_bytes - out.size() - 3 : 0;
+    std::vector<uint8_t> r = enc[size_t(p)].Encode(plane, redraw, left);
+    if (r.empty() || r.size() > 0xFFFFFF) return {};
+    out.push_back(uint8_t(r.size()));
+    out.push_back(uint8_t(r.size() >> 8));
+    out.push_back(uint8_t(r.size() >> 16));
+    out.insert(out.end(), r.begin(), r.end());
+  }
+  if (out.size() > max_bytes) return {};
+  enc_ = std::move(enc);
+  for (size_t i = 0; i < px; i++) last_[i] = i < index.size() ? uint8_t(index[i] & mask) : 0;
+  return out;
+}
+
+BlockMove PlaneVideoEncoder::FindBlockMove(std::span<const uint8_t> index, int min_tiles) const {
+  BlockMove best;
+  const int T = 16, w = w_, h = h_;
+  if (n_ == 0 || index.size() < size_t(w) * size_t(h) || w < 2 * T || h < 2 * T) return best;
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  auto now = [&](int x, int y) { return uint8_t(index[size_t(y) * size_t(w) + size_t(x)] & mask); };
+  auto old = [&](int x, int y) { return last_[size_t(y) * size_t(w) + size_t(x)]; };
+  // the changed area: tiles of this frame there are looked up
+  int cx0 = w, cy0 = h, cx1 = 0, cy1 = 0;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++)
+      if (now(x, y) != old(x, y)) cx0 = std::min(cx0, x), cx1 = std::max(cx1, x + 1), cy0 = std::min(cy0, y), cy1 = std::max(cy1, y + 1);
+  if (cx1 <= cx0) return best;
+  // 2-D rolling hash of every T x T window of the last frame (rows, then columns)
+  const uint64_t B1 = 1000003, B2 = 998244353;
+  uint64_t p1 = 1, p2 = 1;
+  for (int i = 0; i < T; i++) p1 *= B1, p2 *= B2;
+  const int ww = w - T + 1, hh = h - T + 1;
+  std::vector<uint64_t> rowh(size_t(h) * size_t(ww));
+  for (int y = 0; y < h; y++) {
+    uint64_t v = 0;
+    for (int x = 0; x < w; x++) {
+      v = v * B1 + old(x, y) + 1;
+      if (x >= T) v -= (uint64_t(old(x - T, y)) + 1) * p1;
+      if (x >= T - 1) rowh[size_t(y) * size_t(ww) + size_t(x - T + 1)] = v;
+    }
+  }
+  std::vector<std::pair<uint64_t, uint32_t>> win;
+  win.reserve(size_t(ww) * size_t(hh));
+  for (int x = 0; x < ww; x++) {
+    uint64_t v = 0;
+    for (int y = 0; y < h; y++) {
+      v = v * B2 + rowh[size_t(y) * size_t(ww) + size_t(x)];
+      if (y >= T) v -= rowh[size_t(y - T) * size_t(ww) + size_t(x)] * p2;
+      if (y >= T - 1) win.push_back({v, uint32_t((y - T + 1) << 16 | x)});
+    }
+  }
+  std::sort(win.begin(), win.end());
+  auto tile_hash = [&](int x0, int y0) {
+    uint64_t v = 0;
+    for (int y = y0; y < y0 + T; y++) {
+      uint64_t r = 0;
+      for (int x = x0; x < x0 + T; x++) r = r * B1 + now(x, y) + 1;
+      v = v * B2 + r;
+    }
+    return v;
+  };
+  // votes for displacements from distinctive changed tiles (more than one level in them)
+  std::map<std::pair<int, int>, int> votes;
+  for (int y0 = cy0 / T * T; y0 + T <= std::min(h, cy1 + T - 1); y0 += T)
+    for (int x0 = cx0 / T * T; x0 + T <= std::min(w, cx1 + T - 1); x0 += T) {
+      uint8_t first = now(x0, y0);
+      bool flat = true;
+      for (int y = y0; y < y0 + T && flat; y++)
+        for (int x = x0; x < x0 + T && flat; x++) flat = now(x, y) == first;
+      if (flat) continue;
+      uint64_t hv = tile_hash(x0, y0);
+      auto it = std::lower_bound(win.begin(), win.end(), std::make_pair(hv, uint32_t(0)));
+      for (int k = 0; it != win.end() && it->first == hv && k < 4; ++it, k++) {
+        int ox = int(it->second & 0xFFFF), oy = int(it->second >> 16);
+        if (ox != x0 || oy != y0) votes[{x0 - ox, y0 - oy}]++;
+      }
+    }
+  std::pair<int, int> d{0, 0};
+  int most = 0;
+  for (auto &[k, n] : votes)
+    if (n > most) most = n, d = k;
+  if (most < min_tiles) return best;
+  // the tiles that moved by d (checked exactly), their bounding box as the destination rectangle
+  int x0 = w, y0 = h, x1 = 0, y1 = 0, n = 0;
+  for (int ty = 0; ty + T <= h; ty += T)
+    for (int tx = 0; tx + T <= w; tx += T) {
+      int sx = tx - d.first, sy = ty - d.second;
+      if (sx < 0 || sy < 0 || sx + T > w || sy + T > h) continue;
+      bool eq = true, changed = false;
+      for (int y = 0; y < T && eq; y++)
+        for (int x = 0; x < T && eq; x++) {
+          eq = now(tx + x, ty + y) == old(sx + x, sy + y);
+          changed |= now(tx + x, ty + y) != old(tx + x, ty + y);
+        }
+      if (!eq || !changed) continue;
+      x0 = std::min(x0, tx), y0 = std::min(y0, ty), x1 = std::max(x1, tx + T), y1 = std::max(y1, ty + T), n++;
+    }
+  if (n < min_tiles) return best;
+  best.x = x0 - d.first;
+  best.y = y0 - d.second;
+  best.w = x1 - x0;
+  best.h = y1 - y0;
+  best.dx = d.first;
+  best.dy = d.second;
+  if (best.x < 0 || best.y < 0 || best.x + best.w > w || best.y + best.h > h) best = BlockMove{};
+  return best;
+}
+
+RowMove PlaneVideoEncoder::FindMove(std::span<const uint8_t> index, int min_rows) const {
+  RowMove best;
+  if (n_ == 0 || index.size() < size_t(w_) * size_t(h_)) return best;
+  const uint8_t mask = uint8_t((1u << n_) - 1);
+  auto hash = [&](const uint8_t *row, bool masked) {
+    uint64_t v = 1469598103934665603ull;
+    for (int x = 0; x < w_; x++) v = (v ^ (masked ? row[x] & mask : row[x])) * 1099511628211ull;
+    return v;
+  };
+  std::vector<uint64_t> a(static_cast<size_t>(h_)), b(static_cast<size_t>(h_));
+  for (int y = 0; y < h_; y++) {
+    a[size_t(y)] = hash(last_.data() + size_t(y) * size_t(w_), false);
+    b[size_t(y)] = hash(index.data() + size_t(y) * size_t(w_), true);
+  }
+  // votes per shift from rows whose content appears elsewhere (blank or repeated rows say nothing)
+  std::vector<int> votes(static_cast<size_t>(2 * h_ + 1), 0);
+  for (int y = 0; y < h_; y++) {
+    if (a[size_t(y)] == b[size_t(y)]) continue;
+    for (int d = 1; d < h_; d++) {
+      if (y - d >= 0 && b[size_t(y)] == a[size_t(y - d)]) votes[size_t(h_ + d)]++;
+      if (y + d < h_ && b[size_t(y)] == a[size_t(y + d)]) votes[size_t(h_ - d)]++;
+    }
+  }
+  int dy = 0, most = 0;
+  for (int d = -h_ + 1; d < h_; d++)
+    if (d && votes[size_t(h_ + d)] > most) most = votes[size_t(h_ + d)], dy = d;
+  if (!dy) return best;
+  // the longest run of destination rows y with new[y] == old[y - dy]
+  int run = 0, run0 = 0, len = 0, y0 = 0;
+  for (int y = std::max(0, dy); y < std::min(h_, h_ + dy); y++) {
+    if (b[size_t(y)] == a[size_t(y - dy)]) {
+      if (!run) run0 = y;
+      if (++run > len) len = run, y0 = run0;
+    } else {
+      run = 0;
+    }
+  }
+  if (len < min_rows) return best;
+  int lo = std::min(y0, y0 - dy), hi = std::max(y0 + len, y0 + len - dy);
+  best.y0 = lo;
+  best.rows = hi - lo;
+  best.dy = dy;
+  return best;
 }
 
 std::vector<uint8_t> VideoEncoder::Encode(std::span<const uint8_t> pixels, bool redraw, size_t max_bytes) {
@@ -793,8 +1384,8 @@ std::vector<uint8_t> VideoEncoder::Encode(std::span<const uint8_t> pixels, bool 
         cur[size_t(y) * nb + size_t(x) / 8] |= uint8_t(0x80 >> (x % 8));
   std::vector<uint16_t> p = started_ ? p_ : std::vector<uint16_t>(kVProbs, 2048);
   RangeEncoder e{p.data(), out};
-  uint16_t ref[kPanelW + 1], ct[kPanelW + 1];
-  uint8_t rcode[kPanelW + 1], ccode[kPanelW + 1], old[kPanelW / 8 + 8] = {};
+  uint16_t ref[kVideoMaxW + 1], ct[kVideoMaxW + 1];
+  uint8_t rcode[kVideoMaxW + 1], ccode[kVideoMaxW + 1], old[kVideoMaxW / 8 + 8] = {};
   uint32_t nref = 0, prev_same = 2;
   for (uint32_t y = 0; y < uint32_t(h_); y++) {
     const uint8_t *pr = prev_.data() + y * nb, *cr = cur.data() + y * nb;
@@ -2161,6 +2752,13 @@ public:
     bool restore = l.known;
     ApplyHello(arm, hello);
     l.known = true;
+    // A new session: the arm may have rebooted, its clock started again from 0. The clock samples of before would
+    // still win (a short round trip ages slowly) and put every due time off by the old uptime: a black panel until
+    // they aged out (~30 s). Only this session's samples count (the setup's pings come before READY).
+    if (r.epoch != l.epoch) {
+      l.samples.clear();
+      l.clock_error_us = -1;
+    }
     l.epoch = r.epoch;
     l.epoch_seen = r.epoch;
     l.rx_next = Get16(hello + 20);
@@ -2568,7 +3166,10 @@ public:
   // earliest 5 s after connecting).
   void KeepLinkFast(int arm, int64_t now) {
     Link &l = links[arm];
-    bool slow = l.interval_us > SCOUTER_G1_LINK_MAX * 1250 || l.phy == 1;
+    const int want = g_link_units.load();
+    // slower than asked (or another interval than SetActiveLink's, when that is not the default)
+    bool slow = l.interval_us > want * 1250 || (want != SCOUTER_G1_LINK_MIN && l.interval_us && l.interval_us != want * 1250) ||
+                l.phy == 1;
     bool bulk = !l.pending.empty() && !l.unacked.empty();
     if (!l.slow && slow && bulk && now - l.link_asked > 5000000) AskLink(arm, now);
   }
@@ -2577,8 +3178,9 @@ public:
     Link &l = links[arm];
     l.link_asked = now;
     std::vector<uint8_t> link;
-    Put16(link, l.slow ? SCOUTER_G1_IDLE_LINK : SCOUTER_G1_LINK_MIN);
-    Put16(link, l.slow ? SCOUTER_G1_IDLE_LINK : SCOUTER_G1_LINK_MAX);
+    const int want = g_link_units.load();
+    Put16(link, uint16_t(l.slow ? SCOUTER_G1_IDLE_LINK : want == SCOUTER_G1_LINK_MIN ? SCOUTER_G1_LINK_MIN : want));
+    Put16(link, uint16_t(l.slow ? SCOUTER_G1_IDLE_LINK : want == SCOUTER_G1_LINK_MIN ? SCOUTER_G1_LINK_MAX : want));
     Put16(link, 0);
     Put16(link, 400);
     link.push_back(2);
@@ -3649,6 +4251,12 @@ public:
     arms_[arm].store = available;
   }
 
+  void SetFirmware(int minor, int patch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    fw_minor_ = uint8_t(minor);
+    fw_patch_ = uint8_t(patch);
+  }
+
   void DropLink(int arm, int ms) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -3998,7 +4606,7 @@ private:
   }
 
   void HelloBody(Arm &a, std::vector<uint8_t> &m) {
-    m.insert(m.end(), {5, 0, 5, 0});
+    m.insert(m.end(), {5, 0, fw_minor_, fw_patch_});
     m.push_back(a.index == 0 ? 1 : 0);
     m.push_back(uint8_t(0x02 | 0x04 | (a.panel_on ? 0x08 : 0) | 0x40 | (a.sensor[VM_P_IN_CASE] == 1 ? 0x80 : 0)));
     m.push_back(HasMic(a) ? 0x04 : 0);
@@ -4353,6 +4961,7 @@ private:
   std::string adapter_;
   Events *events_ = nullptr;
   bool present_[2] = {false, false};
+  uint8_t fw_minor_ = 5, fw_patch_ = 0; // HELLO's version: 0.5.0 unless a test sets another (SetFirmware)
   Arm arms_[2];
   std::vector<uint8_t> snapshot_[2];
   std::mutex mutex_;
@@ -5494,6 +6103,10 @@ void Arm::Disconnect(int ms) {
   g->core->transport->Wake();
 }
 
+void SetActiveLink(int units) { g_link_units = std::clamp(units, 6, 24); }
+
+bool RestartArm(int arm) { return arm >= 0 && arm <= 1 && Control(arm, CTRL_REBOOT, {0}).first == 0; }
+
 Arm::State Arm::GetState() {
   State s{};
   if (!g) return s;
@@ -6053,6 +6666,10 @@ void SetMicSignal(int arm, double hz, double peak) {
 }
 
 void HoldMicRenewals(bool hold) { g_hold_renewals = hold; }
+
+void SetFirmware(int minor, int patch) {
+  if (g_emulator) g_emulator->SetFirmware(minor, patch);
+}
 
 void SetAssetStore(int arm, bool available) {
   if (g_emulator && (arm == 0 || arm == 1)) g_emulator->SetAssetStore(arm, available);

@@ -42,9 +42,17 @@ static struct gpio_callback gpo_cb;
 static K_SEM_DEFINE(wake, 0, 1);
 static int16_t vrect_raw;
 static uint8_t reply[16];
-/* stock's get_battery_info state: full flag, the two poll counters, the time of the last 0x80 */
+/* stock's get_battery_info state: full flag, the two poll counters; since when they have been over 3, the last 0x80 */
 static uint8_t full, cnt_a, cnt_b;
-static uint32_t last_80_ms;
+static uint32_t last_80_ms, stuck_ms, poll_ms;
+static bool sent_80, stuck;
+
+/* 0.5.69: stock sends 0x80 once the counters pass 3 (~3 s powered, not charging), every 10 s; the case (V2.67 log)
+ * answers by switching both coils off and rebooting, which cut both arms six times in four hours. The arm now
+ * restarts its own charger (pmic.c charger_tick), so 0x80 is the last resort: after STUCK_80_MS of it, once per
+ * GAP_80_MS. */
+#define STUCK_80_MS 180000U
+#define GAP_80_MS 1800000U
 
 static int rd(uint16_t reg, uint8_t *out, size_t n)
 {
@@ -301,8 +309,20 @@ static size_t battery_info(const uint8_t *q, size_t qn, uint8_t *r)
 		r[4] = 1;
 	}
 	charging_flag = r[4] == 0;
-	if ((cnt_a | cnt_b) > 3 && soc > 2 && soc <= 99 && now - last_80_ms > 10000) {
+	/* stuck: the counters over 3 at every poll since stuck_ms, the polls at most 10 s apart */
+	if ((cnt_a | cnt_b) <= 3 || now - poll_ms > 10000U) {
+		stuck = false;
+	}
+	if ((cnt_a | cnt_b) > 3 && !stuck) {
+		stuck = true;
+		stuck_ms = now;
+	}
+	poll_ms = now;
+	if (stuck && now - stuck_ms >= STUCK_80_MS && soc > 2 && soc <= 99 &&
+	    (!sent_80 || now - last_80_ms >= GAP_80_MS)) {
+		sent_80 = true;
 		last_80_ms = now;
+		caselink.resets_asked++;
 		r[9] = 0x80;
 	}
 	caselink.status = r[4];

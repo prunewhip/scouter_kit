@@ -1,0 +1,42 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# vox-native: a few fixed jobs done in plain Termux for the Ubuntu side, which can't start Android programs itself
+# (Termux:X11's X server and its settings). It reads one line at a time from $PREFIX/tmp/vox-native.fifo (only
+# this user can write it):
+#   x11              Termux:X11's X server on :1, if it isn't running
+#   x11-laptop WxH   Termux:X11 set for the laptop's screen (laptop-dual): landscape, exactly WxH, a touchpad
+#   x11-desktop      Termux:X11 back to the phone's own desktop (`computer`): the phone's size, touch as before
+#   x11-list         Termux:X11's settings into $PREFIX/tmp/vox-native.list
+# `vox-native start` (Termux's ~/.bashrc, `computer`) starts it in the background unless it is running.
+P=/data/data/com.termux/files/usr
+F=$P/tmp/vox-native.fifo
+L=$P/tmp/vox-native.lock
+case "${1:-}" in
+start)
+	flock -n "$L" true || exit 0 # running: it holds the lock
+	setsid nohup "$0" run > "$HOME/.vox-native.log" 2>&1 < /dev/null &
+	exit 0 ;;
+run) ;;
+*) echo "usage: vox-native start"; exit 2 ;;
+esac
+exec 9> "$L"
+flock -n 9 || exit 0
+[ -p "$F" ] || { rm -f "$F"; mkfifo -m 600 "$F"; }
+pref() { termux-x11-preference "$@" > "$P/tmp/vox-native.pref" 2>&1 9>&-; }
+while :; do
+	while read -r cmd arg; do
+		case "$cmd" in
+		x11)
+			if ! pgrep -f '[c]om.termux.x11 :1' > /dev/null; then
+				rm -f "$P/tmp/.X11-unix/X1" "$P/tmp/.X1-lock"
+				setsid nohup termux-x11 :1 > "$HOME/.computer-x11.log" 2>&1 < /dev/null 9>&- &
+			fi ;;
+		x11-laptop)
+			case "$arg" in [1-9]*x[1-9]*) ;; *) continue ;; esac
+			case "$arg" in *[!0-9x]*) continue ;; esac
+			pref "displayResolutionMode:exact" "displayResolutionExact:$arg" "displayResolutionCustom:$arg" \
+				"forceLandscape:true" "touchMode:1" "fullscreen:true" ;;
+		x11-desktop) pref "displayResolutionMode:native" "forceLandscape:false" ;;
+		x11-list) termux-x11-preference list > "$P/tmp/vox-native.list" 2>&1 9>&- ;;
+		esac
+	done < "$F"
+done

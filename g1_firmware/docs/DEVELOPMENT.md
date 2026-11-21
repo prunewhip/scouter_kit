@@ -39,8 +39,8 @@ The emulator (Renode 1.16.1 with g1-fw's nRF5340 platform and models, commit `b8
 test in a rootless, network-less container: the replica MCUboot, the g1v0 image, Even's 1.6.6 network core
 and a virtual phone that bridges the emulated BLE link to a host program (`g1host.py --emu SOCKET`).
 `gate.sh`'s standard set: `smoke power unattended security mic_capture mic_lease draw_bench panel_standby
-panel_prop panel_read video panel_guard in_case case_hold case_blank mic_popup_standby touch light gyro peer
-pair_link assets`, plus `chain chain_right` (0.4.10 → G1_FROM → VERSION → NEXT
+panel_prop panel_read video videox videot panel_guard in_case case_hold case_blank mic_popup_standby touch light
+gyro peer pair_link assets`, plus `chain chain_right` (0.4.10 → G1_FROM → VERSION → NEXT
 over SMP, both roles) when those builds exist; `all` adds the rest, among them `restore` (Even's 1.6.6 installed by
 `flash.py` itself). The board harness has the TouchBar controller (g1-fw's model with this project's interrupt
 line, wear events and modes) at TWIM2 0x12 with its interrupt on P1.09; the firmware arms that interrupt before the
@@ -195,6 +195,100 @@ The notes below were written during development. Their paths (`tools/…`, `emu/
 and PROTOCOL.md) are those of the development tree; `g1host.py`, `vm_check.py`, `imu_check.py`, `imu_cal.py`,
 `draw_bench.py` and `mic_check.py` are in `../tools/`, the emulator tests in `emulator/tests/`, and
 `emu/fwsrc/g1v0` is `firmware/`.
+
+### What 0.5.70 adds (a latched charger error is released whatever the status bits show)
+
+- On the left arm with 0.5.69 (real hardware): BCHGERRREASON 0x40 (TRICKLETIMEOUT) latched, the charge status
+  flipping every ~5 s between 0x00 (battery not detected) and 0x05 (trickle) at VBAT 4.07 V, 0 mA, VBUS present:
+  0.5.69 waited for 20 s of one state and never acted. Now an error present for 20 s is released (still at most 3
+  an hour); emulator test `charger` covers it with the battery undetected. Also fixed in 0.5.69's last build: the
+  0x80 "stuck" clock (`now | 1` ran ahead of `now`, sending 0x80 at once on even milliseconds).
+
+### What 0.5.69 adds (the charger restarts itself in the case; the case is no longer told to reboot)
+
+- Seen 2026-11-19 (case USB log, case firmware V2.67): the left arm's charger sat idle for minutes in the case with
+  power there (0 mA at VRECT 5.2 V, the enable written after every battery reply), or toggled every poll. Stock's
+  answer, copied in caselink.c, is the 0x80 battery reply once ~3 polls were "powered, not charging"; the case then
+  switches both coils off and reboots ("turn off fields", `MCU BOOT OK`): six times in four hours, both arms cut.
+- `pmic.c charger_tick` (every second): VBUS, charging allowed, battery found, not full, no die-temperature pause,
+  NTC neither cold nor hot, and no charge phase for 20 s, or trickle/CC with under 2 mA flowing for 60 s: a latched
+  charger error is released (TASKCLEARCHGERR + TASKRELEASEERR, at most 3 an hour), else the charger is restarted
+  (BCHGENABLECLR, BCHGENABLESET). Logged with the charger, VBUS, NTC and ILIM status registers.
+- caselink.c: 0x80 only after 3 minutes of the stock condition, at most once per 30 minutes (`resets_asked`).
+- DIAG CASE grows to 140 bytes: charge status and error now, restarts, releases, the registers at the last one and
+  its age, resets asked (`g1host.case_stats()`). Emulator test `charger` (in the gate).
+
+### What 0.5.68 adds (VIDEOT transform-coded video; flash locked at boot)
+
+- **VIDEOT** (opcode 0x58, VM.md §3.9): natural video as 8-bit pictures up to 320 × 240, 8 × 8 blocks with motion
+  vectors (±7) and 4 × 4 Walsh-Hadamard residuals, range coded; drawn at twice the size with a 2 × 2 ordered dither
+  (16 levels), each band of 8 rows drawn as soon as it is decoded. Library `TransformVideoEncoder` (closed loop).
+  A real camera clip at 256 × 240: ~1.9 KB a frame at 29 dB (q 45), where Vox's 4 grey planes took ~2.6 KB at 19 dB.
+- **Flash locked at boot** (`CONFIG_G1_LOCK_FLASH`, default y): right after `board_init` and before Bluetooth or the
+  case link, SPU regions 0–61 (0x0–0xF8000: MCUboot and the running image) become read + execute only, locked until
+  the next reset; region 62 (the primary slot's trailer, which a confirm writes) and 63 (settings) stay writable.
+  The boot log says `flash 0x0-0xf8000 read + execute only until reset (region 0: 0x115)`. Updates are unchanged.
+- `CONFIG_G1_VIDEOX_PIXELS` (VIDEOX pixel coding, flag bit 3) is off in g1v0: it did not pay through Vox's mirror.
+- Tests: `vm_test` VIDEOT vectors (also run on the emulated arm by `vectors`), `tests/videot_test.cpp` (bit-exact
+  round trips, every band drawn, 3000 random records with no write outside the frame and state, the dither within
+  2/255, Vox's mirror on emulated arms with 0 wrong panel pixels; ASan/UBSan clean), emulator test `videot`
+  (`tools/draw_bench.py --videot`'s records, the last 4000 random bytes: the arm stays up, the panel and the arena
+  equal the mirror's). Gate 0.5.68: 26/26, the update chain from 0.5.63 on both arms.
+
+### What 0.5.66 adds (VIDEOX block moves, the sprite, wide canvases; 128 MHz held through bursts)
+
+- **Block move** (record flag bit 4) and **sprite** (bit 5, a redraw rectangle and a 16 × 16 mask + ink composed over
+  the picture at either scale), VM.md §3.8; **pixel-coded planes up to 2048 wide** (a canvas the arm pans).
+- `g1_clock_boost` keeps 128 MHz 40 ms after its last user (`CLOCK_HOLD_MS`, a delayable work item): frames back to
+  back no longer switch the clock twice each.
+- Library: `VideoEncoder::MoveRect`, `PlaneVideoEncoder` `Encode(..., block, sprite)`, `FindBlockMove` (16 × 16
+  tiles found anywhere in the last frame by a 2-D rolling hash; the displacement most agree on, checked exactly).
+- Tests: `vm_test` `test_videox_ext` (150 random block moves, overlapping ones too, against a plain copy; the
+  sprite at the edges, moved with a redraw rectangle, no trace; errors), `videox_test` (a dragged window found 7 of
+  7 times, 9–11× fewer bytes, exact decode), `videox_fuzz` with every flag (ASan/UBSan clean), Vox's `screen_test`
+  on emulated 0.5.66 arms (the pointer with 0 frames sent; a drag step ~300 bytes; the panel exact).
+
+### What 0.5.64 adds (VIDEOX: 8 pixels a step, pixel coding, scale 2)
+
+- **VIDEOX composes 8 pixels a step** (a spread table and a per-instruction 256-entry pair table): 8.4× faster than
+  0.5.62's per-pixel loop on the same output (bench on the phone's CPU); on the arms 0.5.62 took 390 ms for a full
+  16-grey 640 × 480 page, of which the compose was the largest share after the decode.
+- **Pixel coding** (record flag bit 3, VM.md §3.8): each plane coded pixel by pixel from an 11-bit context (this
+  frame's neighbours, the previous frame in place, the planes above), states of 4100 bytes; planes decode top down.
+  **Scale 2** (flag bit 2): plane pixels drawn as 2 × 2. Measured with the library's encoder on a phone-camera clip
+  (512 × 480, 60 frames): 1.72× fewer bytes than transitions at 4 greys half size, 1.41× at 16 greys full size;
+  cartoons 1.08–1.34×. Through Vox's mirror (auto greys) the gain over the top-planes trick was ~9% on camera
+  video and a loss on cartoons, so Vox 1.00 leaves it off until the encoder picks the smaller coding per frame.
+- Tests: `vm_test` (random records with every flag, the panel against the planes at scale 1 and 2 and at odd
+  offsets; an odd width's last nibble is 0), `videox_test` (the pixel encoder against the core, with and without
+  scale 2), `videox_fuzz` (all flags, ASan/UBSan clean, 200 000 cases).
+
+### What 0.5.62 adds (the radio while drawing, VIDEOX, 128 MHz decoding, updates only in the case)
+
+- **The executor runs below Bluetooth's RX thread** (priority 9; `CONFIG_BT_RX_PRIO` is 8, a `BUILD_ASSERT` keeps
+  it so). VM.md §5.4 already asked for it, but at the same priority 8, with no time slicing, a long `DRAW` or
+  `VIDEO` kept the RX thread from running until it ended: the host's packets waited in the controller (ACL flow
+  control) and the link fell from ~105 to ~44 packets/s while drawing. Now packets arrive into the window while the
+  panel is being written.
+- **`VIDEOX`** (0x57, VM.md §3.8): `VIDEO` over 1–4 bit planes with a level map (4 or 16 greys at the cost of 2 or 4
+  black-and-white streams instead of raw 4-bpp uploads) and an optional row move (a scrolled page costs its new
+  rows). The planes and states are given by tables of addresses, so 16 greys of a large picture fit a fragmented
+  arena (one contiguous 128 KB block was often not there). The VM core's `VIDEO` decoder is reused unchanged; `VIDEO` itself is byte-identical. Tests: `vm_test`
+  (`test_videox`: one plane equals `VIDEO`; after any record, with or without a move, the panel shows the planes
+  through the map; a move draws exactly the rows it changed; every error before anything changes),
+  `tests/videox_test.cpp` (the library's `PlaneVideoEncoder` against the core, 480 frames with moves),
+  `tests/videox_fuzz.c` (300 000 random records under ASan/UBSan, no write outside the arena), emulator test
+  `videox` (in the standard set). `struct vm` +1.9 KB (each row's span).
+- **128 MHz while `VIDEO`/`VIDEOX` run** (`CONFIG_G1_FAST_DECODE`, default y): the VM calls the optional
+  `vm_host.boost` around them; `g1_clock_boost` (`src/board.c`) counts its users (the microphone's test-build
+  128 MHz is one) and switches HFCLK's divider with `SystemCoreClockUpdate` under `irq_lock`. Busy waits follow
+  `SystemCoreClock` on the app core (nrfx_coredep), SPIM4 has its own 32 MHz clock.
+- **SMP image upload and erase only in the case** (`CONFIG_G1_UPDATE_IN_CASE_ONLY`, default y; off on the DK):
+  MCUboot on the arms trusts MCUboot's public sample key, so whoever may upload may install any code. Out of the case
+  a bonded, encrypted host gets `EACCESSDENIED` for image group ids 1 and 5; the image list stays readable. The
+  emulator cannot encrypt, so this is checked on the arms (an upload from a bonded host out of the case).
+- Emulator tests `update_from`, `update_from_right`: G1_FROM (the arms' image) → this version → NEXT over SMP,
+  without the 0.4.10 start of `chain`.
 
 ### What 0.5.60 adds (no case hold: the display policy is the program's)
 

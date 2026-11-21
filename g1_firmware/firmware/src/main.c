@@ -147,10 +147,39 @@ static struct mgmt_callback smp_reset_cb = {
 	.event_id = MGMT_EVT_OP_OS_MGMT_RESET,
 };
 
+/* Image upload (id 1) and erase (id 5) of the image group (1): only in the case. The arm's MCUboot checks
+ * images with MCUboot's public sample key, so whoever may upload may install any code; out of the case a
+ * bonded, encrypted host could otherwise do it from a pocket. Reading the image list stays allowed everywhere
+ * (hosts check the version with it); in the case every update and restore works as before. The command hook
+ * carries the group and id but not the operation, so the test/confirm write of id 0 (state) stays: it can
+ * only mark an image that was uploaded in the case. */
+#define SMP_GROUP_IMAGE 1
+#define SMP_IMAGE_UPLOAD 1
+#define SMP_IMAGE_ERASE 5
+
+static bool smp_needs_case(const struct mgmt_evt_op_cmd_arg *a)
+{
+	return IS_ENABLED(CONFIG_G1_UPDATE_IN_CASE_ONLY) && a->group == SMP_GROUP_IMAGE &&
+	       (a->id == SMP_IMAGE_UPLOAD || a->id == SMP_IMAGE_ERASE);
+}
+
 static enum mgmt_cb_return smp_rx_hook(uint32_t event, enum mgmt_cb_return prev_status, int32_t *rc,
 				       uint16_t *group, bool *abort_more, void *data, size_t data_size)
 {
+	const struct mgmt_evt_op_cmd_arg *a = data;
+
 	if (!proto_writes_allowed()) {
+		*rc = MGMT_ERR_EACCESSDENIED;
+		*abort_more = true;
+		return MGMT_CB_ERROR_RC;
+	}
+	if (data_size >= sizeof(*a) && smp_needs_case(a) && !g1_in_case()) {
+		static int64_t logged;
+
+		if (k_uptime_get() - logged > 5000) {   /* one line per upload attempt, not per chunk */
+			logged = k_uptime_get();
+			LOG_WRN("SMP image %s refused: not in the case", a->id == SMP_IMAGE_UPLOAD ? "upload" : "erase");
+		}
 		*rc = MGMT_ERR_EACCESSDENIED;
 		*abort_more = true;
 		return MGMT_CB_ERROR_RC;
@@ -163,6 +192,29 @@ static struct mgmt_callback smp_rx_cb = {
 	.callback = smp_rx_hook,
 	.event_id = MGMT_EVT_OP_CMD_RECV,
 };
+
+#if defined(CONFIG_G1_LOCK_FLASH)
+#include <pm_config.h>
+/* nRF5340 app core: 64 SPU flash regions of 16 KB. Regions 62 and 63 stay writable (CONFIG_G1_LOCK_FLASH). */
+#define LOCK_REGION 0x4000u
+#define LOCK_KEEP 2u
+BUILD_ASSERT(PM_SETTINGS_STORAGE_ADDRESS >= (64u - 1u) * LOCK_REGION, "settings must be in the last region");
+BUILD_ASSERT(PM_G1_STORAGE2_ADDRESS >= (64u - 1u) * LOCK_REGION, "g1_storage2 must be in the last region");
+BUILD_ASSERT(PM_MCUBOOT_PRIMARY_ADDRESS + PM_MCUBOOT_PRIMARY_SIZE - 0x1000u >= (64u - LOCK_KEEP) * LOCK_REGION,
+	     "the primary slot's trailer must be in a writable region");
+
+static void lock_flash(void)
+{
+	const uint32_t perm = SPU_FLASHREGION_PERM_EXECUTE_Msk | SPU_FLASHREGION_PERM_READ_Msk |
+			      SPU_FLASHREGION_PERM_SECATTR_Msk | SPU_FLASHREGION_PERM_LOCK_Msk;
+
+	for (uint32_t r = 0; r < 64u - LOCK_KEEP; r++) {
+		NRF_SPU->FLASHREGION[r].PERM = perm;
+	}
+	LOG_INF("flash 0x0-0x%x read + execute only until reset (region 0: 0x%x)", (64u - LOCK_KEEP) * LOCK_REGION,
+		(unsigned)NRF_SPU->FLASHREGION[0].PERM);
+}
+#endif
 
 int main(void)
 {
@@ -178,6 +230,9 @@ int main(void)
 	mgmt_callback_register(&smp_reset_cb);
 	mgmt_callback_register(&smp_rx_cb);
 	board_init();
+#if defined(CONFIG_G1_LOCK_FLASH)
+	lock_flash(); /* before anything from outside (Bluetooth, the case link) runs */
+#endif
 	snprintf(name, sizeof(name), "G1v0%s_%c", safe_level() ? "S" : "", board_role() ? 'L' : 'R');
 	if (safe_level() < 2) {
 		pmic_start();

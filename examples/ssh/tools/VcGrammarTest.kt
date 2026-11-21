@@ -1,0 +1,125 @@
+// Voice control's grammar against phrases as speech recognizers write them. Not part of the app: compiled on its own
+// with VcGrammar.kt:  kotlinc VcGrammarTest.kt ../app/src/main/kotlin/scouterkit/ssh/VcGrammar.kt -include-runtime -d t.jar
+// && java -jar t.jar
+import scouterkit.ssh.VcGrammar
+import scouterkit.ssh.VcGrammar.Cmd
+
+var failures = 0
+fun check(what: String, got: Any?, want: Any?) {
+    if (got != want) {
+        println("FAIL $what: got $got, want $want")
+        failures++
+    }
+}
+
+fun main() {
+    val st = VcGrammar.State()
+    fun one(s: String, state: VcGrammar.State = st) = VcGrammar.parse(s, state).firstOrNull()
+    fun tap(c: Int, r: Int, how: String = "tap") = Cmd.Tap(VcGrammar.Cell(c, r), how)
+    // cells, however speech writes them
+    for (s in listOf("C4", "c4", "C 4", "C-4", "c four", "see four", "sea for", "Charlie four", "tap C4", "Click c4.", "press C4",
+            "Select C4", "touch see 4"))
+        check(s, one(s), tap(2, 3))
+    check("before", one("before"), tap(1, 3))
+    check("A1", one("A1"), tap(0, 0))
+    check("a one", one("a one"), tap(0, 0))
+    check("E 12", one("E 12"), tap(4, 11))
+    check("b two", one("be two"), tap(1, 1))
+    check("H 8", one("H8"), tap(7, 7))
+    check("I out of grid", one("I3"), Cmd.Other("I3")) // 8 columns: A ... H
+    check("row 13 out", one("C 13"), Cmd.Other("C 13"))
+    check("double", one("double tap C4"), tap(2, 3, "double"))
+    check("double after", one("C4 double"), tap(2, 3, "double"))
+    check("long", one("long press D2"), tap(3, 1, "long"))
+    check("hold", one("hold D2"), tap(3, 1, "long"))
+    check("right", one("right click F5"), tap(5, 4, "right"))
+    check("zoom", one("zoom C4"), Cmd.Zoom(VcGrammar.Cell(2, 3)))
+    check("drag", one("drag C4 to C8"), Cmd.Drag(VcGrammar.Cell(2, 3), VcGrammar.Cell(2, 7)))
+    // zoomed: a keypad
+    val z = VcGrammar.State(zoomed = true)
+    check("sub", one("5", z), Cmd.Sub(5, "tap"))
+    check("sub word", one("five", z), Cmd.Sub(5, "tap"))
+    check("sub double", one("double 3", z), Cmd.Sub(3, "double"))
+    check("zoom out", one("back", z), Cmd.Cancel)
+    // buttons and moves
+    check("back", one("Go back."), Cmd.Global("back"))
+    check("home", one("home"), Cmd.Global("home"))
+    check("recents", one("recent apps"), Cmd.Global("recents"))
+    check("notifs", one("Notifications"), Cmd.Notif("show"))
+    check("scroll", one("scroll down"), Cmd.Scroll("down", 1))
+    check("scroll 3", one("scroll down three"), Cmd.Scroll("down", 3))
+    check("page up", one("page up"), Cmd.Scroll("up", 1))
+    check("swipe left", one("swipe left"), Cmd.Scroll("right", 1))
+    check("top", one("go to top"), Cmd.Scroll("top", 1))
+    check("open", one("open Chrome"), Cmd.Open("chrome"))
+    check("open two words", one("Launch Google Maps"), Cmd.Open("google maps"))
+    check("laptop", one("laptop"), Cmd.Target("laptop"))
+    check("switch", one("switch to phone"), Cmd.Target("phone"))
+    check("grid", one("bigger grid"), Cmd.Grid("bigger"))
+    check("type", one("type"), Cmd.TypeToggle)
+    check("ask", one("ask what's the weather tomorrow"), Cmd.Ask("claude", "what's the weather tomorrow"))
+    check("hey claude", one("Hey Claude, summarize my email"), Cmd.Ask("claude", "summarize my email"))
+    check("google", one("google pizza near me"), Cmd.Ask("google", "pizza near me"))
+    check("stop", one("voice off"), Cmd.Stop)
+    check("other", one("lights off"), Cmd.Other("lights off"))
+    check("enter", one("send"), Cmd.Enter)
+    // type mode
+    val t = VcGrammar.State(typing = true)
+    check("text", one("Hello there, how are you?", t), Cmd.Text("Hello there, how are you?"))
+    check("bs", one("backspace", t), Cmd.Backspace(1))
+    check("bs2", one("Backspace backspace", t), Cmd.Backspace(2))
+    check("bs3", one("delete three", t), Cmd.Backspace(3))
+    check("enter", one("send", t), Cmd.Enter)
+    check("trailing", VcGrammar.parse("see you at five send", t), listOf(Cmd.Text("see you at five"), Cmd.Enter))
+    check("trailing bs", VcGrammar.parse("hello world backspace", t), listOf(Cmd.Text("hello world"), Cmd.Backspace(1)))
+    check("newline", VcGrammar.parse("first line new line", t), listOf(Cmd.Text("first line"), Cmd.NewLine))
+    check("clear", one("clear all", t), Cmd.Clear)
+    check("end", one("Stop typing.", t), Cmd.TypeToggle)
+    check("type ends", one("type", t), Cmd.TypeToggle)
+    check("cell as text", one("C4", t), Cmd.Text("C4"))
+    // notifications open
+    val n = VcGrammar.State(notifs = true)
+    check("open 2", one("open two", n), Cmd.Notif("open", 2))
+    check("2", one("2", n), Cmd.Notif("open", 2))
+    check("dismiss", one("dismiss three", n), Cmd.Notif("dismiss", 3))
+    check("clear all", one("clear all", n), Cmd.Notif("clear"))
+    check("reply", one("reply 2 on my way", n), Cmd.Notif("reply", 2, "on my way"))
+    check("reply with", one("Reply two with sounds good", n), Cmd.Notif("reply", 2, "sounds good"))
+    check("close", one("close", n), Cmd.Notif("close"))
+    // closing: a box first, else voice control; typed while typing
+    check("close", one("close"), Cmd.Stop)
+    check("close panel", one("close", VcGrammar.State(panel = true)), Cmd.Cancel)
+    check("close notifs", one("close", n), Cmd.Notif("close"))
+    check("close zoom", one("close", z), Cmd.Cancel)
+    check("voice off typing", one("voice off", t), Cmd.Stop)
+    check("done typing", one("done", t), Cmd.TypeToggle)
+    check("that's all", one("That's all."), Cmd.Stop)
+    // what the glasses' log showed going wrong (a phrase's start lost, words misheard)
+    check("roll up", one("roll up."), Cmd.Scroll("up", 1))
+    check("girl", one("Girl."), Cmd.Scroll("down", 1))
+    check("left alone", one("left."), Cmd.Scroll("left", 1))
+    check("up alone", one("Up."), Cmd.Scroll("up", 1))
+    check("end", one("End."), Cmd.Stop)
+    check("and", one("And"), Cmd.Stop)
+    check("stop", one("stop"), Cmd.Stop)
+    check("help me", one("Help me."), Cmd.Help)
+    check("cancel", one("Cancel."), Cmd.Cancel)
+    // screens by name; the terminal takes dictation
+    check("go to terminal", one("go to the terminal"), Cmd.Target("terminal"))
+    check("laptop screen", one("laptop screen"), Cmd.Target("laptop"))
+    check("back to phone", one("back to my phone"), Cmd.Target("phone"))
+    check("open phone", one("open phone"), Cmd.Target("phone"))
+    check("not a target", one("call my phone company"), Cmd.Other("call my phone company"))
+    val term = VcGrammar.State(terminal = true)
+    check("term text", one("list the files in this folder", term), Cmd.Text("list the files in this folder"))
+    check("term send", VcGrammar.parse("git status send", term), listOf(Cmd.Text("git status"), Cmd.Enter))
+    check("term enter", one("enter", term), Cmd.Enter)
+    check("term backspace", one("backspace", term), Cmd.Backspace(1))
+    check("term phone", one("phone", term), Cmd.Target("phone"))
+    check("term end", one("end", term), Cmd.Stop)
+    check("term scroll", one("scroll up", term), Cmd.Scroll("up", 1))
+    check("term type", VcGrammar.parse("type", term), emptyList<Cmd>())
+    check("term c4", one("C4", term), Cmd.Text("C4"))
+    println(if (failures == 0) "vc grammar: ok" else "vc grammar: $failures failures")
+    if (failures > 0) kotlin.system.exitProcess(1)
+}

@@ -177,6 +177,12 @@ public:
             ArenaWord y1, ArenaWord level);
   void Video(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
              ArenaWord level, ArenaWord src, ArenaWord n, ArenaWord state);
+  // VIDEOX (VM.md §3.8, g1v0 0.5.62+): planes from bitmap, levels = the level map's address.
+  void VideoX(ArenaWord bitmap, ArenaWord stride, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y,
+              ArenaWord levels, ArenaWord src, ArenaWord n, ArenaWord state);
+  // g1v0 0.5.68+ (VM.md §3.9): transform-coded 8-bit video at twice its size.
+  void VideoT(ArenaWord frame, ArenaWord w, ArenaWord h, ArenaWord x, ArenaWord y, ArenaWord src, ArenaWord n,
+              ArenaWord state);
   // Bytes off ... off + n - 1 of the stored asset whose 16-byte ID is at
   // address id, to dst (VM.md §2.4).
   void AssetLoad(ArenaWord id, ArenaWord dst, ArenaWord off, ArenaWord n);
@@ -234,6 +240,8 @@ constexpr uint32_t kVideoState = 1596;
 class VideoEncoder {
  public:
   VideoEncoder(int width, int height); // 1...640 x 1...480, else Encode fails
+  // max_width: the arm's limit for the stream (640: VIDEO; 2048: a VIDEOX plane, 0.5.66+).
+  VideoEncoder(int width, int height, int max_width);
   // pixels: width x height bytes, row by row, nonzero = ink (pixels past the
   // end of a shorter span are 0). redraw: the arm draws every row, not only
   // the changed ones (the panel lost its image). Empty, and the encoder
@@ -243,11 +251,115 @@ class VideoEncoder {
   int Width() const { return w_; }
   int Height() const { return h_; }
   int Stride() const { return nb_; } // the least bytes per row of the bitmap
+  // VIDEOX's row move (VM.md §3.8) applied to the frame the arm holds: rows
+  // y0...y0+rows-1 move by dy (the rows left behind keep their pixels).
+  // False, and nothing changes, unless 0 <= y0, y0 + rows <= height and
+  // 0 < |dy| < rows.
+  bool Move(int y0, int rows, int dy);
+  // VIDEOX's block move (0.5.66+): the rectangle (x, y, w, h) moves by (dx, dy)
+  // in the frame the arm holds. False, nothing changed, unless both rectangles
+  // lie inside the frame.
+  bool MoveRect(int x, int y, int w, int h, int dx, int dy);
 
  private:
   int w_, h_, nb_;
   bool started_ = false;
   std::vector<uint8_t> prev_;
+  std::vector<uint16_t> p_;
+};
+
+// VIDEOX (VM.md §3.8, g1v0 0.5.62+): greys as 1-4 bit planes, each an
+// ordinary VIDEO stream, with an optional row move for scrolling. A frame is
+// an index per pixel (0...2^planes - 1); the arm shows levels[index], the
+// 16-byte level map the caller puts in the arena. Each plane (h x stride
+// bytes) and its state (kVideoState) may be anywhere in the arena: VIDEOX
+// takes tables of their addresses. Records go to the arm in order, starting
+// from zeroed planes.
+struct RowMove {
+  int y0 = 0, rows = 0, dy = 0; // rows == 0: none
+};
+// VIDEOX's block move and sprite (g1v0 0.5.66+).
+struct BlockMove {
+  int x = 0, y = 0, w = 0, h = 0, dx = 0, dy = 0; // w == 0: none
+};
+struct Sprite {
+  bool on = false;            // false: no redraw rectangle and no sprite
+  int rx = 0, ry = 0, rw = 0, rh = 0; // drawn whatever changed (where the sprite was)
+  int x = -32768, y = 0;      // the sprite's place (-32768: none)
+  uint32_t address = 0;       // its 64 bytes: 16 rows of u16 mask, u16 ink, big-endian
+};
+class PlaneVideoEncoder {
+ public:
+  // kTransitions: every plane an ordinary VIDEO stream (text, UI, cartoons);
+  // kPixels (g1v0 0.5.64+): every plane coded pixel by pixel from its
+  // neighbours, the previous frame and the planes above (natural video: about
+  // 1.5-1.8x fewer bytes); its states are kPixelState bytes each.
+  enum Coding { kTransitions, kPixels };
+  static constexpr uint32_t kPixelState = 4100;
+  PlaneVideoEncoder(int width, int height, int planes, Coding coding = kTransitions); // 1...640 x 1...480, 1...4
+  // index: width x height bytes, row by row (bits above the planes ignored).
+  // move: applied first (on the arm and here); FindMove gives a good one.
+  // Empty, and the encoder unchanged, for a bad size or move, or a record
+  // over max_bytes.
+  // scale2 (0.5.64+): the arm draws the planes at twice their size.
+  std::vector<uint8_t> Encode(std::span<const uint8_t> index, bool redraw = false, RowMove move = {},
+                              size_t max_bytes = SIZE_MAX, bool scale2 = false, BlockMove block = {},
+                              const Sprite &sprite = Sprite{});
+  // A rectangle of the last encoded frame that this one shows moved (a dragged
+  // window, a sideways scroll): 16 x 16 tiles of this frame found anywhere in
+  // the last one, the displacement most of them agree on, the rectangle they
+  // cover. w == 0 when none covers min_tiles tiles.
+  BlockMove FindBlockMove(std::span<const uint8_t> index, int min_tiles = 4) const;
+  // The vertical shift that turns most of the last encoded frame into this
+  // one (scrolling), as a move; rows == 0 when none covers at least
+  // min_rows rows.
+  RowMove FindMove(std::span<const uint8_t> index, int min_rows = 8) const;
+  int Width() const { return w_; }
+  int Height() const { return h_; }
+  int Planes() const { return n_; }
+  int Stride() const { return (w_ + 7) / 8; } // the least bytes per row of each plane
+
+ private:
+  int w_, h_, n_;
+  Coding coding_;
+  std::vector<VideoEncoder> enc_;
+  std::vector<uint8_t> last_; // the last index frame, masked to the planes
+  std::vector<std::vector<uint16_t>> pp_; // kPixels: each plane's probabilities
+  bool pstarted_ = false;
+  std::vector<uint8_t> PixelPlane(const std::vector<uint8_t> &cur, const std::vector<uint8_t> &prev, int p,
+                                  bool redraw, std::vector<uint16_t> &probs) const;
+};
+
+// VIDEOT (VM.md §3.9, g1v0 0.5.68+): natural video as 8-bit pictures (each pixel drawn as 2 x 2 panel pixels with an
+// ordered dither: ~61 apparent greys), coded as 8 x 8 blocks with a motion vector each and 4 x 4 Walsh-Hadamard
+// residuals, against what the arm's frame holds (closed loop: the encoder keeps exactly the arm's picture). On real
+// camera video ~1.9 KB a frame at 29 dB (256 x 240) where 4-grey planes take ~2.6 KB at 19 dB.
+class TransformVideoEncoder {
+ public:
+  static constexpr uint32_t kState = 5928; // the arm's state bytes (VM_VIDEOT_STATE)
+  TransformVideoEncoder(int width, int height); // multiples of 8, 8...320 x 8...240, else Encode fails
+  // luma: width x height bytes (0 black ... 255), row by row. q 1...63: the quantiser (larger: fewer bytes, coarser).
+  // The first record (and the first after Reset) is coded from flat grey and resets the arm's model. redraw: every
+  // band drawn (the panel was cleared or showed something else). Empty, and the encoder unchanged, for a bad size or
+  // q, or a record over max_bytes.
+  std::vector<uint8_t> Encode(std::span<const uint8_t> luma, int q, bool redraw = false,
+                              size_t max_bytes = SIZE_MAX);
+  void Reset() { started_ = false; }
+  // What the arm's frame holds after the last record went (its decoder's output, exactly).
+  const std::vector<uint8_t> &Picture() const { return ref_; }
+  int Width() const { return w_; }
+  int Height() const { return h_; }
+  // Encoder-only tuning (the records stay VIDEOT records): rate-distortion choices, each level lowered, each
+  // 4 x 4 block dropped and each block skipped when the bits saved (as the model stands) outweigh the squared
+  // error added, at lambda = rdo x q^2. 0 is the plain dead-zone quantiser. The default 0.25 took 19-26% fewer
+  // bytes at the same PSNR on two camera clips (0.4: 22-29%, but more stale blocks).
+  void SetRdo(double rdo) { rdo_ = rdo; }
+
+ private:
+  int w_, h_;
+  bool started_ = false;
+  double rdo_ = 0.25;
+  std::vector<uint8_t> ref_;
   std::vector<uint16_t> p_;
 };
 
@@ -600,6 +712,12 @@ void Deinit();
 
 // Host clock used with device times (steady clock, µs).
 int64_t NowUs();
+// The active link's connection interval asked of both arms, x 1.25 ms (6 = 7.5 ms, the default; 9 = 11.25 ms;
+// 12 = 15 ms), for measuring which carries the most: the arms are asked again within 5 s while data flows.
+void SetActiveLink(int units);
+// Restarts a real arm (CTRL REBOOT, a clean reboot; it comes back with a new epoch and the library restores it).
+// Waits for the arm's answer (up to 6 s): false without one. For tests of the recovery.
+bool RestartArm(int arm);
 
 #ifdef SCOUTER_G1_EMULATOR
 // The emulated arms of an emulator build. They run the arms' interpreter
@@ -629,6 +747,9 @@ void NewHost(bool keep_sessions);
 // The arm answers like a firmware without the asset store (false) or with it
 // again (true); what it stored stays.
 void SetAssetStore(int arm, bool available);
+// The firmware version 0.minor.patch the arms report in HELLO from the next
+// session on (0.5.0 at first); the VM core itself is always the current one.
+void SetFirmware(int minor, int patch);
 } // namespace emulator
 #endif
 

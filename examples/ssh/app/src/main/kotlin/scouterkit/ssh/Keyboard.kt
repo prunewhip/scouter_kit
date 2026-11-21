@@ -36,6 +36,14 @@ object Keyboard {
             (e.source and InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
     }
 
+    // A key without its Shift (Shift+Up as plain Up: the program's own arrow while plain Up scrolls).
+    fun sendPlain(e: KeyEvent): Boolean {
+        if (e.action != KeyEvent.ACTION_DOWN) return usages.containsKey(e.keyCode)
+        val u = usages[e.keyCode] ?: return false
+        Native.keyEvent(HID, 0, u)
+        return true
+    }
+
     // Sends a key press (repeats included) to the terminal. Returns whether the key was the terminal's: modifier
     // keys alone and keys it has no meaning for (volume, media) stay Android's.
     fun send(e: KeyEvent): Boolean {
@@ -46,6 +54,16 @@ object Keyboard {
         usages[e.keyCode]?.let {
             Native.keyEvent(HID, mods or (if (e.isShiftPressed) SHIFT else 0), it)
             return true
+        }
+        // Right Alt as AltGr: a character the layout gives with it (Vox's layout: \ on Right Alt + /) goes as that
+        // character, without Alt.
+        if (e.metaState and KeyEvent.META_ALT_RIGHT_ON != 0 && !e.isCtrlPressed) {
+            val g = e.getUnicodeChar(e.metaState)
+            val noAlt = e.getUnicodeChar(e.metaState and KeyEvent.META_ALT_MASK.inv())
+            if (g > 0 && g != noAlt && g and KeyCharacterMap.COMBINING_ACCENT == 0) {
+                Native.keyEvent(UNICODE, mods and ALT.inv(), g)
+                return true
+            }
         }
         // The character without Ctrl, Alt and Meta (they go as modifier bits); Shift and the layout stay applied.
         val plain = e.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK or KeyEvent.META_META_MASK).inv()

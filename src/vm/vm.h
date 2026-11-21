@@ -86,8 +86,8 @@ enum vm_state { VM_STOPPED = 0, VM_RUNNING = 1, VM_HALTED = 2 };
 
 enum vm_task_state { VM_TASK_NONE = 0, VM_TASK_RUN = 1, VM_TASK_SLEEP = 2, VM_TASK_WAIT = 3 };
 
-/* What the VM needs from its platform. All members are required except prop_write, panel_span and
- * asset_read. The VM calls them only from inside the vm_* functions, on the thread that calls those. */
+/* What the VM needs from its platform. All members are required except prop_write, panel_span,
+ * asset_read and boost. The VM calls them only from inside the vm_* functions, on the thread that calls those. */
 struct vm_host {
 	void *ctx;
 	/* device time, µs since boot (wraps) */
@@ -131,6 +131,9 @@ struct vm_host {
 	 * (unknown ID, a corrupt body, no store) or 3 (off + n past its end), and nothing written unless 0.
 	 * NULL: there is no store (error 13) */
 	int (*asset_read)(void *ctx, const uint8_t *id, uint32_t off, uint8_t *dst, uint32_t n);
+	/* VIDEO and VIDEOX: on = 1 before decoding, 0 after drawing, always in pairs; the platform may run
+	 * faster meanwhile (g1v0: the app core at 128 MHz). NULL: nothing */
+	void (*boost)(void *ctx, int on);
 };
 
 /* the current host packet or the current program task */
@@ -173,6 +176,9 @@ struct vm {
 	uint32_t period_start, run_us, last_run_us, charged_us;
 	uint8_t row[VM_PANEL_W / 2];
 	struct vm_video video;
+	uint16_t vx0[VM_PANEL_H], vx1[VM_PANEL_H]; /* VIDEOX: each row's span to draw */
+	uint8_t vxpair[256];                      /* VIDEOX: levels of two pixels for a byte of two indices */
+	uint8_t row2[VM_PANEL_W / 2 + 2];         /* VIDEOX at scale 2: a row before its half-pixel shift */
 };
 
 /* Boot: zero the arena (VM_ARENA_SIZE bytes, owned by the caller), program stopped, default

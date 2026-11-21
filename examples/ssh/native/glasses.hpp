@@ -15,7 +15,7 @@ struct GlassesConfig {
 
 // ScouterKit's session on both arms: through the app's transport, or the
 // emulated arms when `transport` is null in an emulator build. Init blocks
-// until both arms are ready (at most 30 s).
+// until both arms are ready (at most 60 s).
 bool GlassesStart(const GlassesConfig &config, scouter_kit::g1::Transport *transport, std::string *error);
 void GlassesStop();
 

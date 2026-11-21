@@ -1,0 +1,891 @@
+// The phone's screen on the emulated arms: the picture's maths (band, fit, tone), then a captured frame on
+// both eyes at each eye's offset, an unchanged frame not sent again, the panels off in the case, and a clean
+// display after Stop.
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <cstdio>
+#include <thread>
+#include <vector>
+
+#include "../screen.hpp"
+
+namespace g1 = scouter_kit::g1;
+
+static int failures = 0;
+#define CHECK(cond)                                                       \
+  do {                                                                    \
+    if (!(cond)) {                                                        \
+      std::printf("%s:%d: CHECK(%s) failed\n", __FILE__, __LINE__, #cond); \
+      failures++;                                                         \
+    }                                                                     \
+  } while (0)
+
+static bool WaitFor(auto done, int ms = 5000) {
+  auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+  while (!done()) {
+    if (std::chrono::steady_clock::now() > end) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return true;
+}
+
+// Lit pixels of an eye's panel inside a rectangle.
+static int Lit(int arm, int x0 = 0, int y0 = 0, int x1 = 640, int y1 = 480) {
+  const uint8_t *p = g1::emulator::Panel(arm);
+  int n = 0;
+  for (int y = y0; y < y1; y++)
+    for (int x = x0; x < x1; x++) n += p[y * 640 + x] != 0;
+  return n;
+}
+
+// A white RGBA screen with a black rectangle (inverted on the glasses: a lit rectangle on see-through black).
+static std::vector<uint8_t> Phone(int w, int h, int rx, int ry, int rw, int rh, int stride) {
+  std::vector<uint8_t> p(size_t(stride) * h, 255);
+  for (int y = ry; y < ry + rh; y++)
+    for (int x = rx; x < rx + rw; x++) {
+      uint8_t *px = &p[size_t(y) * stride + x * 4];
+      px[0] = px[1] = px[2] = 0;
+    }
+  return p;
+}
+
+// A white screen with black 3 x 3 blocks at random (a frame that compresses badly).
+static std::vector<uint8_t> Noise(int w, int h, int stride, unsigned seed) {
+  std::vector<uint8_t> p(size_t(stride) * h, 255);
+  for (int by = 0; by < h; by += 3)
+    for (int bx = 0; bx < w; bx += 3) {
+      seed = seed * 1103515245u + 12345u;
+      if (!((seed >> 16) & 1)) continue;
+      for (int y = by; y < std::min(h, by + 3); y++)
+        for (int x = bx; x < std::min(w, bx + 3); x++) {
+          uint8_t *px = &p[size_t(y) * stride + x * 4];
+          px[0] = px[1] = px[2] = 0;
+        }
+    }
+  return p;
+}
+
+// A screen of one grey.
+static std::vector<uint8_t> Grey(int w, int h, int stride, uint8_t v) {
+  std::vector<uint8_t> p(size_t(stride) * h, 255);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      uint8_t *px = &p[size_t(y) * stride + x * 4];
+      px[0] = px[1] = px[2] = v;
+    }
+  return p;
+}
+
+int main() {
+  // Despeckle: a lone lit pixel goes, a pinhole in a lit area fills, the area's edge stays.
+  {
+    int w = 12, h = 8;
+    std::vector<uint8_t> p(size_t(w) * h, 0);
+    p[size_t(2 * w + 2)] = 255;
+    for (int y = 3; y < 7; y++)
+      for (int x = 6; x < 11; x++) p[size_t(y * w + x)] = 255;
+    p[size_t(4 * w + 8)] = 0;
+    ssh::Despeckle(&p, w, ssh::Rect{0, 0, w, h});
+    CHECK(p[size_t(2 * w + 2)] == 0);
+    CHECK(p[size_t(4 * w + 8)] == 255);
+    CHECK(p[size_t(3 * w + 6)] == 255 && p[size_t(6 * w + 10)] == 255);
+  }
+  // The bars cut: a black status bar (lit once inverted) shows, and with the top 6 % cut it is gone.
+  {
+    int sw = 100, sh = 200, st = sw * 4;
+    auto bar = Phone(sw, sh, 0, 0, sw, 10, st);
+    ssh::ScreenOptions po;
+    po.levels = 2;
+    po.fit = ssh::ScreenOptions::kStretch;
+    std::vector<uint8_t> with, without;
+    ssh::Picture(bar.data(), sw, sh, st, po, 100, 200, &with);
+    po.crop_top = 60;
+    ssh::Picture(bar.data(), sw, sh, st, po, 100, 200, &without);
+    int top = 0, rest = 0;
+    for (int i = 0; i < 100 * 5; i++) top += with[size_t(i)] != 0;
+    for (uint8_t v : without) rest += v != 0;
+    CHECK(top == 500 && rest == 0);
+  }
+  // Tone: inverted, 16 levels as multiples of 17; 2 levels.
+  std::vector<uint8_t> t = {0, 255, 128, 17};
+  ssh::Tone(&t, 4, {0, 0, 4, 1}, 100, 100, 128, 16);
+  CHECK(t[0] == 255 && t[1] == 0 && t[2] % 17 == 0 && t[3] == 238);
+  t = {0, 200, 100};
+  ssh::Tone(&t, 3, {0, 0, 3, 1}, 0, 100, 128, 2);
+  CHECK(t[0] == 0 && t[1] == 255 && t[2] == 0);
+  t = {0, 255};
+  ssh::Tone(&t, 2, {0, 0, 2, 1}, 70, 100, 128, 16); // 70 % inverted: dark goes light grey, light goes dark grey
+  CHECK(t[0] == 170 && t[1] == 85);
+  t = {128, 128, 128, 128}; // a mid grey dithered: some pixels lit, some not
+  ssh::Tone(&t, 4, {0, 0, 4, 1}, 0, 100, 128, 2, true);
+  CHECK((t[0] == 255) + (t[1] == 255) + (t[2] == 255) + (t[3] == 255) == 2);
+  t = {9, 9, 9};
+  ssh::Tone(&t, 3, {1, 0, 1, 1}, 100, 100, 128, 16); // outside the content: untouched
+  CHECK(t[0] == 9 && t[1] == 238 && t[2] == 9);
+  t = {0, 100, 200, 255}; // 4 greys: 0, 85, 170, 255
+  ssh::Tone(&t, 4, {0, 0, 4, 1}, 0, 100, 128, 4);
+  CHECK(t[0] == 0 && t[1] == 85 && t[2] == 170 && t[3] == 255);
+
+  // Pixelate: 2 x 2 blocks of their average; the dither keeps a block whole.
+  std::vector<uint8_t> px = {0, 100, 0, 100, 0, 100, 0, 100};
+  ssh::Pixelate(&px, 4, {0, 0, 4, 2}, 2);
+  CHECK(px == std::vector<uint8_t>(8, 50));
+  px.assign(16, 128);
+  ssh::Tone(&px, 4, {0, 0, 4, 4}, 0, 100, 128, 2, true, 2);
+  CHECK(px[0] == px[1] && px[0] == px[4] && px[0] == px[5]);
+  int pw = 0, ph = 0;
+  ssh::PictureSize(100, 9, &pw, &ph);
+  CHECK(pw == 540 && ph == 471);
+
+  // Source: the whole screen, or a full-width band in the picture's shape at its place.
+  ssh::ScreenOptions o;
+  ssh::Rect r = ssh::Source(1080, 2340, 540, 471, o);
+  CHECK(r.x == 0 && r.y == 0 && r.w == 1080 && r.h == 2340);
+  o.fit = ssh::ScreenOptions::kFill;
+  o.pan_y = 0;
+  r = ssh::Source(1080, 2340, 540, 471, o);
+  CHECK(r.x == 0 && r.y == 0 && r.w == 1080 && r.h == 942);
+  o.pan_y = 100;
+  r = ssh::Source(1080, 2340, 540, 471, o);
+  CHECK(r.y == 2340 - 942 && r.y + r.h == 2340);
+  r = ssh::Source(2340, 1080, 540, 471, o); // landscape: all rows, the middle columns
+  CHECK(r.h == 1080 && r.w == 1238 && r.x == (2340 - 1238) / 2);
+
+  // Fit: averages, keeps the shape centred with the background around it.
+  std::vector<uint8_t> src = {0, 255, 0, 255, 0, 255, 0, 255};
+  std::vector<uint8_t> dst;
+  ssh::Fit(&dst, 2, 1, src, 4, {0, 0, 4, 2}, {0, 0, 2, 1}, false);
+  CHECK(dst.size() == 2 && dst[0] == 127 && dst[1] == 127);
+  ssh::Rect drawn = ssh::Fit(&dst, 4, 1, src, 4, {0, 0, 4, 2}, {0, 0, 4, 1}, true); // 2:1 into 4:1: 2 x 1 in the middle
+  CHECK(dst[0] == 0 && dst[3] == 0 && dst[1] == 127);
+  CHECK(drawn.x == 1 && drawn.y == 0 && drawn.w == 2 && drawn.h == 1);
+  // Place: the picture's place in percent of the area; Stretch mode fills it (distorted).
+  ssh::ScreenOptions placed;
+  placed.out_x = 50;
+  placed.out_y = 0;
+  placed.out_w = 50;
+  placed.out_h = 100;
+  ssh::Rect pl = ssh::Place(540, 471, placed);
+  CHECK(pl.x == 270 && pl.y == 0 && pl.w == 270 && pl.h == 471);
+  ssh::Fit(&dst, 4, 1, src, 4, {0, 0, 4, 2}, {2, 0, 2, 1}, false);
+  CHECK(dst[0] == 0 && dst[1] == 0 && dst[2] == 127 && dst[3] == 127);
+
+  // Rotate: a 3 x 2 image turned clockwise, upside down and counter-clockwise.
+  std::vector<uint8_t> six = {1, 2, 3, 4, 5, 6}, turned;
+  int tw = 0, th = 0;
+  ssh::Rotate(six, 3, 2, 90, &turned, &tw, &th);
+  CHECK(tw == 2 && th == 3 && turned == std::vector<uint8_t>({4, 1, 5, 2, 6, 3}));
+  ssh::Rotate(six, 3, 2, 180, &turned, &tw, &th);
+  CHECK(tw == 3 && th == 2 && turned == std::vector<uint8_t>({6, 5, 4, 3, 2, 1}));
+  ssh::Rotate(six, 3, 2, 270, &turned, &tw, &th);
+  CHECK(tw == 2 && th == 3 && turned == std::vector<uint8_t>({3, 6, 2, 5, 1, 4}));
+
+  // Zoom: the middle half; Stretch: a dull 100 ... 199 ramp spans nearly all levels; Sharpen: an edge grows.
+  ssh::ScreenOptions zoomed;
+  zoomed.zoom = 200;
+  zoomed.pan_x = 50;
+  zoomed.pan_y = 50;
+  r = ssh::Source(100, 50, 100, 50, zoomed);
+  CHECK(r.x == 25 && r.y == 12 && r.w == 50 && r.h == 25);
+  std::vector<uint8_t> ramp(100);
+  for (int i = 0; i < 100; i++) ramp[i] = uint8_t(100 + i);
+  ssh::Stretch(&ramp, 100, {0, 0, 100, 1}, 100);
+  CHECK(ramp[0] < 10 && ramp[99] > 245);
+  { // a dark theme: the grey background (32) black, its grey text (190) near white, the edges between kept
+    std::vector<uint8_t> page(1000, 32);
+    for (int i = 0; i < 1000; i += 4) page[size_t(i)] = 190, page[size_t(i) + 1] = 110;
+    ssh::Stretch(&page, 1000, {0, 0, 1000, 1}, 100);
+    CHECK(page[2] == 0 && page[0] > 240 && page[1] > 60 && page[1] < 180);
+    std::vector<uint8_t> light(1000, 240); // a light page: its background white (black once inverted)
+    for (int i = 0; i < 1000; i += 4) light[size_t(i)] = 60;
+    ssh::Stretch(&light, 1000, {0, 0, 1000, 1}, 100);
+    CHECK(light[2] == 255 && light[0] < 10);
+  }
+  std::vector<uint8_t> edge = {100, 100, 200, 200, 100, 100, 200, 200, 100, 100, 200, 200};
+  ssh::Sharpen(&edge, 4, {0, 0, 4, 3});
+  CHECK(edge[5] < 100 && edge[6] > 200);
+
+  // Locate and Shows: a screen point on the picture, and the part that shows, through the cut, the turn and the fit.
+  {
+    ssh::ScreenOptions lo;
+    int x = -1, y = -1;
+    CHECK(ssh::Locate(5000, 5000, 540, 471, lo, 540, 471, &x, &y) && x == 269 && y == 235);
+    lo.rotate = 90; // a 200 x 100 screen turned clockwise into 100 x 200: its top left goes to the top right
+    CHECK(ssh::Locate(0, 0, 200, 100, lo, 100, 200, &x, &y) && x == 99 && y == 0);
+    CHECK(ssh::Locate(10000, 0, 200, 100, lo, 100, 200, &x, &y) && x == 99 && y == 199);
+    lo.rotate = 0;
+    lo.crop_top = 100; // the top tenth is cut: a point there is not shown
+    CHECK(!ssh::Locate(5000, 500, 200, 400, lo, 200, 360, &x, &y));
+    CHECK(ssh::Locate(5000, 1100, 200, 400, lo, 200, 360, &x, &y) && y < 8);
+    lo.crop_top = 0;
+    lo.fit = ssh::ScreenOptions::kFill; // a tall screen filling a square: a band at the top (pan_y 0)
+    int ow = 0, oh = 0;
+    ssh::Rect sh = ssh::Shows(100, 400, lo, 200, 200, &ow, &oh);
+    CHECK(sh.x == 0 && sh.w == 10000 && sh.y == 0 && sh.h > 2400 && sh.h < 2600 && ow == 200 && oh == 200);
+    CHECK(!ssh::Locate(5000, 9000, 100, 400, lo, 200, 200, &x, &y));
+  }
+
+  // The emulated arms, worn, head level.
+  g1::GrayConfig gray{100, 9};
+  std::string error;
+  CHECK(g1::Init(&gray, &error, nullptr) == g1::ERROR_NONE);
+  for (int arm = 0; arm < 2; arm++) {
+    g1::emulator::SetProperty(arm, g1::PROP_WORN, 1);
+    g1::emulator::SetProperty(arm, g1::PROP_IN_CASE, 0);
+  }
+  ssh::ScreenMirror m;
+  CHECK(m.Start(100, 9, &error));
+  if (!error.empty()) std::printf("start: %s\n", error.c_str());
+  CHECK(WaitFor([] { return Lit(0) == 0 && Lit(1) == 0; }));
+
+  // A 540 x 471 "screen" (the picture's own size, padded rows) with a black square: lit on both eyes. The
+  // picture sits at the display's (100, 0); the left eye shows the display as it is, the right eye 100 to the
+  // left and 9 lower.
+  int stride = 540 * 4 + 64;
+  ssh::ScreenOptions opt;
+  opt.fit = ssh::ScreenOptions::kFill;
+  auto phone = Phone(540, 471, 200, 100, 80, 80, stride);
+  CHECK(m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown);
+  CHECK(WaitFor([] { return Lit(0) > 5000 && Lit(1) > 5000; }));
+  int left = Lit(0, 300, 100, 380, 180), right = Lit(1, 200, 109, 280, 189);
+  CHECK(left > 5500 && right > 5500);
+  CHECK(Lit(0) - left < 400 && Lit(1) - right < 400); // nothing else lit
+  CHECK(m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kSame);
+  CHECK(m.frames() == 1);
+
+  // The square moves: the old place goes dark.
+  phone = Phone(540, 471, 0, 0, 80, 80, stride);
+  CHECK(m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown);
+  CHECK(WaitFor([] { return Lit(1, 200, 109, 280, 189) == 0 && Lit(1, 0, 9, 80, 89) > 5500; }));
+
+  // Black and white: the VIDEO path (records into each arm's 1-bpp bitmap) draws the square on both eyes.
+  opt.levels = 2;
+  phone = Phone(540, 471, 300, 200, 80, 80, stride);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(0, 400, 200, 480, 280) > 5500 && Lit(1, 300, 209, 380, 289) > 5500; }));
+  CHECK(Lit(1, 0, 9, 80, 89) == 0); // the gray picture is gone
+  phone = Phone(540, 471, 0, 0, 80, 80, stride);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(1, 300, 209, 380, 289) == 0 && Lit(1, 0, 9, 80, 89) > 5500; }));
+
+  // A transition: the old picture goes (out), the next one is decoded off the panel and revealed from the
+  // bitmap: the square at its new place on both eyes, nothing else lit; the frame after it draws at once.
+  auto fx = std::make_shared<ssh::Fx>();
+  CHECK(fx->Start(&error));
+  fx->Out(ssh::Fx::kRight, m.FxRegion());
+  m.Reveal(ssh::Fx::kRight, fx);
+  phone = Phone(540, 471, 300, 200, 80, 80, stride);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  int64_t until = fx->busy_until();
+  CHECK(until > g1::NowUs());
+  CHECK(WaitFor([&] { return g1::NowUs() > until + 150000; }));
+  CHECK(Lit(0, 400, 200, 480, 280) > 5500 && Lit(1, 300, 209, 380, 289) > 5500);
+  CHECK(Lit(1, 0, 9, 80, 89) == 0);
+  CHECK(Lit(0) - Lit(0, 400, 200, 480, 280) < 400 && Lit(1) - Lit(1, 300, 209, 380, 289) < 400);
+  phone = Phone(540, 471, 0, 0, 80, 80, stride);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(1, 300, 209, 380, 289) == 0 && Lit(1, 0, 9, 80, 89) > 5500; }));
+  CHECK(fx->busy_until() == until); // no reveal for it
+
+  // The cursor (black and white): the arms draw it over the picture at once, no frame sent; moved, the picture
+  // comes back where it was; it stays over the next frame; off, not a trace. Phone (200, 200) is picture (200, 200):
+  // its box at the left eye's (299, 199), the right eye's (199, 208).
+  {
+    auto at = [](int v) { return (v * 10000 + 538) / 539; }; // back to pixel v (floor division)
+    auto aty = [](int v) { return (v * 10000 + 469) / 470; };
+    int before = m.frames();
+    m.Pointer(at(200), aty(200), true);
+    CHECK(WaitFor([] { return Lit(0, 299, 199, 315, 219) > 40 && Lit(1, 199, 208, 215, 228) > 40; }));
+    int arrow = Lit(0, 299, 199, 315, 219);
+    CHECK(Lit(0, 299, 199, 303, 204) >= 2); // the tip
+    CHECK(m.frames() == before);
+    m.Pointer(at(220), aty(300), true);
+    CHECK(WaitFor([] { return Lit(0, 299, 199, 315, 219) == 0 && Lit(0, 319, 299, 335, 319) > 40; }));
+    CHECK(Lit(1, 199, 208, 215, 228) == 0 && Lit(1, 219, 308, 235, 328) > 40);
+    CHECK(Lit(0, 319, 299, 335, 319) == arrow);
+    // Over the lit square: its body lit, its edge dark.
+    m.Pointer(at(30), aty(30), true);
+    CHECK(WaitFor([] { return Lit(0, 319, 299, 335, 319) == 0 && Lit(0, 129, 29, 145, 49) < 320; }));
+    CHECK(Lit(0, 129, 29, 145, 49) > 320 - 120 && Lit(0, 100, 0, 180, 80) > 6400 - 120);
+    // A frame (the square moves): the arrow is drawn again over it.
+    m.Pointer(at(220), aty(300), true);
+    CHECK(WaitFor([] { return Lit(0, 319, 299, 335, 319) > 40; }));
+    phone = Phone(540, 471, 300, 200, 80, 80, stride);
+    CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+    CHECK(WaitFor([] { return Lit(0, 400, 200, 480, 280) > 5500 && Lit(1, 0, 9, 80, 89) == 0; }));
+    CHECK(WaitFor([&] { return Lit(0, 319, 299, 335, 319) == arrow; }));
+    // Off: nothing but the square.
+    m.Pointer(at(220), aty(300), false);
+    CHECK(WaitFor([] { return Lit(0, 319, 299, 335, 319) == 0 && Lit(1, 219, 308, 235, 328) == 0; }));
+    CHECK(Lit(0) - Lit(0, 400, 200, 480, 280) < 400);
+    int shows[6] = {};
+    CHECK(m.Shows(shows) && shows[0] == 0 && shows[1] == 0 && shows[2] == 10000 && shows[3] == 10000 &&
+          shows[4] == 540 && shows[5] == 471);
+    phone = Phone(540, 471, 0, 0, 80, 80, stride); // as the tests below expect
+  }
+
+  // A card over the picture (the help, the quick settings): in the frames from the next one; gone again after.
+  m.SetOverlay(std::vector<uint8_t>(60 * 20, 255), 60, 20, 200, 400);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(0, 300, 400, 360, 420) == 1200 && Lit(1, 200, 409, 260, 429) == 1200; }));
+  CHECK(Lit(1, 0, 9, 80, 89) > 5500); // the picture under it as ever
+  m.SetOverlay({}, 0, 0, 0, 0);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(0, 300, 400, 360, 420) == 0; }));
+
+  // Steady black and white: a grey just past the threshold either way changes nothing (no frame sent); one
+  // clearly past it does.
+  auto grey = [&](uint8_t v) { return Grey(540, 471, stride, v); };
+  auto send = [&](const std::vector<uint8_t> &p) {
+    int r = ssh::ScreenMirror::kBusy;
+    WaitFor([&] { r = m.Frame(p.data(), 540, 471, stride, opt); return r != ssh::ScreenMirror::kBusy; }, 10000);
+    return r;
+  };
+  int first = send(grey(100));
+  if (first != ssh::ScreenMirror::kShown) std::printf("steady: first grey gave %d\n", first);
+  CHECK(first == ssh::ScreenMirror::kShown); // lit (inverted 155: clearly past 128)
+  CHECK(send(grey(134)) == ssh::ScreenMirror::kSame);  // 121: under 128, within the margin
+  CHECK(send(grey(170)) == ssh::ScreenMirror::kShown); // 85: clearly dark
+  CHECK(send(grey(122)) == ssh::ScreenMirror::kSame);  // 133: over 128, within the margin
+
+  // Auto detail: noise does not fit a 1 KB budget at every pixel, so it goes coarser (kLater, sent at a coarser
+  // detail); the same frame again (nothing moved) goes at every pixel.
+  opt.detail = 0;
+  opt.budget = 1;
+  auto noise = Noise(540, 471, stride, 7);
+  int res = ssh::ScreenMirror::kBusy;
+  CHECK(WaitFor([&] { res = m.Frame(noise.data(), 540, 471, stride, opt); return res != ssh::ScreenMirror::kBusy; }, 10000));
+  CHECK(res == ssh::ScreenMirror::kLater);
+  CHECK(m.stats().detail > 1 && m.stats().bytes > 0);
+  CHECK(WaitFor([&] { res = m.Frame(noise.data(), 540, 471, stride, opt); return res != ssh::ScreenMirror::kBusy; }, 10000));
+  CHECK(res == ssh::ScreenMirror::kShown && m.stats().detail == 1);
+  // The preview is that picture, as a render without the glasses makes it too.
+  std::vector<uint8_t> shown, local;
+  CHECK(m.Preview(&shown, &pw, &ph) && pw == 540 && ph == 471);
+  ssh::ScreenOptions every = opt;
+  every.detail = 1;
+  ssh::Picture(noise.data(), 540, 471, stride, every, 540, 471, &local);
+  CHECK(shown == local);
+  std::string check = m.Check();
+  std::printf("check:\n%s", check.c_str());
+  CHECK(!check.empty());
+  opt.detail = 1;
+
+  // In the case: hidden, the panels off; out again: shown.
+  g1::emulator::SetProperty(0, g1::PROP_IN_CASE, 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  CHECK(m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kHidden);
+  uint32_t panel = 1;
+  CHECK(WaitFor([&] { return g1::left.Prop(g1::PROP_PANEL, &panel) && panel == 0; }));
+  g1::emulator::SetProperty(0, g1::PROP_IN_CASE, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 10000));
+  CHECK(WaitFor([] { return Lit(1, 0, 9, 80, 89) > 5500; }));
+
+  // An arm whose session began in the case (the glasses connected there) and was taken out since: shown, by
+  // the arm's IN_CASE now rather than its session's first message.
+  g1::emulator::SetProperty(0, g1::PROP_IN_CASE, 1);
+  g1::emulator::Disconnect(0, 300);
+  CHECK(WaitFor([] { auto s = g1::left.GetState(); return s.connected && s.in_case; }, 15000));
+  g1::emulator::SetProperty(0, g1::PROP_IN_CASE, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  phone = Phone(540, 471, 200, 200, 80, 80, stride);
+  CHECK(WaitFor([&] { return m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kShown; }, 15000));
+
+  // The pointer: an arrow at its spot on a black screen (its rim or its fill lit, whatever the inversion), nothing
+  // without it; it moves with its spot.
+  {
+    std::vector<uint8_t> dark(size_t(540) * 4 * 471, 0);
+    for (size_t i = 3; i < dark.size(); i += 4) dark[i] = 255;
+    ssh::ScreenOptions po;
+    po.invert = 0;
+    po.levels = 16;
+    po.detail = 1;
+    std::vector<uint8_t> none, at, moved;
+    ssh::Picture(dark.data(), 540, 471, 540 * 4, po, 270, 236, &none);
+    po.cursor_x = 5000;
+    po.cursor_y = 5000;
+    ssh::Picture(dark.data(), 540, 471, 540 * 4, po, 270, 236, &at);
+    po.cursor_x = 1000;
+    ssh::Picture(dark.data(), 540, 471, 540 * 4, po, 270, 236, &moved);
+    auto lit = [](const std::vector<uint8_t> &p, int x0, int x1, int y0, int y1, int pw) {
+      int n = 0;
+      for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) n += p[size_t(y) * size_t(pw) + size_t(x)] > 128;
+      return n;
+    };
+    CHECK(lit(none, 0, 270, 0, 236, 270) == 0);
+    CHECK(lit(at, 130, 150, 112, 135, 270) > 10); // just right of and below the middle
+    CHECK(lit(at, 0, 100, 0, 236, 270) == 0);
+    CHECK(lit(moved, 20, 45, 112, 135, 270) > 10);
+    CHECK(lit(moved, 130, 150, 112, 135, 270) == 0);
+  }
+
+  m.Stop();
+  CHECK(WaitFor([] { return Lit(0) == 0 && Lit(1) == 0; }));
+  CHECK(m.Frame(phone.data(), 540, 471, stride, opt) == ssh::ScreenMirror::kStopped);
+
+  // Under a transition (keep_panels): no power cycle; the columns one eye sees go black (the terminal's battery
+  // band could be there), the picture's place is left to the transition. The left eye's columns 0 ... 99 and the
+  // right eye's 540 ... 639 lit first, and the picture's place.
+  {
+    int64_t lit = g1::Alloc(50 * 480);
+    CHECK(lit >= 0);
+    for (g1::Arm *a : {&g1::left, &g1::right}) a->WriteArena(g1::Address(lit), std::vector<uint8_t>(50 * 480, 0xFF));
+    g1::left.Draw(g1::Address(lit), 50, 0, 0, 0, 0, 100, 480);
+    g1::left.Draw(g1::Address(lit), 50, 0, 0, 300, 100, 50, 50);
+    g1::right.Draw(g1::Address(lit), 50, 0, 0, 540, 0, 100, 480);
+    CHECK(WaitFor([] { return Lit(0, 0, 0, 100, 480) == 48000 && Lit(1, 540, 0, 640, 480) == 48000; }));
+    g1::Free(g1::Address(lit));
+    ssh::ScreenMirror kept;
+    CHECK(kept.Start(100, 9, &error, true));
+    CHECK(WaitFor([] { return Lit(0, 0, 0, 100, 480) == 0 && Lit(1, 540, 0, 640, 480) == 0; }));
+    CHECK(Lit(0, 300, 100, 350, 150) == 2500); // the transition's to black out, not a power cycle
+    uint32_t on = 0;
+    CHECK(g1::left.Prop(g1::PROP_PANEL, &on) && on == 1);
+    kept.Stop(true);
+  }
+  // Greys on g1v0 0.5.62+ (the arms report it from their next session): the VIDEOX path, 16 greys as 4 planes. A ramp
+  // of 16 bands shows 16 levels on both eyes; a page scrolled up 40 rows goes as a row move (far fewer bytes) and
+  // the eyes then show the page 40 rows further on.
+  {
+    g1::emulator::SetFirmware(5, 62);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 62; }, 10000));
+    ssh::ScreenMirror gm;
+    CHECK(gm.Start(100, 9, &error));
+    ssh::ScreenOptions go;
+    go.fit = ssh::ScreenOptions::kFill;
+    go.invert = 0;
+    go.levels = 16;
+    go.detail = 1;
+    int gs = 540 * 4;
+    std::vector<uint8_t> ramp(size_t(gs) * 471);
+    for (int y = 0; y < 471; y++)
+      for (int x = 0; x < 540; x++) {
+        uint8_t v = uint8_t(std::min(255, (x * 16 / 540) * 17));
+        for (int c = 0; c < 3; c++) ramp[size_t(y) * size_t(gs) + size_t(x) * 4 + size_t(c)] = v;
+        ramp[size_t(y) * size_t(gs) + size_t(x) * 4 + 3] = 255;
+      }
+    CHECK(WaitFor([&] { return gm.Frame(ramp.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    CHECK(gm.stats().path == 1);
+    CHECK(WaitFor([] { return Lit(0, 600, 200, 630, 260) > 1700; }, 5000));
+    {
+      const uint8_t *p = g1::emulator::Panel(0);
+      bool seen[16] = {};
+      for (int x = 100; x < 640; x++) seen[p[size_t(240) * 640 + size_t(x)] & 15] = true;
+      int levels = 0;
+      for (bool b : seen) levels += b;
+      CHECK(levels == 16);
+      // the right eye shows the same 100 to the left and 9 lower (once it has drawn it)
+      CHECK(WaitFor([] {
+        const uint8_t *l = g1::emulator::Panel(0), *r = g1::emulator::Panel(1);
+        for (int x = 100; x < 640; x++)
+          if (l[size_t(240) * 640 + size_t(x)] != r[size_t(249) * 640 + size_t(x - 100)]) return false;
+        return true;
+      }, 5000));
+    }
+    // a page of grey "text" lines, then the same page 40 rows further on
+    std::vector<uint8_t> page(size_t(gs) * 600);
+    for (int y = 0; y < 600; y++)
+      for (int x = 0; x < 540; x++) {
+        bool ink = y % 18 >= 4 && y % 18 < 14 && ((x / 7 + y / 18) % 5 < 3) && ((x + y) % 6 < 4);
+        uint8_t v = ink ? uint8_t(255 - (y / 18 % 8) * 17) : 0;
+        for (int c = 0; c < 3; c++) page[size_t(y) * size_t(gs) + size_t(x) * 4 + size_t(c)] = v;
+        page[size_t(y) * size_t(gs) + size_t(x) * 4 + 3] = 255;
+      }
+    CHECK(WaitFor([&] { return gm.Frame(page.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    int first = gm.stats().bytes;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // the arms draw it (due time + decode)
+    std::vector<uint8_t> before(g1::emulator::Panel(0), g1::emulator::Panel(0) + 640 * 480);
+    CHECK(WaitFor([&] { return gm.Frame(page.data() + size_t(40) * size_t(gs), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 10000));
+    int scrolled = gm.stats().bytes;
+    std::printf("greys: first page %d bytes, scrolled 40 rows %d bytes\n", first, scrolled);
+    CHECK(scrolled * 3 < first);
+    CHECK(WaitFor([&] {
+      const uint8_t *p = g1::emulator::Panel(0);
+      for (int y = 0; y < 431; y++)
+        if (std::memcmp(p + size_t(y) * 640 + 100, before.data() + size_t(y + 40) * 640 + 100, 540)) return false;
+      return true;
+    }, 5000));
+    // Auto (detail 0): video-like frames (most rows change) go as the top two planes at half detail, small; once
+    // the picture holds still the exact 16-grey picture follows at full detail.
+    go.detail = 0;
+    int moving = 0, moving_bytes = 0;
+    // video-like: smooth grey shapes that move every frame (most rows change)
+    auto video = [&](int f) {
+      std::vector<uint8_t> p(size_t(gs) * 471);
+      for (int y = 0; y < 471; y++)
+        for (int x = 0; x < 540; x++) {
+          double a = std::sin((x + 9 * f) / 23.0) * std::cos((y - 6 * f) / 17.0);
+          uint8_t g = uint8_t(std::clamp(128.0 + 110.0 * a, 0.0, 255.0));
+          uint8_t *px = &p[size_t(y) * size_t(gs) + size_t(x) * 4];
+          px[0] = px[1] = px[2] = g;
+          px[3] = 255;
+        }
+      return p;
+    };
+    for (int f = 0; f < 8; f++) {
+      auto vid = video(f);
+      int r = 0;
+      CHECK(WaitFor([&] { r = gm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+      if (gm.stats().detail >= 2) {
+        moving++;
+        if (f >= 2) moving_bytes = std::max(moving_bytes, gm.stats().bytes); // the motion mode from the third
+      }
+    }
+    std::printf("greys auto: %d of 8 moving frames coarse, largest %d bytes\n", moving, moving_bytes);
+    CHECK(moving >= 5);
+    auto held = video(7);
+    CHECK(WaitFor([&] {
+      int r = gm.Frame(held.data(), 540, 471, gs, go);
+      return r == ssh::ScreenMirror::kShown && gm.stats().detail == 1;
+    }, 5000));
+    std::printf("greys auto: still picture %d bytes at full detail\n", gm.stats().bytes);
+    CHECK(gm.stats().bytes > moving_bytes);
+    gm.Stop();
+
+    // 0.5.64+: the motion stream (half size, pixel coded, scale 2); back to the still picture, every pixel exact
+    g1::emulator::SetFirmware(5, 64);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 64; }, 10000));
+    ssh::ScreenMirror mm;
+    CHECK(mm.Start(100, 9, &error));
+    int mmoving = 0, mbytes = 0;
+    for (int f = 0; f < 8; f++) {
+      auto vid = video(f);
+      int r = 0;
+      CHECK(WaitFor([&] { r = mm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+      if (f >= 2 && mm.stats().detail == 2) {
+        mmoving++;
+        mbytes = std::max(mbytes, mm.stats().bytes);
+      }
+    }
+    std::printf("greys auto 0.5.64: %d moving frames coarse, largest %d bytes (0.5.62 path: %d)\n", mmoving, mbytes,
+                moving_bytes);
+    CHECK(mmoving >= 3);
+    CHECK(WaitFor([&] {
+      int r = mm.Frame(held.data(), 540, 471, gs, go);
+      return r == ssh::ScreenMirror::kShown && mm.stats().detail == 1;
+    }, 5000));
+    auto wrong_mm = [&] {
+      std::vector<uint8_t> pv;
+      int pw = 0, ph = 0;
+      if (!mm.Preview(&pv, &pw, &ph)) return -1;
+      const uint8_t *pl = g1::emulator::Panel(0);
+      int wrong = 0;
+      for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+      return wrong;
+    };
+    CHECK(WaitFor([&] { return wrong_mm() == 0; }, 4000)); // the exact picture drawn (a full redraw)
+    std::printf("greys auto 0.5.64: %d of 254340 pixels differ from the exact picture after the motion\n", wrong_mm());
+    mm.Stop();
+
+    // 0.5.68+: moving pictures as transform-coded video (VIDEOT: half size, 8 bits, dithered 16 levels); back to
+    // the still picture, every pixel exact again
+    g1::emulator::SetFirmware(5, 68);
+    int full_vt_bytes = 0; // the whole picture's largest VIDEOT record (below)
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 68; }, 10000));
+    {
+      ssh::ScreenMirror tm;
+      CHECK(tm.Start(100, 9, &error));
+      int tmoving = 0, tbytes = 0, levels_seen = 0;
+      for (int f = 0; f < 8; f++) {
+        auto vid = video(f);
+        int r = 0;
+        CHECK(WaitFor([&] { r = tm.Frame(vid.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+        if (f >= 2 && tm.stats().detail == 2) {
+          tmoving++;
+          tbytes = std::max(tbytes, tm.stats().bytes);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      {
+        bool seen[16] = {};
+        const uint8_t *pl = g1::emulator::Panel(0);
+        for (int y = 0; y < 471; y++)
+          for (int x = 100; x < 640; x++) seen[pl[size_t(y) * 640 + size_t(x)] & 15] = true;
+        for (bool b : seen) levels_seen += b;
+      }
+      std::printf("greys auto 0.5.68: %d moving frames as VIDEOT, largest %d bytes (0.5.62 path: %d), %d levels on "
+                  "the panel while moving\n", tmoving, tbytes, moving_bytes, levels_seen);
+      CHECK(tmoving >= 3);
+      CHECK(levels_seen > 4); // more than the 4 greys of the plane motion mode
+      full_vt_bytes = tbytes;
+      CHECK(WaitFor([&] {
+        int r = tm.Frame(held.data(), 540, 471, gs, go);
+        return r == ssh::ScreenMirror::kShown && tm.stats().detail == 1;
+      }, 5000));
+      auto wrong_tm = [&] {
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!tm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+        return wrong;
+      };
+      CHECK(WaitFor([&] { return wrong_tm() == 0; }, 4000)); // the exact picture drawn (a full redraw)
+      std::printf("greys auto 0.5.68: %d of 254340 pixels differ from the exact picture after the motion\n", wrong_tm());
+      tm.Stop();
+    }
+    {
+      // a video in part of a page (a player in a browser): that rectangle by VIDEOT, the text around it stays exact
+      // (16 greys, full detail) while it plays; once it stops, the whole picture exact again
+      const int vx = 150, vy = 100, vw = 200, vh = 150;
+      auto pagevid = [&](int f) {
+        std::vector<uint8_t> p(page.begin(), page.begin() + std::ptrdiff_t(size_t(gs) * 471));
+        auto vid = video(f);
+        for (int y = vy; y < vy + vh; y++)
+          std::memcpy(&p[size_t(y) * size_t(gs) + size_t(vx) * 4], &vid[size_t(y) * size_t(gs) + size_t(vx) * 4], size_t(vw) * 4);
+        return p;
+      };
+      ssh::ScreenMirror rm;
+      CHECK(rm.Start(100, 9, &error));
+      int vframes = 0, vbytes = 0;
+      for (int f = 0; f < 14; f++) {
+        auto pv = pagevid(f);
+        int r = 0;
+        CHECK(WaitFor([&] { r = rm.Frame(pv.data(), 540, 471, gs, go); return r != ssh::ScreenMirror::kBusy; }, 5000));
+        if (f >= 6 && rm.stats().detail == 2) {
+          vframes++;
+          vbytes = std::max(vbytes, rm.stats().bytes);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      auto outside_wrong = [&] { // panel pixels outside the video (and a 32-pixel margin) unlike the exact picture
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!rm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) {
+            if (x >= vx - 32 && x < vx + vw + 32 && y >= vy - 32 && y < vy + vh + 32) continue;
+            wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+          }
+        return wrong;
+      };
+      int levels_in = 0;
+      {
+        bool seen[16] = {};
+        const uint8_t *pl = g1::emulator::Panel(0);
+        for (int y = vy + 16; y < vy + vh - 16; y++)
+          for (int x = vx + 16; x < vx + vw - 16; x++) seen[pl[size_t(y) * 640 + size_t(x + 100)] & 15] = true;
+        for (bool b : seen) levels_in += b;
+      }
+      int ow = outside_wrong();
+      std::printf("greys auto 0.5.68, a video in a page: %d of 8 late frames as VIDEOT, largest %d bytes; %d levels in "
+                  "the video, %d pixels outside it unlike the exact picture\n", vframes, vbytes, levels_in, ow);
+      CHECK(vframes >= 6);
+      CHECK(vbytes < full_vt_bytes); // a part of the picture, not all of it
+      CHECK(levels_in > 4);    // dithered video, not 4 grey planes
+      CHECK(ow == 0);          // the text around it exact all along
+      auto still = pagevid(13);
+      CHECK(WaitFor([&] {
+        int r = rm.Frame(still.data(), 540, 471, gs, go);
+        return r == ssh::ScreenMirror::kShown && rm.stats().detail == 1;
+      }, 5000));
+      auto wrong_rm = [&] {
+        std::vector<uint8_t> pv;
+        int pw = 0, ph = 0;
+        if (!rm.Preview(&pv, &pw, &ph)) return -1;
+        const uint8_t *pl = g1::emulator::Panel(0);
+        int wrong = 0;
+        for (int y = 0; y < ph; y++)
+          for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+        return wrong;
+      };
+      CHECK(WaitFor([&] { return wrong_rm() == 0; }, 4000));
+      std::printf("greys auto 0.5.68, a video in a page: %d pixels differ from the exact picture after it stopped\n", wrong_rm());
+      // voice control's see-through layer: its lit pixels over the picture, the rest of the picture as it was; where
+      // the picture sits (Shows8: x, y)
+      int s8[8] = {};
+      CHECK(rm.Shows8(s8) && s8[4] == 540 && s8[6] == 0 && s8[7] == 0);
+      std::vector<uint8_t> hud(size_t(60) * 20, 0);
+      for (int y = 5; y < 15; y++)
+        for (int x = 10; x < 50; x++) hud[size_t(y) * 60 + size_t(x)] = 255;
+      rm.SetHud(hud, 60, 20, 30, 300);
+      CHECK(WaitFor([&] {
+        rm.Frame(still.data(), 540, 471, gs, go);
+        return (g1::emulator::Panel(0)[size_t(310) * 640 + 100 + 60] & 15) == 15 && wrong_rm() == 0;
+      }, 5000));
+      std::printf("greys auto 0.5.68: the see-through layer drawn (%d pixels unlike the composed picture)\n", wrong_rm());
+      rm.SetHud({}, 0, 0, 0, 0);
+      rm.Stop();
+    }
+
+    // 0.5.66+: the pointer as the arms' sprite (a move costs a tiny record, no frame), and a dragged window as a
+    // block move; the panel always the exact picture (with the arrow over it)
+    g1::emulator::SetFirmware(5, 66);
+    for (int arm = 0; arm < 2; arm++) g1::emulator::Reboot(arm);
+    CHECK(WaitFor([] { return g1::left.GetState().connected && g1::right.GetState().connected &&
+                              g1::left.GetState().firmware_patch == 66; }, 10000));
+    ssh::ScreenMirror sm;
+    CHECK(sm.Start(100, 9, &error));
+    go.detail = 1;
+    auto desk = [&](int wx, int wy) { // a "window" of grey text on a mid-grey desktop
+      std::vector<uint8_t> p(size_t(gs) * 471);
+      for (int y = 0; y < 471; y++)
+        for (int x = 0; x < 540; x++) {
+          int g = 136;
+          if (x >= wx && x < wx + 200 && y >= wy && y < wy + 120)
+            g = ((x - wx) / 6 + (y - wy) / 11) % 4 ? 240 : ((x - wx) * 7 + (y - wy) * 3) % 3 ? 34 : 102;
+          uint8_t *px = &p[size_t(y) * size_t(gs) + size_t(x) * 4];
+          px[0] = px[1] = px[2] = uint8_t(g);
+          px[3] = 255;
+        }
+      return p;
+    };
+    auto exact = [&] { // the panel (left eye) against the last picture sent, outside the arrow's box
+      std::vector<uint8_t> pv;
+      int pw = 0, ph = 0;
+      if (!sm.Preview(&pv, &pw, &ph)) return -1;
+      const uint8_t *pl = g1::emulator::Panel(0);
+      int wrong = 0;
+      for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) wrong += pl[size_t(y) * 640 + size_t(x + 100)] != pv[size_t(y) * size_t(pw) + size_t(x)] / 17;
+      return wrong;
+    };
+    auto d0 = desk(40, 60);
+    CHECK(WaitFor([&] { return sm.Frame(d0.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 5000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(exact() == 0);
+
+    int frames0 = sm.frames();
+    auto at = [](int v) { return (v * 10000 + 538) / 539; };
+    auto aty = [](int v) { return (v * 10000 + 469) / 470; };
+    sm.Pointer(at(300), aty(300), true);
+    CHECK(WaitFor([&] { return !sm.PointerPending(); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    int lit = 0, dark = 0; // the arrow at picture (299, 299): panel (399, 299)
+    for (int y = 299; y < 315; y++)
+      for (int x = 399; x < 415; x++) lit += g1::emulator::Panel(0)[size_t(y) * 640 + size_t(x)] == 15, dark += g1::emulator::Panel(0)[size_t(y) * 640 + size_t(x)] == 0;
+    std::printf("pointer sprite: %d lit and %d dark pixels in its box, %d frames sent for it\n", lit, dark, sm.frames() - frames0);
+    CHECK(lit > 20 && dark > 10);
+    CHECK(sm.frames() == frames0);
+    sm.Pointer(at(300), aty(300), false); // off: the picture back where it was
+    CHECK(WaitFor([&] { return !sm.PointerPending(); }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK(exact() == 0);
+    // the window dragged twice
+    for (int k = 1; k <= 2; k++) {
+      auto d = desk(40 + 37 * k, 60 + 23 * k);
+      CHECK(WaitFor([&] { return sm.Frame(d.data(), 540, 471, gs, go) == ssh::ScreenMirror::kShown; }, 5000));
+      std::printf("dragged window: %d bytes\n", sm.stats().bytes);
+      CHECK(sm.stats().bytes < 1500);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    CHECK(exact() == 0);
+    sm.Stop();
+
+    // The panorama canvas (0.5.66+): a 1920 x 480 black and white panorama goes to the arms once; each window
+    // position (a head turn) is a few bytes, and the panel shows exactly that part of the panorama.
+    {
+      ssh::ScreenMirror::pan_report = true; // the eye-drift measurement's NOTIFYs (checked after the turn below)
+    ssh::ScreenMirror cm;
+      CHECK(cm.Start(100, 9, &error));
+      const int PW = 1920, PH = 480;
+      std::vector<uint8_t> pano(size_t(PW) * PH * 4);
+      for (int y = 0; y < PH; y++)
+        for (int x = 0; x < PW; x++) {
+          bool ink = ((x / 8 + y / 12) % 3 == 0) || (x % 97 < 3) || (y % 41 < 2);
+          uint8_t *px = &pano[(size_t(y) * PW + size_t(x)) * 4];
+          px[0] = px[1] = px[2] = ink ? 255 : 0;
+          px[3] = 255;
+        }
+      ssh::ScreenOptions po;
+      po.invert = 0;
+      po.levels = 16;
+      po.fit = ssh::ScreenOptions::kStretch;
+      po.zoom = 100;
+      po.src_w = 540;
+      po.src_h = 471;
+      po.src_y = 4;
+      auto window_of = [&](int a, int panel_x, int panel_y) {
+        const uint8_t *pl = g1::emulator::Panel(a);
+        for (int sx = 0; sx + 540 <= PW; sx++) {
+          bool same = true;
+          for (int y = 0; y < 471 && same; y += 7)
+            for (int x = 0; x < 540 && same; x += 3)
+              same = pl[size_t(y + panel_y) * 640 + size_t(x + panel_x)] == (pano[(size_t(y + 4) * PW + size_t(sx + x)) * 4] ? 15 : 0);
+          if (same) return sx;
+        }
+        return -1;
+      };
+      int bytes_after = 0;
+      for (int step = 0; step < 6; step++) {
+        po.src_x = 700 + 23 * step;
+        int r = 0;
+        CHECK(WaitFor([&] { r = cm.Frame(pano.data(), PW, PH, PW * 4, po); return r == ssh::ScreenMirror::kShown; }, 5000));
+        if (step) bytes_after = std::max(bytes_after, cm.stats().bytes);
+        auto left_wrong = [&] {
+          const uint8_t *pl = g1::emulator::Panel(0);
+          int wrong = 0;
+          for (int y = 0; y < 471; y++)
+            for (int x = 0; x < 540; x++) {
+              uint8_t want = pano[(size_t(y + 4) * PW + size_t(po.src_x + x)) * 4] ? 15 : 0;
+              wrong += pl[size_t(y) * 640 + size_t(x + 100)] != want;
+            }
+          return wrong;
+        };
+        // both eyes at the window (the first step sends the whole panorama: a while over the link)
+        CHECK(WaitFor([&] { return left_wrong() == 0 && window_of(1, 0, 9) == po.src_x; }, 3000));
+        if (left_wrong()) {
+          int hist[16] = {};
+          const uint8_t *pl = g1::emulator::Panel(0);
+          for (int i = 0; i < 640 * 480; i++) hist[pl[i] & 15]++;
+          auto st = cm.stats();
+          std::printf("canvas step %d: %d pixels wrong; path %d pan %d bytes %d; panel 0:%d 5:%d 10:%d 15:%d other:%d\n", step,
+                      left_wrong(), st.path, st.pan, st.bytes, hist[0], hist[5], hist[10], hist[15],
+                      640 * 480 - hist[0] - hist[5] - hist[10] - hist[15]);
+        }
+      }
+      // A head turn the phone does not send: 30 degrees a second to the left (GYR_Y +30000 mdps) for ~0.5 s on both
+      // arms; each arm moves the window itself, ~16 px a degree (~240 px), both eyes the same, and the panel is
+      // exactly the panorama there. The sensor back at 0 (still): the window stays.
+      int frames_before = cm.stats().frames;
+      for (int a = 0; a < 2; a++) g1::emulator::SetProperty(a, g1::PROP_GYR_Y, 30000);
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      for (int a = 0; a < 2; a++) g1::emulator::SetProperty(a, g1::PROP_GYR_Y, 0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(400));
+      int wl = window_of(0, 100, 0), wr = window_of(1, 0, 9);
+      std::printf("panorama canvas: a turn of ~15 degrees left on the arms alone: window %d -> left eye %d, right eye "
+                  "%d (%d frames sent meanwhile)\n", po.src_x, wl, wr, cm.stats().frames - frames_before);
+      // each arm ticks on its own clock, so they may differ by one tick's turn (~10 px here) until the phone's next
+      // anchor (every head-turn update) puts both at its window again
+      CHECK(wl >= 0 && wr >= 0 && std::abs(wl - wr) <= 12);
+      CHECK(wl < po.src_x - 180 && wl > po.src_x - 300);
+      { // the arms' reports (every 100 ms) end at the windows each eye shows
+        int rep[2] = {-1, -1}, count[2] = {};
+        for (int a = 0; a < 2; a++) {
+          g1::Event e;
+          while ((a ? g1::right : g1::left).NextEvent(&e, 0))
+            if (e.type == g1::EVENT_NOTIFY && e.a == ssh::ScreenMirror::kPanReport) rep[a] = int(e.b), count[a]++;
+        }
+        std::printf("panorama canvas: eye reports %d + %d, last left %d right %d\n", count[0], count[1], rep[0], rep[1]);
+        CHECK(count[0] >= 3 && count[1] >= 3);
+        CHECK(std::abs(rep[0] - wl) <= 1 && std::abs(rep[1] - wr) <= 1);
+      }
+      ssh::ScreenMirror::pan_report = false;
+      std::printf("panorama canvas: head turns %d bytes at most, the arms' own pan %s\n", bytes_after,
+                  cm.stats().pan ? "running" : "NOT running");
+      CHECK(cm.stats().pan == 1);
+      CHECK(bytes_after < 200);
+      cm.Stop();
+    }
+    g1::emulator::SetFirmware(5, 0);
+  }
+  fx->Stop();
+  g1::Deinit();
+  std::printf(failures ? "screen_test: %d failures\n" : "screen_test: ok\n", failures);
+  return failures ? 1 : 0;
+}

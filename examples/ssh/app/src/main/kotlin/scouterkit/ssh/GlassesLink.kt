@@ -39,6 +39,15 @@ class GlassesLink(
         var mtu = 23
         var up = false
         var wanted = false
+        var writeAt = 0L      // when the write in flight went out (its callback may never come)
+        var stalls = 0        // writes without a callback in a row
+        var discoveryFails = 0 // service discoveries that failed in a row
+        var setup: Runnable? = null // the setup watchdog while connected but not up
+        var stallCheck: Runnable? = null // the write watchdog while a write is in flight
+        var fails = 0         // connection attempts that ended before the link was up, in a row
+        var since = 0L        // when this arm started connecting (0: up, or not trying)
+        var lastWrite = 0L    // when the last packet went out
+        var fast = false      // Android asked for CONNECTION_PRIORITY_HIGH (short intervals) on this link
     }
 
     private val arms = arrayOf(Arm(0), Arm(1))
@@ -119,14 +128,42 @@ class GlassesLink(
         if (!adapter.isEnabled) return Native.linkProblem(Native.ERROR_BLUETOOTH, "Bluetooth is off")
         val device = adapter.getRemoteDevice(addresses[a.index])
         if (device.bondState != BluetoothDevice.BOND_BONDED) return giveUp("the ${NAMES[a.index]} arm is not bonded")
+        if (a.since == 0L) a.since = android.os.SystemClock.uptimeMillis()
         a.gatt = device.connectGatt(context, background, callback(a), BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, handler)
+    }
+
+    // A connection that ended before its link was up (or a link lost): connected again. Direct connections first
+    // (Android scans fast for them and the arm is usually right there: a stack hiccup, the arm just out of the case),
+    // a few times with short waits; only then autoConnect, whose background scan is slow (it can take a minute) but
+    // waits as long as it takes, for an arm that is away.
+    private fun again(a: Arm) {
+        if (!a.wanted || lost != null || a.gatt != null) return
+        a.fails++
+        if (a.fails > DIRECT_WAITS.size) return open(a, true)
+        val wait = DIRECT_WAITS[a.fails - 1]
+        handler.postDelayed({ if (a.wanted && a.gatt == null) open(a, false) }, wait)
     }
 
     private fun close(a: Arm, reconnect: Boolean) {
         a.wanted = reconnect
+        a.fast = false
+        a.setup?.let { handler.removeCallbacks(it) }
+        a.setup = null
+        a.stallCheck?.let { handler.removeCallbacks(it) }
+        a.stallCheck = null
+        runCatching { a.gatt?.disconnect() } // the arm learns at once (close alone leaves it to time out)
         runCatching { a.gatt?.close() }
         a.gatt = null
         down(a)
+    }
+
+    // A link that got stuck (a setup step or a write whose callback never came, a failed discovery): a fresh one,
+    // the stack waiting for the arm's advertising (autoConnect).
+    private fun reset(a: Arm, why: String) {
+        if (a.gatt == null || lost != null) return
+        Log.w(TAG, "arm ${a.index}: $why, connecting again")
+        close(a, true)
+        again(a)
     }
 
     private fun down(a: Arm) {
@@ -150,16 +187,59 @@ class GlassesLink(
 
     private fun pump(a: Arm) {
         val gatt = a.gatt ?: return
-        if (a.writing) return
+        if (a.writing) {
+            // A write's callback that never came (it happens on some stacks): go on, and after three in a row a
+            // fresh link.
+            if (android.os.SystemClock.uptimeMillis() - a.writeAt < WRITE_STALL_MS) return
+            a.writing = false
+            if (++a.stalls >= 3) return reset(a, "writes without callbacks")
+        }
         val (channel, data) = synchronized(a) { a.queue.removeFirstOrNull() } ?: return
         val c = a.chars[channel] ?: return
         c.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         c.value = data
         a.writing = gatt.writeCharacteristic(c)
-        if (!a.writing) {
+        if (a.writing) {
+            a.writeAt = android.os.SystemClock.uptimeMillis()
+            a.lastWrite = a.writeAt
+            if (!a.fast) linkSpeed(a, gatt, true)
+            watchWrites(a)
+        } else {
             synchronized(a) { a.queue.addFirst(channel to data) }
             handler.postDelayed({ pump(a) }, 5)
         }
+    }
+
+    // Short connection intervals while packets flow (Android's CONNECTION_PRIORITY_HIGH: 11.25-15 ms, and the arm
+    // asks for 7.5 ms itself), the balanced ones (30-50 ms) after IDLE_LINK_MS without a write: the glasses' radio
+    // takes about 2 packets per connection event, so the interval sets the link's speed, and idle links cost
+    // battery on both ends.
+    private fun linkSpeed(a: Arm, g: BluetoothGatt, fast: Boolean) {
+        val ok = runCatching {
+            g.requestConnectionPriority(if (fast) BluetoothGatt.CONNECTION_PRIORITY_HIGH else BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+        }.getOrDefault(false)
+        if (!ok) return // busy: the next write (or idle check) asks again
+        a.fast = fast
+        Log.i(TAG, "arm ${a.index}: ${if (fast) "fast" else "balanced"} link asked")
+        if (fast) handler.postDelayed(idleCheck(a, g), IDLE_LINK_MS)
+    }
+
+    private fun idleCheck(a: Arm, g: BluetoothGatt): Runnable = Runnable {
+        if (a.gatt !== g || !a.fast) return@Runnable
+        val idle = android.os.SystemClock.uptimeMillis() - a.lastWrite
+        if (idle >= IDLE_LINK_MS) linkSpeed(a, g, false) else handler.postDelayed(idleCheck(a, g), IDLE_LINK_MS - idle + 50)
+    }
+
+    // One check per arm while writes are in flight: pump() notices a write whose callback is overdue.
+    private fun watchWrites(a: Arm) {
+        if (a.stallCheck != null) return
+        val r = Runnable {
+            a.stallCheck = null
+            pump(a)
+            if (a.writing && a.gatt != null) watchWrites(a)
+        }
+        a.stallCheck = r
+        handler.postDelayed(r, WRITE_STALL_MS + 50)
     }
 
     private fun callback(a: Arm) = object : BluetoothGattCallback() {
@@ -167,31 +247,44 @@ class GlassesLink(
             Log.i(TAG, "arm ${a.index}: state $state status $status")
             if (g != a.gatt) return
             if (state == BluetoothProfile.STATE_CONNECTED) {
-                g.requestMtu(247)
+                // Setup (MTU, services, the EVT subscription) must end within SETUP_MS, else a fresh link.
+                val watch = Runnable { if (a.gatt === g && !a.up) reset(a, "setup did not finish") }
+                a.setup?.let { handler.removeCallbacks(it) }
+                a.setup = watch
+                handler.postDelayed(watch, SETUP_MS)
+                if (!g.requestMtu(247)) handler.postDelayed({ if (a.gatt === g && !a.up) g.requestMtu(247) }, 300)
                 return
             }
+            a.setup?.let { handler.removeCallbacks(it) }
+            a.setup = null
+            a.fast = false
             g.close()
             a.gatt = null
             down(a)
             if (g.device.bondState != BluetoothDevice.BOND_BONDED) return giveUp("the ${NAMES[a.index]} arm's bond is gone")
             if (status in SECURITY) return giveUp("the ${NAMES[a.index]} arm refused encryption (status $status)")
-            if (a.wanted) open(a, true) // autoConnect: the stack waits for the arm's advertising
+            again(a)
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             a.mtu = mtu
             g.setPreferredPhy(BluetoothDevice.PHY_LE_2M_MASK, BluetoothDevice.PHY_LE_2M_MASK, BluetoothDevice.PHY_OPTION_NO_PREFERRED)
-            g.discoverServices()
+            if (!g.discoverServices()) handler.postDelayed({ if (a.gatt === g && !a.up) g.discoverServices() }, 300)
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             val service = g.getService(SERVICE)
             val evt = service?.getCharacteristic(EVT)
             if (service == null || evt == null) {
+                // A failed or empty discovery is mostly the stack's (a stale cache, a busy link): a fresh link, twice,
+                // before saying the firmware is wrong.
+                if (status != BluetoothGatt.GATT_SUCCESS || ++a.discoveryFails < 3)
+                    return reset(a, "service discovery failed (status $status)")
                 Log.w(TAG, "arm ${a.index}: no scouter service")
                 Native.linkProblem(Native.ERROR_FIRMWARE, "the arm does not run the scouter firmware")
                 return
             }
+            a.discoveryFails = 0
             a.chars = arrayOf(service.getCharacteristic(CMD), service.getCharacteristic(CTRL))
             g.setCharacteristicNotification(evt, true)
             val cccd = evt.getDescriptor(CCCD)
@@ -205,6 +298,13 @@ class GlassesLink(
                 if (status in SECURITY) giveUp("the ${NAMES[a.index]} arm refused encryption (status $status)")
                 return
             }
+            a.setup?.let { handler.removeCallbacks(it) }
+            a.setup = null
+            a.stalls = 0
+            if (a.since != 0L) Log.i(TAG, "arm ${a.index}: link up in ${android.os.SystemClock.uptimeMillis() - a.since} ms" +
+                (if (a.fails > 0) " (${a.fails + 1} tries)" else ""))
+            a.since = 0L
+            a.fails = 0
             synchronized(a) { a.up = true }
             Native.linkFound(a.index, g.device.address)
             Native.linkUp(a.index, a.mtu)
@@ -213,6 +313,7 @@ class GlassesLink(
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
             a.writing = false
+            a.stalls = 0
             pump(a)
         }
 
@@ -231,6 +332,11 @@ class GlassesLink(
         // HCI authentication failure (also GATT insufficient authentication), PIN or key missing, MIC failure,
         // GATT insufficient encryption, Android's GATT_AUTH_FAIL.
         val SECURITY = setOf(5, 6, 0x3D, 15, 137)
+        const val SETUP_MS = 12000L // connected to subscribed, at most
+        const val WRITE_STALL_MS = 3000L // a write's callback, at most
+        const val IDLE_LINK_MS = 15000L // writes stopped this long: the balanced link again (shorter flapped)
+        // The waits before each direct connection again (then autoConnect).
+        val DIRECT_WAITS = longArrayOf(300, 1000, 2000, 4000)
         val SERVICE: UUID = UUID.fromString("f3da4d59-277a-4fc9-a1ed-41c9c22d4400")
         val CMD: UUID = UUID.fromString("f3da4d59-277a-4fc9-a1ed-41c9c22d4401")
         val CTRL: UUID = UUID.fromString("f3da4d59-277a-4fc9-a1ed-41c9c22d4402")

@@ -1,0 +1,26 @@
+# Vox's keyboard layout: Backspace on both the big \ key and the small Backspace key, Escape on the ` key; the
+# characters those keys lost on Right Alt: \ on Right Alt + / (| with Shift), ` on Right Alt + ' (~ with Shift).
+# An overlay on the keyboard's usual layout: only these keys change. Pick it in Android's settings: Physical
+# keyboard > (the keyboard) > Vox: Backspace on the \ key. Linux key codes: 43 KEY_BACKSLASH, 14 KEY_BACKSPACE,
+# 41 KEY_GRAVE.
+type OVERLAY
+
+map key 43 DEL
+map key 14 DEL
+map key 41 ESCAPE
+
+key SLASH {
+    label:                              '/'
+    base:                               '/'
+    shift:                              '?'
+    ralt:                               '\\'
+    ralt+shift:                         '|'
+}
+
+key APOSTROPHE {
+    label:                              '\''
+    base:                               '\''
+    shift:                              '"'
+    ralt:                               '`'
+    ralt+shift:                         '~'
+}

@@ -1,0 +1,17 @@
+#!/bin/sh
+# vox-glasses-monitor on|off (root, through sudo for vox-dual): the laptop's HDMI port says a monitor is connected
+# though none is (the kernel's connector status forced on), so the desktop can put the glasses' screen there;
+# off hands it back to real detection (a real cable works as before). Nothing else.
+set -eu
+case "${1:-}" in
+on) v=on ;;
+off) v=detect ;;
+*) echo "usage: vox-glasses-monitor on|off" >&2; exit 2 ;;
+esac
+found=0
+for f in /sys/class/drm/card*-HDMI-A-1/status; do
+	[ -e "$f" ] || continue
+	echo "$v" > "$f"
+	found=1
+done
+[ $found = 1 ] || { echo "vox-glasses-monitor: no HDMI-A-1 port" >&2; exit 1; }

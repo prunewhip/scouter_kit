@@ -133,10 +133,15 @@ static void dc_block(int16_t *x)
 	}
 }
 
+/* the microphone's share of the 128 MHz clock (g1_clock_boost counts its users) */
 static void core_clock(bool f)
 {
-	nrf_clock_hfclk_div_set(NRF_CLOCK_S, f ? NRF_CLOCK_HFCLK_DIV_1 : NRF_CLOCK_HFCLK_DIV_2);
-	SystemCoreClockUpdate();
+	static bool mine;
+
+	if (f != mine) {
+		mine = f;
+		g1_clock_boost(f);
+	}
 }
 
 /* DIAG ENCODE_LOAD (test builds): the encoder's work alone, on a synthetic tone, 100 frames a second for

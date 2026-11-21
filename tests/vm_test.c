@@ -28,7 +28,7 @@ enum {
 	ST16 = 0x25, ST8 = 0x26, ST4 = 0x27, JMP = 0x30, CALL = 0x31, RET = 0x32, END = 0x33, HALT = 0x34,
 	BEQ = 0x35, BNE = 0x36, BLTU = 0x37, BGEU = 0x38, BLTS = 0x39, BGES = 0x3A, SLEEP_UNTIL = 0x40,
 	WAIT_EVENT = 0x41, RAISE = 0x42, NOTIFY = 0x43, SYS_READ = 0x44, SYS_WRITE = 0x45, FILL = 0x50,
-	BLIT = 0x51, GLYPHS = 0x52, DRAW = 0x53, LINE = 0x54, VIDEO = 0x55, ASSET_LOAD = 0x56
+	BLIT = 0x51, GLYPHS = 0x52, DRAW = 0x53, LINE = 0x54, VIDEO = 0x55, ASSET_LOAD = 0x56, VIDEOX = 0x57, VIDEOT = 0x58
 };
 
 static void spec_shape(uint8_t op, int *k, int *lit);
@@ -287,7 +287,7 @@ static int h_asset_read(void *c, const uint8_t *id, uint32_t off, uint8_t *dst, 
 
 static const struct vm_host host = {
 	NULL, h_now, h_packet, h_packet_done, h_poll, h_prop, h_event, h_panel_begin, h_panel_row,
-	h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, NULL, h_asset_read
+	h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, NULL, h_asset_read, NULL
 };
 
 static void setup(int safe)
@@ -1243,7 +1243,7 @@ static void test_memory(void)
 static void test_host_rules(void)
 {
 	static const uint8_t program_only[] = {JMP, RET, HALT, BEQ, BNE, BLTU, BGEU, BLTS, BGES, WAIT_EVENT};
-	static const uint8_t invalid[] = {0x00, 0x05, 0x0F, 0x1E, 0x1F, 0x28, 0x2F, 0x3B, 0x3F, 0x46, 0x4F, 0x57, 0x60, 0x80, 0xFF};
+	static const uint8_t invalid[] = {0x00, 0x05, 0x0F, 0x1E, 0x1F, 0x28, 0x2F, 0x3B, 0x3F, 0x46, 0x4F, 0x59, 0x60, 0x80, 0xFF};
 	static const char *cut[] = {"11 31", "11 3f f0 20 01 30", "01 00 50 00 05 aa aa", "02 00 50 00 04 00 03 aa",
 				    "50 ff ff ff f0 38 00", "31 00 80"};
 	static const char *pad[] = {"42 f1 28 00", "40 01", "50 00 00 00 01"};
@@ -3219,6 +3219,428 @@ static void test_video(void)
 	CHECK_EQ(arena[bmp], 0);
 }
 
+/* ---------------------------------------------------------------- VIDEOX (§3.8) */
+
+/* VIDEOX's tables (plane and state addresses) for planes laid out back to back from bmp and states from st; written
+ * to ref too, so "nothing changed" checks hold */
+#define VX_PT 0x3FF80u
+#define VX_ST 0x3FFC0u
+
+static void videox_send(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
+			uint32_t lv, uint32_t src, uint32_t n, uint32_t st)
+{
+	struct code c = {{0}, 0};
+
+	for (uint32_t p = 0; p < 4; p++) {
+		put32(arena + VX_PT + 4 * p, bmp + p * h * stride);
+		put32(arena + VX_ST + 4 * p, st + p * VM_VIDEOX_PIX_STATE);   /* room for pixel-coded states */
+		memcpy(ref + VX_PT + 4 * p, arena + VX_PT + 4 * p, 4);
+		memcpy(ref + VX_ST + 4 * p, arena + VX_ST + 4 * p, 4);
+	}
+	npool = 0;
+	I(&c, VIDEOX, K(VX_PT), K(stride), K(w), K(h), K((uint32_t)x), K((uint32_t)y), K(lv), K(src), K(n), K(VX_ST));
+	send_code(&c);
+	run();
+}
+
+static void videox_ref_scaled(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
+			      uint32_t planes, uint32_t lv, uint32_t sc)
+{
+	for (uint32_t r = 0; r < h * sc; r++) {
+		for (uint32_t c = 0; c < w * sc; c++) {
+			int64_t px = (int64_t)x + c, py = (int64_t)y + r;
+			uint32_t i = 0, sr = r / sc, scol = c / sc;
+
+			for (uint32_t p = 0; p < planes; p++) {
+				i |= (uint32_t)(arena[bmp + p * h * stride + sr * stride + scol / 8] >> (7 - scol % 8) & 1) << p;
+			}
+			if (px >= 0 && px < VM_PANEL_W && py >= 0 && py < VM_PANEL_H) {
+				ref_panel[py][px] = arena[lv + i];
+			}
+		}
+	}
+}
+
+static void videox_ref(uint32_t bmp, uint32_t stride, uint32_t w, uint32_t h, int32_t x, int32_t y,
+		       uint32_t planes, uint32_t lv)
+{
+	videox_ref_scaled(bmp, stride, w, h, x, y, planes, lv, 1);
+}
+
+/* a record at src: flags, planes, the move (if flags bit 0), then per plane a u24 length and len[p] bytes
+ * (random, the first a VIDEO flags byte); returns its size */
+static uint32_t videox_rec(uint32_t src, uint32_t flags, uint32_t planes, uint32_t y0, uint32_t rows, int32_t dy,
+			   const uint32_t *len, const uint8_t *pflags)
+{
+	uint32_t o = src;
+
+	arena[o++] = (uint8_t)flags;
+	arena[o++] = (uint8_t)planes;
+	if (flags & 1) {
+		put16(arena + o, y0);
+		put16(arena + o + 2, rows);
+		put16(arena + o + 4, (uint32_t)dy & 0xFFFF);
+		o += 6;
+	}
+	for (uint32_t p = 0; p < planes; p++) {
+		arena[o] = (uint8_t)len[p];
+		arena[o + 1] = (uint8_t)(len[p] >> 8);
+		arena[o + 2] = (uint8_t)(len[p] >> 16);
+		o += 3;
+		for (uint32_t i = 0; i < len[p]; i++) {
+			arena[o + i] = (uint8_t)rnd();
+		}
+		arena[o] = pflags[p];
+		o += len[p];
+	}
+	return o - src;
+}
+
+static void test_videox(void)
+{
+	const uint32_t bmp = 0x2000, stride = 7, st = 0x9001, src = 0xB003, lv = 0xC000;
+	static const uint32_t one[4] = {1, 1, 1, 1};
+	static const uint8_t same[4] = {0, 0, 0, 0};
+	uint32_t len[4], n;
+	uint8_t pf[4];
+	struct code c = {{0}, 0};
+
+	setup(0);
+	f.spans = 1;
+	I(&c, SYS_WRITE, K(VM_P_PANEL), K(1));
+	send_code(&c);
+	run();
+
+	/* one plane through the map {0, L} is VIDEO with level L: the same bitmap and the same panel */
+	for (int it = 0; it < 60; it++) {
+		uint32_t w = 1 + rndn(200), h = 1 + rndn(60), sw = (w + 7) / 8 + rndn(3), level = rndn(16);
+		int32_t x = (int32_t)rndn(800) - 150, y = (int32_t)rndn(600) - 60;
+		uint32_t k = 1 + rndn(300), b2 = 0x20000, s2 = 0x30000, r2 = 0x38000;
+
+		arena[lv] = 0;
+		arena[lv + 1] = (uint8_t)level;
+		for (uint32_t i = 0; i < sw * h; i++) {
+			arena[b2 + i] = arena[bmp + i] = (uint8_t)rnd();
+		}
+		memcpy(arena + s2, arena + st, VM_VIDEO_STATE);
+		len[0] = k;
+		pf[0] = (uint8_t)rndn(4);
+		n = videox_rec(src, 0, 1, 0, 0, 0, len, pf);
+		memcpy(arena + r2, arena + src + 5, k);
+		f.nev = 0;
+		videox_send(bmp, sw, w, h, x, y, lv, src, n, st);
+		CHECK_EQ(f.nev, 0);
+		video_send(b2, sw, w, h, x, y, level, r2, k, s2);
+		CHECK_EQ(f.nev, 0);
+		CHECK_EQ(memcmp(arena + bmp, arena + b2, sw * h), 0);
+		CHECK_EQ(memcmp(arena + st, arena + s2, VM_VIDEO_STATE), 0);
+	}
+
+	/* any record, with or without a move, leaves the panel showing the planes through the map */
+	for (int it = 0; it < 300; it++) {
+		uint32_t w = rndn(6) ? 1 + rndn(200) : 1 + rndn(640), h = rndn(6) ? 2 + rndn(60) : 2 + rndn(478);
+		uint32_t sw = (w + 7) / 8 + rndn(3), planes = 1 + rndn(4), sb = 0x8000 + rndn(16);
+		uint32_t ss = sb + planes * h * sw + rndn(16), rs = ss + planes * VM_VIDEOX_PIX_STATE + rndn(16);
+		uint32_t ls = rs + 8 + planes * 1503 + rndn(16), sflags = rndn(4) << 2;   /* scale 2, pixel coding */
+		int32_t x = (int32_t)rndn(800) - 150, y = (int32_t)rndn(600) - 60;
+
+		for (uint32_t i = 0; i < 16; i++) {
+			arena[ls + i] = (uint8_t)rndn(16);
+		}
+		for (uint32_t i = 0; i < planes * h * sw; i++) {
+			arena[sb + i] = (uint8_t)rnd();
+		}
+		for (int k = 0; k < 4; k++) {
+			/* the first redraws; then any of move, redraw, scale 2 (stream-wide) and pixel coding */
+			uint32_t flags = (k == 0 ? 2 : rndn(4)) | sflags, y0 = 0, rows = 0;
+			int32_t dy = 0;
+
+			if (flags & 1) {
+				rows = 2 + rndn(h - 1);
+				y0 = rndn(h - rows + 1);
+				dy = (int32_t)(1 + rndn(rows - 1)) * (rndn(2) ? 1 : -1);
+			}
+			for (uint32_t p = 0; p < planes; p++) {
+				len[p] = 1 + rndn(rndn(4) ? 64 : 1500);
+				pf[p] = (uint8_t)rndn(4);
+			}
+			n = videox_rec(rs, flags, planes, y0, rows, dy, len, pf);
+			memcpy(ref_panel, f.panel, sizeof(ref_panel));
+			f.nev = 0;
+			videox_send(sb, sw, w, h, x, y, ls, rs, n, ss);
+			CHECK_EQ(f.nev, 0);
+			videox_ref_scaled(sb, sw, w, h, x, y, planes, ls, flags & 4 ? 2 : 1);
+			CHECK_EQ(memcmp(ref_panel, f.panel, sizeof(ref_panel)), 0);
+		}
+	}
+
+	/* a move with planes that stay the same (plane records of 0xFF bytes: every row "same"): exactly the rows
+	 * whose content the move changed are drawn */
+	{
+		uint32_t w = 64, h = 40, sw = 8, planes = 2, moved = 0;
+		uint8_t before[2][40][8];
+		static const uint8_t keep[2] = {1, 0};   /* plane 0: reset the state first; both: no redraw */
+		uint32_t l2[2] = {17, 17};
+
+		for (uint32_t i = 0; i < 4; i++) {
+			arena[lv + i] = (uint8_t)(5 * i);
+		}
+		for (uint32_t i = 0; i < planes * h * sw; i++) {
+			arena[bmp + i] = (uint8_t)rnd();
+		}
+		memcpy(before, arena + bmp, sizeof(before));
+		n = videox_rec(src, 2, planes, 0, 0, 0, l2, keep);   /* draw it all once (outer redraw) */
+		memset(arena + src + 2 + 3 + 1, 0xFF, 16);           /* plane 0's record: src + 5 (flags 1) */
+		memset(arena + src + 2 + 20 + 3 + 1, 0xFF, 16);      /* plane 1's record: src + 25 */
+		arena[src + 2 + 20 + 3] = 1;   /* plane 1's record resets too */
+		memcpy(ref_panel, f.panel, sizeof(ref_panel));
+		videox_send(bmp, sw, w, h, 10, 10, lv, src, n, st);
+		CHECK_EQ(f.nev, 0);
+		CHECK_EQ(memcmp(before, arena + bmp, sizeof(before)), 0);   /* all rows "same" */
+		videox_ref(bmp, sw, w, h, 10, 10, planes, lv);
+		CHECK_EQ(memcmp(ref_panel, f.panel, sizeof(ref_panel)), 0);
+		n = videox_rec(src, 1, planes, 4, 30, -3, l2, keep);   /* rows 7..33 move up by 3 */
+		memset(arena + src + 8 + 3 + 1, 0xFF, 16);
+		memset(arena + src + 8 + 20 + 3 + 1, 0xFF, 16);
+		arena[src + 8 + 20 + 3] = 1;
+		for (uint32_t r = 4; r < 4 + 30 - 3; r++) {
+			moved += memcmp(before[0][r + 3], before[0][r], 8) || memcmp(before[1][r + 3], before[1][r], 8);
+		}
+		f.rows = 0;
+		memcpy(ref_panel, f.panel, sizeof(ref_panel));
+		videox_send(bmp, sw, w, h, 10, 10, lv, src, n, st);
+		CHECK_EQ(f.nev, 0);
+		CHECK_EQ(memcmp(arena + bmp + 4 * sw, before[0][7], 27 * sw), 0);
+		CHECK_EQ(memcmp(arena + bmp + h * sw + 4 * sw, before[1][7], 27 * sw), 0);
+		videox_ref(bmp, sw, w, h, 10, 10, planes, lv);
+		CHECK_EQ(memcmp(ref_panel, f.panel, sizeof(ref_panel)), 0);
+		CHECK(moved == 27);
+		CHECK_EQ(f.rows, (int)moved);
+	}
+
+	/* errors, checked before anything changes */
+	len[0] = len[1] = 4;
+	pf[0] = pf[1] = 0;
+	arena[lv] = 0;
+	arena[lv + 1] = 15;
+	arena[lv + 2] = 7;
+	arena[lv + 3] = 3;
+	n = videox_rec(src, 0, 2, 0, 0, 0, len, pf);
+	memcpy(ref, arena, VM_ARENA_SIZE);
+	videox_send(bmp, stride, 0, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(5, VIDEOX, 0, 0, 0);
+	videox_send(bmp, stride, 37, 481, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(5, VIDEOX, 0, 481, 0);
+	videox_send(bmp, 4, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(5, VIDEOX, 0, 4, 0);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, 1, st);
+	EXPECT_ERROR(4, VIDEOX, 0, src, 0);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n - 1, st);
+	EXPECT_ERROR(4, VIDEOX, 0, src + 2 + 3 + 4 + 3, 0);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n + 1, st);
+	EXPECT_ERROR(4, VIDEOX, 0, src + n, 0);
+	videox_send(VM_ARENA_SIZE - 300, stride, 37, 23, 0, 0, lv, src, n, st);   /* plane 1 past the end */
+	EXPECT_ERROR(3, VIDEOX, 0, VM_ARENA_SIZE - 300 + 23 * stride, 0);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, bmp + 100);
+	EXPECT_ERROR(3, VIDEOX, 0, bmp + 100, 0);
+	videox_send(bmp, stride, 37, 23, 0, 0, bmp + 7, src, n, st);
+	EXPECT_ERROR(3, VIDEOX, 0, bmp + 7, 0);
+	/* a record over the states (its first two bytes are read before the ranges they size) */
+	arena[st + 10] = ref[st + 10] = 0;
+	arena[st + 11] = ref[st + 11] = 2;
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, st + 10, n, st);
+	EXPECT_ERROR(3, VIDEOX, 0, st + 10, 0);
+	CHECK_EQ(memcmp(ref + 0x2000, arena + 0x2000, VM_ARENA_SIZE - 0x2000), 0);
+	arena[src] = 64;   /* flags above bit 5 */
+	ref[src] = 64;
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(4, VIDEOX, 0, 64, 0);
+	arena[src] = 0;
+	ref[src] = 0;
+	arena[src + 1] = 5;
+	ref[src + 1] = 5;
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(4, VIDEOX, 0, 5, 0);
+	arena[src + 1] = 2;
+	ref[src + 1] = 2;
+	arena[lv + 2] = 16;
+	ref[lv + 2] = 16;
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(5, VIDEOX, 0, 16, 0);
+	arena[lv + 2] = 7;
+	ref[lv + 2] = 7;
+	CHECK_EQ(memcmp(ref + 0x2000, arena + 0x2000, VM_ARENA_SIZE - 0x2000), 0);
+	/* a move outside the bitmap, a move of 0 or of the whole band */
+	n = videox_rec(src, 1, 1, 20, 10, 2, one, same);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(4, VIDEOX, 0, 20, 0);
+	n = videox_rec(src, 1, 1, 0, 10, 0, one, same);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(4, VIDEOX, 0, 0, 0);
+	n = videox_rec(src, 1, 1, 0, 10, -10, one, same);
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(4, VIDEOX, 0, (uint32_t)-10, 0);
+
+	/* safe mode */
+	setup(1);
+	f.spans = 1;
+	n = videox_rec(src, 0, 1, 0, 0, 0, one, same);
+	arena[lv] = 0;
+	arena[lv + 1] = 15;
+	videox_send(bmp, stride, 37, 23, 0, 0, lv, src, n, st);
+	EXPECT_ERROR(7, VIDEOX, 0, 0, 0);
+}
+
+/* VIDEOX block moves and the sprite (0.5.66): records whose planes stay the same (0xFF bytes after a reset) */
+static uint32_t vx_same_rec(uint32_t src, uint32_t flags, uint32_t planes, const uint8_t *ext, uint32_t ext_n)
+{
+	uint32_t o = src;
+
+	arena[o++] = (uint8_t)flags;
+	arena[o++] = (uint8_t)planes;
+	memcpy(arena + o, ext, ext_n);
+	o += ext_n;
+	for (uint32_t p = 0; p < planes; p++) {
+		arena[o] = 17;
+		arena[o + 1] = arena[o + 2] = 0;
+		arena[o + 3] = 1; /* reset */
+		memset(arena + o + 4, 0xFF, 16);
+		o += 3 + 17;
+	}
+	return o - src;
+}
+
+static void put16le(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)v;
+	p[1] = (uint8_t)(v >> 8);
+}
+
+static void test_videox_ext(void)
+{
+	const uint32_t bmp = 0x2000, src = 0x30000, lv = 0x3F000, spr = 0x3F100;
+	uint8_t ext[32];
+	static uint8_t expect[4 * 480 * 81];
+	struct code c = {{0}, 0};
+
+	setup(0);
+	f.spans = 1;
+	I(&c, SYS_WRITE, K(VM_P_PANEL), K(1));
+	send_code(&c);
+	run();
+	for (int i = 0; i < 16; i++) {
+		arena[lv + i] = (uint8_t)i;
+	}
+	/* block moves of random rectangles (overlapping or not): the planes as a plain copy would leave them */
+	for (int it = 0; it < 150; it++) {
+		uint32_t w = 8 + rndn(300), h = 4 + rndn(120), sw = (w + 7) / 8 + rndn(2), planes = 1 + rndn(4);
+		uint32_t st = bmp + planes * h * sw + 64, bw = 1 + rndn(w), bh = 1 + rndn(h), bx = rndn(w - bw + 1), by = rndn(h - bh + 1);
+		int32_t dx = (int32_t)rndn(w - bw + 1) - (int32_t)bx, dy = (int32_t)rndn(h - bh + 1) - (int32_t)by;
+		int32_t x = (int32_t)rndn(400) - 50, y = (int32_t)rndn(400) - 50;
+		uint32_t n;
+
+		for (uint32_t i = 0; i < planes * h * sw; i++) {
+			arena[bmp + i] = (uint8_t)rnd();
+		}
+		/* first: draw it all (redraw), then the move */
+		n = vx_same_rec(src, 2, planes, ext, 0);
+		videox_send(bmp, sw, w, h, x, y, lv, src, n, st);
+		CHECK_EQ(f.nev, 0);
+		memcpy(expect, arena + bmp, planes * h * sw);
+		for (uint32_t p = 0; p < planes; p++) {
+			static uint8_t tmp[480][320];
+			for (uint32_t r = 0; r < bh; r++) {
+				for (uint32_t cc = 0; cc < bw; cc++) {
+					uint32_t sx = bx + cc, sy = by + r;
+					tmp[r][cc] = arena[bmp + p * h * sw + sy * sw + sx / 8] >> (7 - sx % 8) & 1;
+				}
+			}
+			for (uint32_t r = 0; r < bh; r++) {
+				for (uint32_t cc = 0; cc < bw; cc++) {
+					uint32_t tx = (uint32_t)((int32_t)(bx + cc) + dx), ty = (uint32_t)((int32_t)(by + r) + dy);
+					uint8_t *e = &expect[p * h * sw + ty * sw + tx / 8];
+					*e = (uint8_t)((*e & ~(0x80 >> (tx % 8))) | (tmp[r][cc] << (7 - tx % 8)));
+				}
+			}
+		}
+		put16le(ext, bx);
+		put16le(ext + 2, by);
+		put16le(ext + 4, bw);
+		put16le(ext + 6, bh);
+		put16le(ext + 8, (uint32_t)dx & 0xFFFF);
+		put16le(ext + 10, (uint32_t)dy & 0xFFFF);
+		n = vx_same_rec(src, VM_VX_BLOCK, planes, ext, 12);
+		memcpy(ref_panel, f.panel, sizeof(ref_panel));
+		videox_send(bmp, sw, w, h, x, y, lv, src, n, st);
+		CHECK_EQ(f.nev, 0);
+		CHECK_EQ(memcmp(expect, arena + bmp, planes * h * sw), 0);
+		videox_ref(bmp, sw, w, h, x, y, planes, lv);
+		CHECK_EQ(memcmp(ref_panel, f.panel, sizeof(ref_panel)), 0);
+	}
+	/* the sprite: drawn over the picture; moved, with a redraw rectangle over its old place, no trace left */
+	{
+		uint32_t w = 200, h = 120, sw = 25, planes = 4, st = bmp + planes * h * sw + 64, n;
+		int32_t pos[4][2] = {{10, 10}, {150, 90}, {-6, 50}, {195, 115}};
+		static uint8_t want[480][640];
+
+		for (uint32_t i = 0; i < planes * h * sw; i++) {
+			arena[bmp + i] = (uint8_t)rnd();
+		}
+		for (int r = 0; r < 16; r++) { /* an arrow: mask and ink */
+			uint32_t m = r < 12 ? (0xFFFFu << (15 - r)) & 0xFFFF : 0, ink = m & ~(m & (0x8000u >> 0)) & ~(0x8000u >> r);
+			arena[spr + 4 * r] = (uint8_t)(m >> 8);
+			arena[spr + 4 * r + 1] = (uint8_t)m;
+			arena[spr + 4 * r + 2] = (uint8_t)(ink >> 8);
+			arena[spr + 4 * r + 3] = (uint8_t)ink;
+		}
+		n = vx_same_rec(src, 2, planes, ext, 0);
+		videox_send(bmp, sw, w, h, 300, 200, lv, src, n, st);
+		for (int k = 0; k < 4; k++) {
+			int32_t sx = pos[k][0], sy = pos[k][1], ox = k ? pos[k - 1][0] : 0, oy = k ? pos[k - 1][1] : 0;
+
+			put16le(ext, (uint32_t)(ox < 0 ? 0 : ox));
+			put16le(ext + 2, (uint32_t)(oy < 0 ? 0 : oy));
+			put16le(ext + 4, k ? 16 : 0);
+			put16le(ext + 6, k ? 16 : 0);
+			put16le(ext + 8, (uint32_t)sx & 0xFFFF);
+			put16le(ext + 10, (uint32_t)sy & 0xFFFF);
+			put32(ext + 12, spr);
+			n = vx_same_rec(src, VM_VX_SPRITE, planes, ext, 16);
+			memcpy(ref_panel, f.panel, sizeof(ref_panel));
+			videox_send(bmp, sw, w, h, 300, 200, lv, src, n, st);
+			CHECK_EQ(f.nev, 0);
+			videox_ref(bmp, sw, w, h, 300, 200, planes, lv);
+			memcpy(want, ref_panel, sizeof(want));
+			for (int r = 0; r < 16; r++) {
+				for (int cc = 0; cc < 16; cc++) {
+					uint32_t m = (uint32_t)arena[spr + 4 * r] << 8 | arena[spr + 4 * r + 1];
+					uint32_t ink = (uint32_t)arena[spr + 4 * r + 2] << 8 | arena[spr + 4 * r + 3];
+					int32_t px = sx + cc, py = sy + r;
+
+					if ((m >> (15 - cc) & 1) && px >= 0 && px < (int32_t)w && py >= 0 && py < (int32_t)h) {
+						want[200 + py][300 + px] = (ink >> (15 - cc) & 1) ? 15 : 0;
+					}
+				}
+			}
+			CHECK_EQ(memcmp(want, f.panel, sizeof(want)), 0);
+		}
+	}
+	/* errors: a block outside the plane; flags above bit 5 */
+	{
+		uint32_t n, st = bmp + 4 * 23 * 7 + 64;
+
+		put16le(ext, 30);
+		put16le(ext + 2, 0);
+		put16le(ext + 4, 10);
+		put16le(ext + 6, 5);
+		put16le(ext + 8, 5);
+		put16le(ext + 10, 0);
+		n = vx_same_rec(src, VM_VX_BLOCK, 2, ext, 12);
+		videox_send(bmp, 7, 37, 23, 0, 0, lv, src, n, st);
+		EXPECT_ERROR(4, VIDEOX, 0, src + 2, 0);
+	}
+}
+
 static void test_mic(void)
 {
 	struct code c = {{0}, 0};
@@ -3627,7 +4049,7 @@ static void test_assets(void)
 	static uint8_t body[5000], zero[64];
 	static const struct vm_host bare = {
 		NULL, h_now, h_packet, h_packet_done, h_poll, h_prop, h_event, h_panel_begin, h_panel_row,
-		h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, NULL, NULL
+		h_panel_end, h_panel_power, h_brightness, h_imu_rate, h_prop_write, NULL, NULL, NULL
 	};
 	struct code c = {{0}, 0};
 	uint8_t id[16];
@@ -4426,6 +4848,44 @@ static void vvideo_case(int env)
 	vend();
 }
 
+/* VIDEOT (§3.9): random bit streams behind valid headers (any bytes decode to some picture), the first resetting and
+ * flat, at sizes from one block to the full 320 x 240, on the panel, at odd x, at its edges and off it */
+static void vvideot_case(int env)
+{
+	static uint8_t buf[700];
+	const uint32_t fr = 0x20000, src = 0x10000, st = 0x38000;
+	uint32_t v[8];
+
+	venv(env);
+	seed = 0x7D1DE0;
+	vput("case videot\n");
+	vprologue();
+	for (int i = 0; i < 12; i++) {
+		uint32_t w = i == 5 ? 320 : 8 * (1 + rndn(12)), h = i == 5 ? 240 : 8 * (1 + rndn(8)), n = 2 + rndn(600);
+
+		for (uint32_t k = 0; k < n; k++) {
+			buf[k] = (uint8_t)rnd();
+		}
+		buf[0] = (uint8_t)(i == 0 ? 7 : rndn(8));
+		buf[1] = (uint8_t)(1 + rndn(63));
+		vupload(src, buf, n);
+		v[0] = fr;
+		v[1] = w;
+		v[2] = h;
+		v[3] = i == 5 ? 0 : (uint32_t)((int32_t)rndn(760) - 60);
+		v[4] = i == 5 ? 0 : (uint32_t)((int32_t)rndn(520) - 20);
+		v[5] = src;
+		v[6] = n;
+		v[7] = st;
+		vins(VIDEOT, v, 8);
+		vidle();
+		if (i % 3 == 2 || i == 5) {
+			vpanel();
+		}
+	}
+	vend();
+}
+
 static void vfuzz_case(uint64_t cseed, int env)
 {
 	static struct gen g, gp;
@@ -4519,28 +4979,28 @@ static void vectors(const char *path, uint32_t n, uint64_t s0)
 	}
 	vmode = 1;
 	fprintf(out, "# scouter_kit/tests/vm_test vectors, seed 0x%llx\n", (unsigned long long)s0);
-	for (uint32_t i = 0; i <= n + 1 && tried < 50 * (n + 2); tried++) {
+	for (uint32_t i = 0; i <= n + 2 && tried < 50 * (n + 3); tried++) {
 		uint64_t cs = (s0 + tried * 0x9E3779B97F4A7C15ull) | 1;
 
-		i == 0 ? vdraw_case(0) : i == 1 ? vvideo_case(0) : vfuzz_case(cs, 0);
+		i == 0 ? vdraw_case(0) : i == 1 ? vvideo_case(0) : i == 2 ? vvideot_case(0) : vfuzz_case(cs, 0);
 		if (vbad) {
-			CHECK(i > 1);
+			CHECK(i > 2);
 			continue;
 		}
 		memcpy(first, vtext, vlen);
 		first_len = vlen;
-		i == 0 ? vdraw_case(1) : i == 1 ? vvideo_case(1) : vfuzz_case(cs, 1);
+		i == 0 ? vdraw_case(1) : i == 1 ? vvideo_case(1) : i == 2 ? vvideot_case(1) : vfuzz_case(cs, 1);
 		if (vbad || vlen != first_len || memcmp(first, vtext, vlen) != 0) {
-			CHECK(i > 1);
+			CHECK(i > 2);
 			continue;
 		}
 		fwrite(vtext, 1, vlen, out);
-		kept += i > 1;
+		kept += i > 2;
 		i++;
 	}
 	fclose(out);
 	vmode = 0;
-	printf("vectors: draw and video cases + %u fuzz cases (%u tried) in %s\n", (unsigned)kept, (unsigned)tried, path);
+	printf("vectors: draw, video and videot cases + %u fuzz cases (%u tried) in %s\n", (unsigned)kept, (unsigned)tried, path);
 }
 
 int main(int argc, char **argv)
@@ -4571,6 +5031,8 @@ int main(int argc, char **argv)
 	test_draw();
 	test_draw_instructions();
 	test_video();
+	test_videox();
+	test_videox_ext();
 	test_mic();
 	test_clock();
 	test_battery();

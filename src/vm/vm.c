@@ -13,7 +13,7 @@ enum op {
 	OP_SLEEP_UNTIL = 0x40, OP_WAIT_EVENT = 0x41, OP_RAISE = 0x42, OP_NOTIFY = 0x43,
 	OP_SYS_READ = 0x44, OP_SYS_WRITE = 0x45,
 	OP_FILL = 0x50, OP_BLIT = 0x51, OP_GLYPHS = 0x52, OP_DRAW = 0x53, OP_LINE = 0x54, OP_VIDEO = 0x55,
-	OP_ASSET_LOAD = 0x56
+	OP_ASSET_LOAD = 0x56, OP_VIDEOX = 0x57, OP_VIDEOT = 0x58
 };
 
 /* where an instruction comes from */
@@ -141,9 +141,11 @@ static int shape(uint8_t op, struct shape *s)
 		s->k = 9;
 		return 1;
 	case OP_DRAW:
+	case OP_VIDEOT:
 		s->k = 8;
 		return 1;
 	case OP_VIDEO:
+	case OP_VIDEOX:
 		s->k = 10;
 		return 1;
 	case OP_ASSET_LOAD:
@@ -781,10 +783,278 @@ static int video(struct vm *vm, const uint32_t *v, uint32_t *detail)
 	o.by = (int32_t)y0;
 	o.bw = (int32_t)(x1 - x0);
 	o.bh = (int32_t)(y1 - y0);
+	if (vm->host->boost) {
+		vm->host->boost(vm->host->ctx, 1);
+	}
 	vm_video_decode(vm->arena, v, &vm->video, video_span, &o);
 	if (o.state == 1) {
 		vm->host->panel_end(vm->host->ctx);
 		vm->stats.draws++;
+	}
+	if (vm->host->boost) {
+		vm->host->boost(vm->host->ctx, 0);
+	}
+	return 0;
+}
+
+/* VIDEOX (§3.8): the planes' changed spans are gathered per row (vm->vx0/vx1), then each such row is drawn
+ * once, its pixels composed from every plane through the level map */
+struct videox_out {
+	struct vm *vm;
+	uint32_t w;
+};
+
+static void videox_span(void *c, uint32_t r, uint32_t x0, uint32_t x1, const uint8_t *row)
+{
+	struct vm *vm = ((struct videox_out *)c)->vm;
+
+	(void)row;
+	if (x0 == x1) {
+		vm->host->now(vm->host->ctx); /* every 16 rows of each plane: the platform's liveness */
+		return;
+	}
+	if (x0 < vm->vx0[r]) {
+		vm->vx0[r] = (uint16_t)x0;
+	}
+	if (x1 > vm->vx1[r]) {
+		vm->vx1[r] = (uint16_t)x1;
+	}
+}
+
+static void videox_mark(void *c, uint32_t r)
+{
+	struct videox_out *o = (struct videox_out *)c;
+
+	o->vm->vx0[r] = 0;
+	o->vm->vx1[r] = (uint16_t)o->w;
+}
+
+static int videox(struct vm *vm, const uint32_t *v, uint32_t *detail)
+{
+	const struct vm_host *h = vm->host;
+	struct vm_videox x;
+	struct videox_out o;
+	int64_t ox = s32(v[4]), oy = s32(v[5]), bx0, by0, bx1, by1, sc;
+	uint32_t w = v[2], hh = v[3];
+	int state, err = vm_videox_check(vm->arena, v, &x, detail);
+
+	if (err) {
+		return err;
+	}
+	if (vm->safe) {
+		return VM_E_SAFE;
+	}
+	o.vm = vm;
+	o.w = w;
+	if (h->boost) {
+		h->boost(h->ctx, 1);
+	}
+	for (uint32_t y = 0; y < hh; y++) {
+		vm->vx0[y] = 0xFFFF;
+		vm->vx1[y] = 0;
+	}
+	if (x.flags & 1) {
+		vm_videox_move(vm->arena, v, &x, videox_mark, &o);
+	}
+	if (x.flags & VM_VX_BLOCK) {
+		vm_videox_block(vm->arena, v, &x, videox_span, &o);
+	}
+	/* from the top plane down: pixel coding reads the planes above (transition coding does not care) */
+	for (uint32_t p = x.planes; p-- > 0;) {
+		uint32_t pv[10];
+
+		if (x.flags & VM_VX_PIXELS) {
+			vm_videox_pixels(vm->arena, v, &x, p, videox_span, &o);
+		} else {
+			vm_videox_plane(v, &x, p, pv);
+			vm_video_decode(vm->arena, pv, &vm->video, videox_span, &o);
+		}
+	}
+	if (x.flags & VM_VX_SPRITE) {
+		/* the redraw rectangle and the sprite's rows are drawn whatever the planes did */
+		uint32_t r0 = x.ry, r1 = x.ry + x.rh > hh ? hh : x.ry + x.rh, c1 = x.rx + x.rw > w ? w : x.rx + x.rw;
+
+		for (uint32_t r = r0; x.rw && r < r1 && x.rx < c1; r++) {
+			videox_span(&o, r, x.rx, c1, NULL);
+		}
+		if (x.sx != -32768) {
+			int32_t s0 = x.sy < 0 ? 0 : x.sy, s1 = x.sy + 16 > (int32_t)hh ? (int32_t)hh : x.sy + 16;
+			int32_t c0 = x.sx < 0 ? 0 : x.sx, cx = x.sx + 16 > (int32_t)w ? (int32_t)w : x.sx + 16;
+
+			for (int32_t r = s0; r < s1 && c0 < cx; r++) {
+				videox_span(&o, (uint32_t)r, (uint32_t)c0, (uint32_t)cx, NULL);
+			}
+		}
+	}
+	vm_videox_pairs(vm->arena, v, vm->vxpair);
+	sc = x.flags & VM_VX_SCALE2 ? 2 : 1;
+	bx0 = ox < 0 ? 0 : ox;
+	by0 = oy < 0 ? 0 : oy;
+	bx1 = ox + sc * w > VM_PANEL_W ? VM_PANEL_W : ox + sc * w;
+	by1 = oy + sc * hh > VM_PANEL_H ? VM_PANEL_H : oy + sc * hh;
+	state = bx0 < bx1 && by0 < by1 ? 0 : -1;
+	for (uint32_t r = 0; r < hh && state >= 0; r++) {
+		uint32_t x0 = (x.flags & 2) ? 0 : vm->vx0[r], x1 = (x.flags & 2) ? w : vm->vx1[r];
+
+		if (!(r & 15)) {
+			h->now(h->ctx);
+		}
+		if (x0 >= x1) {
+			continue;
+		}
+		for (int64_t k = 0; k < sc && state >= 0; k++) {
+			int64_t y = oy + sc * r + k, a = ox + sc * x0, b = ox + sc * x1;
+
+			if (y < 0 || y >= VM_PANEL_H) {
+				continue;
+			}
+			a = a < 0 ? 0 : a;
+			b = b > VM_PANEL_W ? VM_PANEL_W : b;
+			if (a >= b) {
+				continue;
+			}
+			if (sc == 1 && !((b - a) & 1) && a > bx0) {
+				a--; /* an odd width: one panel window per row, as VIDEO */
+			}
+			if (state == 0) {
+				state = h->panel_begin(h->ctx, (int32_t)bx0, (int32_t)by0, (int32_t)(bx1 - bx0), (int32_t)(by1 - by0)) == 0 ? 1 : -1;
+				if (state < 0) {
+					break;
+				}
+			}
+			if (sc == 1) {
+				vm_videox_compose(vm->arena, v, &x, vm->vxpair, r, (uint32_t)(a - ox), (uint32_t)(b - ox), vm->row);
+			} else {
+				/* a panel pixel at an odd offset from ox is the right half of its plane pixel: compose from the
+				 * pixel it halves, then drop the first nibble */
+				int64_t off = a - ox, sx0 = off / 2, sx1 = (b - ox + 1) / 2;
+
+				vm_videox_compose2(vm->arena, v, &x, r, (uint32_t)sx0, (uint32_t)sx1, vm->row2);
+				if (off & 1) {
+					for (int64_t i = 0; i < sx1 - sx0; i++) {
+						vm->row[i] = (uint8_t)(vm->row2[i] << 4 | vm->row2[i + 1] >> 4);
+					}
+				} else {
+					memcpy(vm->row, vm->row2, (size_t)(sx1 - sx0) < sizeof(vm->row) ? (size_t)(sx1 - sx0) : sizeof(vm->row));
+				}
+				if ((b - a) & 1) {
+					vm->row[(b - a) / 2] &= 0xF0; /* a 0 nibble after an odd last pixel (vm_host.panel_row) */
+				}
+			}
+			if ((x.flags & VM_VX_SPRITE) && x.sx != -32768 && (int32_t)r >= x.sy && (int32_t)r < x.sy + 16) {
+				int64_t p0 = ox + sc * x.sx, p1 = p0 + sc * 16;
+
+				for (int64_t px = p0 > a ? p0 : a; px < (p1 < b ? p1 : b); px++) {
+					int lvl = vm_videox_sprite_at(vm->arena, &x, (int32_t)((px - ox) / sc), (int32_t)r);
+					int64_t i = px - a;
+
+					if (lvl >= 0) {
+						vm->row[i / 2] = (uint8_t)(i & 1 ? (vm->row[i / 2] & 0xF0) | lvl : (vm->row[i / 2] & 0x0F) | lvl << 4);
+					}
+				}
+			}
+			indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+			(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+		}
+	}
+	if (state == 1) {
+		h->panel_end(h->ctx);
+		vm->stats.draws++;
+	}
+	if (h->boost) {
+		h->boost(h->ctx, 0);
+	}
+	return 0;
+}
+
+/* VIDEOT frame, w, h, x, y, src, n, state (§3.9): each band is drawn as soon as it is decoded (its 16 panel rows),
+ * so the panel's transfers run while the next band decodes; one latch at the end */
+struct videot_out {
+	struct vm *vm;
+	const uint32_t *v;
+	int64_t ox, oy, bx0, by0, bx1, by1;
+	int state; /* 0 nothing drawn yet, 1 drawing, -1 off the panel or the panel failed */
+};
+
+static void videot_band(void *c, uint32_t band, uint32_t x0, uint32_t x1)
+{
+	struct videot_out *o = (struct videot_out *)c;
+	struct vm *vm = o->vm;
+	const struct vm_host *h = vm->host;
+
+	h->now(h->ctx);
+	for (uint32_t r = band * 8; r < band * 8 + 8 && x0 < x1 && o->state >= 0; r++) {
+		for (uint32_t k = 0; k < 2 && o->state >= 0; k++) {
+			int64_t y = o->oy + 2 * (int64_t)r + k, a = o->ox + 2 * (int64_t)x0, b = o->ox + 2 * (int64_t)x1, off, sx0,
+				sx1;
+
+			if (y < 0 || y >= VM_PANEL_H) {
+				continue;
+			}
+			a = a < 0 ? 0 : a;
+			b = b > VM_PANEL_W ? VM_PANEL_W : b;
+			if (a >= b) {
+				continue;
+			}
+			if (o->state == 0) {
+				o->state = h->panel_begin(h->ctx, (int32_t)o->bx0, (int32_t)o->by0, (int32_t)(o->bx1 - o->bx0),
+							  (int32_t)(o->by1 - o->by0)) == 0 ? 1 : -1;
+				if (o->state < 0) {
+					break;
+				}
+			}
+			/* a panel pixel at an odd offset from ox is the right half of its frame pixel */
+			off = a - o->ox;
+			sx0 = off / 2;
+			sx1 = (b - o->ox + 1) / 2;
+			vm_videot_row(vm->arena, o->v, r, k, (uint32_t)sx0, (uint32_t)sx1, vm->row2);
+			if (off & 1) {
+				for (int64_t i = 0; i < sx1 - sx0; i++) {
+					vm->row[i] = (uint8_t)(vm->row2[i] << 4 | vm->row2[i + 1] >> 4);
+				}
+			} else {
+				memcpy(vm->row, vm->row2, (size_t)(sx1 - sx0));
+			}
+			if ((b - a) & 1) {
+				vm->row[(b - a) / 2] &= 0xF0; /* a 0 nibble after an odd last pixel (vm_host.panel_row) */
+			}
+			indicator(vm, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+			(h->panel_span ? h->panel_span : h->panel_row)(h->ctx, (int32_t)a, (int32_t)y, (int32_t)(b - a), vm->row);
+		}
+	}
+}
+
+static int videot(struct vm *vm, const uint32_t *v, uint32_t *detail)
+{
+	const struct vm_host *h = vm->host;
+	struct videot_out o;
+	int err = vm_videot_check(vm->arena, v, detail);
+
+	if (err) {
+		return err;
+	}
+	if (vm->safe) {
+		return VM_E_SAFE;
+	}
+	o.vm = vm;
+	o.v = v;
+	o.ox = s32(v[3]);
+	o.oy = s32(v[4]);
+	o.bx0 = o.ox < 0 ? 0 : o.ox;
+	o.by0 = o.oy < 0 ? 0 : o.oy;
+	o.bx1 = o.ox + 2 * (int64_t)v[1] > VM_PANEL_W ? VM_PANEL_W : o.ox + 2 * (int64_t)v[1];
+	o.by1 = o.oy + 2 * (int64_t)v[2] > VM_PANEL_H ? VM_PANEL_H : o.oy + 2 * (int64_t)v[2];
+	o.state = o.bx0 < o.bx1 && o.by0 < o.by1 ? 0 : -1;
+	if (h->boost) {
+		h->boost(h->ctx, 1);
+	}
+	vm_videot_decode(vm->arena, v, videot_band, &o);
+	if (o.state == 1) {
+		h->panel_end(h->ctx);
+		vm->stats.draws++;
+	}
+	if (h->boost) {
+		h->boost(h->ctx, 0);
 	}
 	return 0;
 }
@@ -956,6 +1226,12 @@ static int exec(struct vm *vm, struct vm_thread *t, int where, const struct ins 
 		break;
 	case OP_VIDEO:
 		err = video(vm, v, detail);
+		break;
+	case OP_VIDEOX:
+		err = videox(vm, v, detail);
+		break;
+	case OP_VIDEOT:
+		err = videot(vm, v, detail);
 		break;
 	case OP_ASSET_LOAD:
 		err = asset_load(vm, v, detail);

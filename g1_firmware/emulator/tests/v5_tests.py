@@ -280,7 +280,16 @@ def vectors_body(e, res, n=int(os.environ.get("G1_VECTORS", "40")), seed=int(os.
     cases = load_vectors(path)
     res["cases"] = []
     for case in cases:
-        r = replay(arm, case)
+        try:
+            r = replay(arm, case)
+        except Exception:
+            res["broke_in"] = case["name"]
+            try:   # the arm's own record of why it rebooted, if it did (retained ring: "=== boot ... last fault")
+                arm.hello()
+                res["boot_banners"] = [x for x in arm.read_log().splitlines() if x.startswith("=== boot")][-3:]
+            except Exception as ex:
+                res["boot_banners"] = f"unreadable: {ex!r}"
+            raise
         res["cases"].append(r)
         if r["fails"]:
             arm.log(f"[{arm.name}] vector {case['name']} FAILED: {r['fails'][:3]}")
@@ -376,6 +385,50 @@ def chain_body(name, left):
     except Exception as ex:
         res.update(error=f"{type(ex).__name__}: {ex}", trace=traceback.format_exc()[-1500:], **{"pass": False})
     return finish(e, res)
+
+
+def update_from_body(name, left):
+    """The arms' own path: G1_FROM (the image they run) -> SMP G1_VERSION -> HELLO, grid, panel read-back -> SMP
+    G1_NEXT -> HELLO. Proves the new image installs over the arms' one and can itself be updated (never stuck)."""
+    role = "L" if left else "R"
+    res = {"test": name, "role": role}
+    start = image(FROM)
+    e = emu(name + "-a", start, (common.LEFT_ARM if left else "") + SEED + common.CASE_SETUP)
+    try:
+        arm = e.arm
+        arm.setup()
+        h = arm.hello()
+        check_hello(h, FROM, role)
+        res["images_from"] = g.smp_images(arm.smp)
+        e = install(e, CUR, res, "cur", start, left)
+        arm = e.arm
+        h = arm.hello()
+        res["hello_cur"] = {k: h[k] for k in ("proto", "version", "role", "panel_ok", "safe_level", "epoch")}
+        check_hello(h, VER, role)
+        res["images_cur"] = g.smp_images(arm.smp)
+        assert res["images_cur"][0]["version"] == VER, res["images_cur"]
+        fr = g.grid_frame(arm, "LEFT" if left else "RIGHT")
+        idx = arm.draw(fr, g.PANEL_W // 2, 0, 0, g.PANEL_W, g.PANEL_H)
+        res["grid_draw_cur"] = arm.wait_draw(idx)
+        res["grid_read_cur"] = arm.panel_read()
+        assert res["grid_read_cur"]["match"], res["grid_read_cur"]
+        e = install(e, CUR_NEXT, res, "next", start, left)
+        arm = e.arm
+        h = arm.hello()
+        res["hello_next"] = {k: h[k] for k in ("proto", "version", "role", "panel_ok", "safe_level", "epoch")}
+        check_hello(h, NEXT, role)
+        res["pass"] = True
+    except Exception as ex:
+        res.update(error=f"{type(ex).__name__}: {ex}", trace=traceback.format_exc()[-1500:], **{"pass": False})
+    return finish(e, res)
+
+
+def test_update_from(name):
+    return update_from_body(name, True)
+
+
+def test_update_from_right(name):
+    return update_from_body(name, False)
 
 
 def test_chain(name):
@@ -2925,12 +2978,123 @@ def video_body(e, res):
     assert out["same_boot"] and status and all(x == 0 for x in status), out
     assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
 
+def videox_body(e, res):
+    """VIDEOX (VM.md §3.8, 0.5.62+): 16 greys as 4 planes with two row moves, five 640 x 480 records back to back
+    (tools/draw_bench.py): the arm stays up, VM_STATUS is answered while they run, and the panel and the arena end as
+    the mirror's (the mirror is the same VM core)."""
+    import draw_bench
+    arm = e.arm
+    out = res.setdefault("videox", {})
+    recs = draw_bench.videox_records(e.run)
+    out["record_bytes"] = [len(r) for r in recs]
+    boots, epoch = arm.info["boot_count"], arm.epoch
+    last = draw_bench.videox_send(arm, recs)
+    status = []
+    arm.run_until(lambda: draw_bench.VIDEOX_MARK in arm.fences, 60, "the first VIDEOX")
+    while last not in arm.fences and len(status) < 400:
+        status.append(arm.ctrl("VM_STATUS", timeout=5.0, tries=1)["status"])
+    arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOX")
+    out["videox_ms"] = draw_bench.videox_ms(arm, len(recs))
+    out["vm_status_answered"] = len(status)
+    h = arm.hello()
+    out["same_boot"] = h["boot_count"] == boots and arm.epoch == epoch
+    out["panel"] = arm.panel_read(0, 480)
+    out["arena"] = arm.arena_crc()
+    assert out["same_boot"] and status and all(x == 0 for x in status), out
+    assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
+
+
+def videot_body(e, res):
+    """VIDEOT (VM.md §3.9, 0.5.68+): tools/draw_bench.py --videot's nine 320 x 240 records (drawn 640 x 480) back to
+    back, the last 4000 random bytes at q 1: the arm stays up, VM_STATUS is answered while they run, no VM error, and
+    the panel and the arena end as the mirror's (the mirror is the same VM core)."""
+    import draw_bench
+    arm = e.arm
+    out = res.setdefault("videot", {})
+    recs = draw_bench.videot_records(e.run)
+    out["record_bytes"] = [len(r) for r in recs]
+    boots, epoch = arm.info["boot_count"], arm.epoch
+    last = draw_bench.videot_send(arm, recs)
+    status = []
+    arm.run_until(lambda: draw_bench.VIDEOT_MARK in arm.fences, 60, "the first VIDEOT")
+    while last not in arm.fences and len(status) < 400:
+        status.append(arm.ctrl("VM_STATUS", timeout=5.0, tries=1)["status"])
+    arm.run_until(lambda: last in arm.fences, 120, "the last VIDEOT")
+    arm.wait_idle(10)
+    out["videot_ms"] = draw_bench.marks_ms(arm, draw_bench.VIDEOT_MARK, len(recs))
+    out["vm_status_answered"] = len(status)
+    h = arm.hello()
+    out["same_boot"] = h["boot_count"] == boots and arm.epoch == epoch
+    out["panel"] = arm.panel_read(0, 480)
+    out["arena"] = arm.arena_crc()
+    assert out["same_boot"] and status and all(x == 0 for x in status), out
+    assert out["panel"]["match"] and out["arena"]["match"] and not arm.errors and not arm.halts, out
+
+
 def test_panel_read(name):
     return run(name, CUR_MIC, panel_read_body)
 
 
 def test_video(name):
     return run(name, CUR_MIC, video_body)
+
+def test_videox(name):
+    return run(name, CUR_MIC, videox_body)
+
+def test_videot(name):
+    return run(name, CUR_MIC, videot_body)
+
+
+def charger_body(e, res):
+    """Charger recovery (0.5.69, DEVELOPMENT.md "0.5.69"): with VBUS and the battery at 3.9 V, a latched charger error is
+    released about 20 s later (counted, its registers kept); constant current without current flowing for 60 s
+    restarts the charger; an error latched while the battery is not detected is released as well; battery replies
+    while powered (VRECT 5.74 V) but not charging no longer carry the 0x80
+    that makes the case reboot, within its 3 minutes."""
+    arm = e.arm
+    out = res.setdefault("charger", {})
+    arm.tr.set_model(NPM, "VbusConnected", "true")
+    arm.tr.set_model(NPM, "BatteryVoltageMilliVolts", "3900")
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "-30")
+    arm.wait(3)
+    c0 = arm.case_stats()
+    common.model_call(arm, NPM, "InjectChargerErrorReason", "32")
+    arm.wait(5)
+    mid = arm.case_stats()
+    arm.wait(20)
+    c1 = arm.case_stats()
+    out["release"] = {k: [c0.get(k), mid.get(k), c1.get(k)] for k in ("charge_status", "charge_error", "charger_releases",
+                                                                     "charger_restarts", "park")}
+    assert mid["charge_error"] == 32 and mid["charger_releases"] == c0["charger_releases"], out
+    assert c1["charger_releases"] == c0["charger_releases"] + 1 and c1["charge_error"] == 0, out
+    assert c1["park"]["error"] == 32 and c1["charge_status"] & 0x0C and c1["park_age_ms"] < 10000, out
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "0")
+    arm.wait(66)
+    c2 = arm.case_stats()
+    out["noflow"] = {"restarts": [c1["charger_restarts"], c2["charger_restarts"]], "park": c2["park"]}
+    assert c2["charger_restarts"] == c1["charger_restarts"] + 1 and c2["park"]["status"] & 0x0C, out
+    # the left arm's case: an error latched while the battery is not (always) detected is released too
+    arm.tr.set_model(NPM, "BatteryDetected", "false")
+    common.model_call(arm, NPM, "InjectChargerErrorReason", "64")
+    arm.wait(25)
+    c3 = arm.case_stats()
+    arm.tr.set_model(NPM, "BatteryDetected", "true")
+    out["undetected"] = {"releases": [c2["charger_releases"], c3["charger_releases"]], "error": c3["charge_error"],
+                         "park": c3["park"]}
+    assert c3["charger_releases"] == c2["charger_releases"] + 1 and c3["charge_error"] == 0, out
+    assert c3["park"]["error"] == 64 and not c3["park"]["status"] & 0x01, out
+    arm.wait(2)
+    common.case_request(arm, "130001006407", wait=2.0)   # the emulator loses the first GPO pulse after a boot
+    replies = [common.case_request(arm, "130001006407") for _ in range(8)]
+    out["replies"] = [r.hex() for r in replies]
+    assert all(len(r) == 11 and r[4] == 0 and r[9] != 0x80 for r in replies), out
+    out["resets_asked"] = arm.case_stats()["resets_asked"]
+    assert out["resets_asked"] == 0, out
+    arm.tr.set_model(NPM, "BatteryCurrentMilliAmps", "-30")
+
+
+def test_charger(name):
+    return run(name, CUR_MIC, charger_body, common.CASE_SETUP)
 
 def test_peer(name):
     return run(name, CUR_MIC, peer_body)
@@ -3317,7 +3481,7 @@ def test_assets(name):
     return run(name, CUR, assets_logged)
 
 
-TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "chain_right": test_chain_right,
+TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "update_from": test_update_from, "update_from_right": test_update_from_right, "chain_right": test_chain_right,
          "power": test_power, "unattended": test_unattended, "examples": test_examples, "vm": test_vm, "mic": test_mic,
          "mic_capture": test_mic_capture, "mic_lease": test_mic_lease, "mic_popup": test_mic_popup, "imu_base": test_imu_base, "imu_base_left": test_imu_base_left,
          "mic_tool": test_mic_tool, "mic_tool_draw": test_mic_tool_draw, "draw_bench": test_draw_bench, "panel_standby": test_panel_standby, "imu_base_default_left": test_imu_base_default_left,
@@ -3326,7 +3490,7 @@ TESTS = {"smoke": test_smoke, "vectors": test_vectors, "chain": test_chain, "cha
          "bad_packets": test_bad_packets, "no_panel": test_no_panel, "starve": test_starve,
          "sessions": test_sessions, "imu": test_imu, "diag": test_diag, "pair_link": test_pair_link,
          "peer": test_peer, "pair_stream": test_pair_stream,
-         "panel_read": test_panel_read, "video": test_video, "panel_guard": test_panel_guard,
+         "panel_read": test_panel_read, "video": test_video, "videox": test_videox, "videot": test_videot, "charger": test_charger, "panel_guard": test_panel_guard,
          "assets": test_assets}
 for _t in ("crash", "hang", "thread_hang", "safe_mode", "lost_packet", "reset_mid_frame", "security", "pmic_watchdog",
            "i2c_errors", "no_pmic"):

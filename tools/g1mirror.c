@@ -247,7 +247,7 @@ struct mirror *mirror_new(int arm, int has_panel)
 	struct mirror *m = calloc(1, sizeof(*m));
 	struct vm_host h = {m, m_now, m_packet, m_packet_done, m_poll, m_prop, m_event, m_panel_begin,
 			    m_panel_row, m_panel_end, m_panel_power, m_brightness, m_imu_rate, m_prop_write,
-			    NULL, m_asset_read};
+			    NULL, m_asset_read, NULL};
 
 	if (!m) {
 		return NULL;
