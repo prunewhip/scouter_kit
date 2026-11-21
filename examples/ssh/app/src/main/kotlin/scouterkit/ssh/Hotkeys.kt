@@ -447,8 +447,9 @@ object Hotkeys {
             }
             return true
         }
-        // Alt+9: Termux on the phone (the phone's terminal), the keyboard typing into it; in Termux, back to the app before.
-        if (e.keyCode == KeyEvent.KEYCODE_9) {
+        // Alt+9 or Alt+F8: Termux on the phone (the phone's terminal), the keyboard typing into it; in Termux, back to the
+        // app before.
+        if (e.keyCode == KeyEvent.KEYCODE_9 || e.keyCode == KeyEvent.KEYCODE_F8) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0) Desktop.terminal(context)
             return true
         }

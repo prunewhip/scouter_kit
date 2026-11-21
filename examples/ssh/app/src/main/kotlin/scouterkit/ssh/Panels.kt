@@ -31,7 +31,7 @@ object Panels {
         "Screens" to listOf(
             "Alt+arrows" to "move between screens",
             "Alt+1..8" to "jump to a screen",
-            "Alt+9" to "Termux on the phone / back",
+            "Alt+9, Alt+F8" to "Termux on the phone / back",
             "Alt+Q" to "close the screen shown",
         ),
         "Display" to listOf(

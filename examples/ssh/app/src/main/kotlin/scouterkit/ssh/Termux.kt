@@ -95,17 +95,42 @@ object Termux {
         return run(c, script, "setup")
     }
 
-    // Before a session: sshd up (started if not), waits for its port up to 25 s (the Ubuntu proot takes a while
-    // after the phone starts). Off the main thread.
+    // Before a session: sshd up. Started through RUN_COMMAND where this Termux allows it; else (the Google Play
+    // build cannot) Termux is brought to the phone's screen: a new Termux session starts the server by itself (its
+    // ~/.bashrc runs `ssh` in the background when 127.0.0.1:8022 is closed), and once it answers, the app that was
+    // in front comes back. Waits up to 30 s (the Ubuntu proot takes a while after the phone starts). Off the main thread.
     fun ensureSshd(c: Context): String? {
         if (listening()) return null
-        run(c, START)?.let { return it }
-        val end = SystemClock.elapsedRealtime() + 25000
-        while (SystemClock.elapsedRealtime() < end) {
-            Thread.sleep(300)
-            if (listening()) return null
+        if (run(c, START) == null && waitPort(10000)) return null
+        val before = VoxKeys.shown.takeIf { it.isNotEmpty() && it != PACKAGE }
+        if (!bringUp(c)) return "the SSH server on 127.0.0.1:8022 is not running: open Termux and type ssh"
+        Log.i(ScouterService.TAG, "termux: brought up to start sshd")
+        val up = waitPort(30000)
+        if (VoxKeys.shown == PACKAGE) { // still Termux in front: back to where the phone was
+            val back = before?.let { c.packageManager.getLaunchIntentForPackage(it) }
+            val went = back != null && runCatching { launcher(c).startActivity(back.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
+            if (!went) VoxKeys.global(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
         }
-        return "the SSH server on 127.0.0.1:8022 is not running: start it (in Ubuntu: /usr/sbin/sshd)"
+        return if (up) null else "the SSH server on 127.0.0.1:8022 did not start: in Termux, type ssh"
+    }
+
+    private fun waitPort(ms: Long): Boolean {
+        val end = SystemClock.elapsedRealtime() + ms
+        while (SystemClock.elapsedRealtime() < end) {
+            if (listening()) return true
+            Thread.sleep(300)
+        }
+        return false
+    }
+
+    // Android lets an app start another app's screen from the background only from a bound accessibility service
+    // (VoxKeys, the hotkeys): through it when it is on.
+    private fun launcher(c: Context): Context = VoxKeys.service() ?: c.applicationContext
+
+    private fun bringUp(c: Context): Boolean {
+        val intent = c.packageManager.getLaunchIntentForPackage(PACKAGE) ?: return false
+        return runCatching { launcher(c).startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { Log.w(ScouterService.TAG, "termux: could not bring it up", it) }.isSuccess
     }
 
     fun listening() = runCatching { Socket().use { it.connect(InetSocketAddress(HOST, PORT), 300) } }.isSuccess
