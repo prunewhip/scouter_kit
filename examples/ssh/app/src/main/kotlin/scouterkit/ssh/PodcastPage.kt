@@ -60,6 +60,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     private var dragging = false
     private var voiceText: TextView? = null
     private var voiceBar: Progress? = null
+    private var voiceFetching = false // the card showed a download going: shown again when it ends
     private var writeBar: Progress? = null
     private var rowBar: Progress? = null // the list's row of the episode being made
     private var rowText: TextView? = null
@@ -102,7 +103,9 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
             receive(null)
             pullNow()
             // The speed test once (about a minute), the first time the voice is here and nothing is being made.
-            if (KokoroModel.ready(a) && !KokoroModel.benched(a) && Podcasts.job?.finished != false && KokoroModel.bench == null) {
+            KokoroModel.upgrade(a) // the faster full model, on Wi-Fi, for a phone with the old int8 one
+            if (KokoroModel.ready(a) && !KokoroModel.upgrading(a) && !KokoroModel.benched(a) && Podcasts.job?.finished != false &&
+                KokoroModel.bench == null) {
                 KokoroModel.startBench(a)
                 if (!open) showList()
             }
@@ -358,15 +361,20 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
     // The voice: a download when it is not on the phone yet.
     private fun voiceCard(): View? = with(a) {
         if (!VoiceModel.available) return card("Voice").apply { addView(text("This build has no speech engine.", 14f, Ui.MUTED)) }
-        if (KokoroModel.ready(this)) return null
-        val c = card("The voice", "Kokoro: ${KokoroModel.bytes / 1_000_000} MB from Hugging Face, once, each file checked. " +
+        val upgrade = KokoroModel.upgrading(this)
+        voiceFetching = false
+        if (KokoroModel.ready(this) && !upgrade) return null
+        val c = if (upgrade) card("The faster voice", "The full Kokoro model reads about 3x faster than the one you have " +
+            "(same voices). It downloads by itself on Wi-Fi; until then episodes use the one you have.")
+        else card("The voice", "Kokoro: ${KokoroModel.bytes / 1_000_000} MB from Hugging Face, once, each file checked. " +
             "Wi-Fi is best. It goes on where it stopped if interrupted. Car mode reads with it too.")
         val label = text("", 13.5f, Ui.MUTED).also { voiceText = it }
         if (KokoroModel.progress >= 0) {
+            voiceFetching = true
             c.addView(Progress(this).also { voiceBar = it }, lp().apply { topMargin = dp(6); bottomMargin = dp(8) })
             c.addView(label)
         } else {
-            c.addView(button("Download the voice", 0) {
+            c.addView(button(if (upgrade) "Download it now" else "Download the voice", 0) {
                 if (KokoroModel.progress >= 0) return@button
                 KokoroModel.progress = 0
                 Thread {
@@ -383,6 +391,7 @@ class PodcastPage(private val a: Activity, private val body: LinearLayout, priva
 
     private fun updateVoice() {
         val t = voiceText ?: return
+        if (voiceFetching && KokoroModel.progress < 0) { voiceFetching = false; main.post { refresh() }; return }
         t.text = if (KokoroModel.progress >= 0) "Downloading…  ${KokoroModel.progress / 1_000_000} of ${KokoroModel.bytes / 1_000_000} MB" else ""
         voiceBar?.fraction = if (KokoroModel.bytes > 0) (KokoroModel.progress.toFloat() / KokoroModel.bytes).coerceIn(0f, 1f) else 0f
     }

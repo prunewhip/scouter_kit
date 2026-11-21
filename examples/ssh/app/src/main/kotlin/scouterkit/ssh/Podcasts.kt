@@ -436,6 +436,8 @@ object Podcasts {
             } catch (e: Throwable) {
                 Log.w(ScouterService.TAG, "podcast: ${e.message}")
                 j.error = e.message ?: "It stopped"
+            } finally {
+                KokoroModel.releaseSoon()
             }
         }, "podcast-make").start()
         return j
@@ -568,6 +570,7 @@ object Podcasts {
             t.play()
             SystemClock.sleep(samples.size * 1000L / hz + 300)
             t.release()
+            KokoroModel.releaseSoon()
         }, "podcast-hear").start()
     }
 

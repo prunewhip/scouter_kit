@@ -119,11 +119,16 @@ object CarSounds {
 // 150 MB) like the speech model, each file checked by its SHA-256. English only: the US lexicon and the espeak-ng
 // data English needs.
 object KokoroModel {
+    // The full-precision model: on a phone's CPU about 3x faster than the int8 one earlier versions used (int8's
+    // quantized ops are slow on ARM; measured 0.39 vs 1.04-1.34 real-time factor). The other files are the same.
     private const val HF =
-        "https://huggingface.co/csukuangfj/kokoro-int8-multi-lang-v1_0/resolve/57adb37fc0e8d4bd430cfc1b8f8c2294945b9af2"
+        "https://huggingface.co/csukuangfj/kokoro-multi-lang-v1_0/resolve/f7b96bb6bef5c5da4d3aa4f4e0498fbbf62dc78b"
+    private const val MODEL = "model.onnx"
+    private const val OLD_MODEL = "model.int8.onnx" // earlier versions': used until the full one is here, then deleted
+    private const val OLD_SIZE = 114202993L
     private fun part(name: String, size: Long, sha: String) = VoiceModel.Part(name, "$HF/$name", size, sha)
     val parts = listOf(
-        part("model.int8.onnx", 114202993, "75635ea3b85a32d00094dcdd61a258aba87c160f7c264c304a7b3ae9d734195e"),
+        part(MODEL, 325560556, "b40f62b166ac8164b0627ef48a0b358eda0985e272fb03ef5252e7206305da11"),
         part("voices.bin", 28200960, "1c5a5b983d3d50d8586d437a51f3faa2da7919ce76a013c081e65671a3447c29"),
         part("tokens.txt", 687, "6ebb6bb288f20f3ae8d004d3c2ca27697da27c037d75e81a60e2a6a663f95425"),
         part("lexicon-us-en.txt", 5956885, "7daaab53a181be9885b853a8582bf1838186317e5dadacbcef9c426d6fa0da14"),
@@ -145,13 +150,38 @@ object KokoroModel {
     @Volatile var progress = -1L
     @Volatile var problem: String? = null
 
-    fun dir(context: Context) = File(context.filesDir, "voice/kokoro-int8-multi-lang-v1_0")
-    fun ready(context: Context) = parts.all { File(dir(context), it.name).length() == it.size }
+    // The folder (the int8 one earlier versions had is moved here: its other files are kept, not downloaded again).
+    fun dir(context: Context): File {
+        val d = File(context.filesDir, "voice/kokoro-multi-lang-v1_0")
+        if (!d.exists()) File(context.filesDir, "voice/kokoro-int8-multi-lang-v1_0").takeIf { it.isDirectory }?.renameTo(d)
+        return d
+    }
+    private fun full(context: Context) = parts.all { File(dir(context), it.name).length() == it.size }
+    // Only the old int8 model here: it reads with that until the full one is downloaded (upgrade).
+    fun upgrading(context: Context) = !full(context) && File(dir(context), OLD_MODEL).length() == OLD_SIZE &&
+        parts.all { it.name == MODEL || File(dir(context), it.name).length() == it.size }
+    fun ready(context: Context) = full(context) || upgrading(context)
+
+    // The full model fetched in the background, on Wi-Fi only (or when asked), for a phone that has the int8 one.
+    fun upgrade(context: Context, evenMetered: Boolean = false) {
+        val app = context.applicationContext
+        if (progress >= 0 || !upgrading(app)) return
+        val cm = app.getSystemService(android.net.ConnectivityManager::class.java)
+        if (!evenMetered && (cm == null || cm.isActiveNetworkMetered)) return
+        progress = 0
+        Thread({ download(app) }, "kokoro-upgrade").start()
+    }
 
     fun download(context: Context): String? {
         problem = null
         try {
             VoiceModel.fetch(dir(context), parts) { progress = it }
+            if (File(dir(context), OLD_MODEL).exists()) {
+                unload() // the next line loads the full model (not mid-line: under the same lock as speak)
+                File(dir(context), OLD_MODEL).delete()
+                // The speed test again: the engines' speeds were the int8 model's.
+                prefs(context).edit().remove("benched").remove("kokoro_engine").remove("bench_lines").apply()
+            }
             return null
         } catch (e: Exception) {
             problem = e.message ?: "the download stopped"
@@ -192,7 +222,7 @@ object KokoroModel {
     private fun create(context: Context, e: Engine): OfflineTts {
         val d = dir(context)
         return OfflineTts(null, OfflineTtsConfig(model = OfflineTtsModelConfig(kokoro = OfflineTtsKokoroModelConfig(
-            model = File(d, "model.int8.onnx").path, voices = File(d, "voices.bin").path,
+            model = File(d, if (full(context)) MODEL else OLD_MODEL).path, voices = File(d, "voices.bin").path,
             tokens = File(d, "tokens.txt").path, dataDir = File(d, "espeak-ng-data").path,
             lexicon = File(d, "lexicon-us-en.txt").path), numThreads = e.threads, provider = e.provider), maxNumSentences = 1))
     }
@@ -312,6 +342,21 @@ object KokoroModel {
         tts = null
         using = null
     }
+
+    // Car mode keeps the voice loaded while it is on; otherwise it is let go of (its ~400 MB of memory) a minute
+    // and a half after an episode or a voice sample, unless something used it since.
+    @Volatile var carHolds = false
+    private val idle = android.os.Handler(android.os.Looper.getMainLooper())
+    fun releaseSoon() {
+        idle.removeCallbacksAndMessages(null)
+        idle.postDelayed({
+            Thread {
+                synchronized(this) {
+                    if (!carHolds && Podcasts.job?.finished != false && bench?.finished != false) unload()
+                }
+            }.start()
+        }, 90_000)
+    }
 }
 
 // The answer aloud, through the car: Kokoro's voice (Settings.carSpeaker) once downloaded, made sentence by
@@ -355,7 +400,10 @@ class CarSpeech(private val context: Context, private val onDone: (String) -> Un
 
     // Kokoro loaded ahead (Car mode coming on), so the first answer starts at once.
     fun preload() {
-        if (useKokoro()) Thread { KokoroModel.load(context) }.start()
+        if (useKokoro()) {
+            KokoroModel.carHolds = true
+            Thread { KokoroModel.load(context) }.start()
+        }
     }
 
     private fun useKokoro() = settings.carVoice != "android" && KokoroModel.ready(context)
@@ -1153,6 +1201,7 @@ class CarMode(private val context: Context, private val host: CarHost) {
         speech.release()
         buttons.release()
         dropFocus()
+        KokoroModel.carHolds = false
         Thread { KokoroModel.unload() }.start()
     }
 
