@@ -13,20 +13,22 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.accessibility.AccessibilityEvent
 
-// A keyboard's shortcuts (a Bluetooth keyboard paired with the phone): Alt with an arrow moves around the
-// sources as a grid (left and right: this phone, then each other server; up and down: terminal, screen),
+// A keyboard's shortcuts (a Bluetooth keyboard paired with the phone): Alt with an arrow swipes the phone's screen
+// that way (on the lock screen Alt+Up brings up the PIN, and the keys type it, then Enter); Alt+Shift with an arrow
+// moves around the sources as a grid (left and right: this phone, then each other server; up and down: terminal, screen),
 // Alt+1 ... Alt+8 picks Home's source of that number, Alt+9 Termux on the phone (again: back), Alt+0 heads-up mode (look-up only), Alt+L the display off
 // or on, Alt+V voice mode (talking to the terminal), Alt+Space
 // listens for a voice command, Alt+M the pointer (then arrows, Enter, Escape), Alt+T / [ / ] / W the tabs,
 // Alt+A the help on the glasses (every hotkey: Panels.GROUPS; also while Alt is held by itself), Alt+S the quick
 // settings, Alt+Z (as Alt+0) always on / look-up only, Alt+= / - the brightness, Alt+P / , / . the music, Alt+X
-// the keyboard off / on, Alt+C the phone's screen (shared first, Android's question answered by VoxKeys). MainActivity takes them while Vox is in front; VoxKeys (an
+// the keyboard off / on, the right Command key by itself the phone's Home, Alt+C the phone's screen (shared first, Android's question answered by VoxKeys). MainActivity takes them while Vox is in front; VoxKeys (an
 // accessibility service the user turns on) everywhere.
 object Hotkeys {
     // The event was Vox's: a shortcut, or a key typed into the glasses' terminal (both its press and its release are
     // ours then).
     fun handle(context: Context, e: KeyEvent): Boolean {
         if (keyboardSwitch(context, e)) return true
+        if (pinEntry(context, e)) return false
         if (shortcut(context, e)) return true
         if (toLaptop(context, e)) return RemoteInput.key(e)
         if (!toGlasses(context, e)) return false
@@ -67,6 +69,53 @@ object Hotkeys {
         if (!Keyboard.physical(e) || Session.keysToPhone || !ScouterService.running) return false
         if (Session.glasses != "ready" || Session.blank || Session.showing != Settings.TERMINAL || Session.tunes) return false
         return Settings(context).keysToGlasses
+    }
+
+    // The lock screen's PIN, after Alt+Up swiped it up: keys without Alt go to it (not the glasses' terminal or a
+    // panel) until the phone unlocks, or for PIN_MS.
+    private const val PIN_MS = 30_000L
+    @Volatile private var pinUntil = 0L
+
+    private fun locked(context: Context): Boolean =
+        context.getSystemService(android.app.KeyguardManager::class.java)?.isKeyguardLocked == true
+
+    private fun pinEntry(context: Context, e: KeyEvent): Boolean {
+        if (pinUntil == 0L || e.isAltPressed || e.isCtrlPressed || e.isMetaPressed || KeyEvent.isModifierKey(e.keyCode)) return false
+        if (android.os.SystemClock.uptimeMillis() > pinUntil || !locked(context)) {
+            pinUntil = 0L
+            return false
+        }
+        return true
+    }
+
+    // Alt+arrows: one swipe at a time; held, the next starts as one ends (SWIPE_STUCK_MS: a lost callback).
+    private const val SWIPE_STUCK_MS = 1_500L
+    @Volatile private var swipingSince = 0L
+
+    private fun swipe(context: Context, dir: String) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (swipingSince != 0L && now - swipingSince < SWIPE_STUCK_MS) return
+        if (dir == "up" && locked(context)) pinUntil = now + PIN_MS
+        swipingSince = now
+        if (!VoxKeys.swipe(dir) { swipingSince = 0L }) swipingSince = 0L
+    }
+
+    // The right Command key (Meta) pressed and let go by itself: the phone's Home. Taken whole, so Android's own
+    // Meta-alone action doesn't run too; with another key it's a plain modifier still (the key carries it).
+    @Volatile private var homeAlone = false
+
+    private fun homeKey(e: KeyEvent): Boolean {
+        if (e.keyCode != KeyEvent.KEYCODE_META_RIGHT) {
+            if (e.action == KeyEvent.ACTION_DOWN) homeAlone = false
+            return false
+        }
+        if (e.action == KeyEvent.ACTION_DOWN) {
+            if (e.repeatCount == 0) homeAlone = true
+        } else if (e.action == KeyEvent.ACTION_UP && homeAlone) {
+            homeAlone = false
+            VoxKeys.global(AccessibilityService.GLOBAL_ACTION_HOME)
+        }
+        return true
     }
 
     // Alt held by itself: the hotkeys pop up on the glasses (after ALT_HOLD_MS, so a quick Alt+key doesn't flash
@@ -132,6 +181,7 @@ object Hotkeys {
             return true
         }
         altHold(context, e)
+        if (homeKey(e)) return true
         // A quick reply being written on the dashboard: every key is its (Alt+Space / Alt+V still listen).
         // (Alt+0, heads-up mode, works everywhere: never typed into anything.)
         if (Session.replyKey != null && !(e.isAltPressed && (e.keyCode == KeyEvent.KEYCODE_SPACE || e.keyCode == KeyEvent.KEYCODE_V ||
@@ -414,7 +464,7 @@ object Hotkeys {
             return true
         }
         // (1.02: Ctrl+Left no longer leaves a screen for the terminal: Ctrl+arrows, Ctrl+A, C, V, X, Z ... are the apps'
-        // own everywhere. Alt+Up goes to the terminal.)
+        // own everywhere. 1.30: Alt+arrows swipe the phone; Alt+Shift+Up goes to the terminal.)
         if (!e.isAltPressed || e.isCtrlPressed || e.isMetaPressed) return false
         // The phone's screen on the glasses: Alt+Backspace is Back, Alt+H Home, Alt+R Recents, Alt+N the
         // notifications (VoxKeys).
@@ -536,6 +586,19 @@ object Hotkeys {
         if (e.keyCode == KeyEvent.KEYCODE_L && e.isShiftPressed) {
             if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0)
                 ScouterService.send(context, ScouterService.ACTION_PANEL, "do" to "listentoggle")
+            return true
+        }
+        // Alt+arrows: a swipe on the phone's screen, the way the finger goes (Up: as to unlock, or on down a page;
+        // Left: to the next page or photo). Held, it swipes again. Alt+Shift+arrows walk the sources (below).
+        val way = when (e.keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT -> "left"
+            KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+            KeyEvent.KEYCODE_DPAD_UP -> "up"
+            KeyEvent.KEYCODE_DPAD_DOWN -> "down"
+            else -> null
+        }
+        if (way != null && !e.isShiftPressed) {
+            if (e.action == KeyEvent.ACTION_DOWN) swipe(context, way)
             return true
         }
         val target = when (e.keyCode) {
@@ -841,6 +904,37 @@ class VoxKeys : AccessibilityService() {
             }
             return s.dispatchGesture(g, callback, null)
         }
+
+        // A swipe across the middle of the phone's screen, the way the finger goes: "up" from low to high (the lock
+        // screen's PIN, a page on down), "down", "left" from right to left (the next page or photo), "right". Not
+        // from the very edges, where Android's own back and home gestures are. done (main thread): run or cut.
+        // False: VoxKeys is off.
+        fun swipe(dir: String, done: (() -> Unit)? = null): Boolean {
+            val s = instance ?: return false
+            Finger.drop()
+            val b = s.getSystemService(android.view.WindowManager::class.java).maximumWindowMetrics.bounds
+            val w = b.width().toFloat()
+            val h = b.height().toFloat()
+            val (x0, y0, x1, y1) = when (dir) {
+                "up" -> listOf(w / 2, h * 0.72f, w / 2, h * 0.28f)
+                "down" -> listOf(w / 2, h * 0.28f, w / 2, h * 0.72f)
+                "left" -> listOf(w * 0.82f, h / 2, w * 0.18f, h / 2)
+                else -> listOf(w * 0.18f, h / 2, w * 0.82f, h / 2)
+            }
+            val path = Path().apply {
+                moveTo(x0, y0)
+                lineTo(x1, y1)
+            }
+            val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, SWIPE_MS)).build()
+            val callback = done?.let {
+                object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(d: GestureDescription?) = it()
+                    override fun onCancelled(d: GestureDescription?) = it()
+                }
+            }
+            return s.dispatchGesture(g, callback, null)
+        }
+        private const val SWIPE_MS = 250L // quick, as a finger flicks
 
         // Back, Home, Recents (AccessibilityService.GLOBAL_ACTION_*).
         fun global(action: Int): Boolean = instance?.performGlobalAction(action) ?: false

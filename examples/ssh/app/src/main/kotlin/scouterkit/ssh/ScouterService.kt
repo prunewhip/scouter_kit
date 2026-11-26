@@ -1099,7 +1099,7 @@ class ScouterService : Service() {
             Settings.GESTURES.filter { settings.gestureAction(arm, it.first) == Settings.ACTION_NEXT }
                 .map { (if (arm == 0) "left " else "right ") + it.second }
         }.firstOrNull()
-        return listOfNotNull(touch?.let { "Next source: $it" }, "Alt+arrows").joinToString(" · ")
+        return listOfNotNull(touch?.let { "Next source: $it" }, "Alt+Shift+arrows").joinToString(" · ")
     }
 
     // Alt+Q: the source shown closes (a terminal's connection ends, a screen stops) and the glasses go to the next

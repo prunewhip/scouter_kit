@@ -97,7 +97,7 @@ class SettingsActivity : Activity() {
         }
 
         val hot = page.section("Keyboard and trackpad", "set_keys", "keyboard",
-            hint = "A keyboard paired with the phone: Alt+arrows walk the sources, Alt+1…8 picks one, Alt+9 Termux on the phone, Alt+0 heads-up mode.")
+            hint = "A keyboard paired with the phone: Alt+arrows swipe the phone (locked: Alt+Up, the PIN, Enter), the right Command key is Home, Alt+Shift+arrows walk the sources, Alt+1…8 picks one, Alt+9 Termux on the phone, Alt+0 heads-up mode.")
         hot.addToggle(toggle("Alt shortcuts", "Off: Alt with these keys reaches the app in front", settings.hotkeys) {
             settings.hotkeys = it
         })
@@ -126,7 +126,7 @@ class SettingsActivity : Activity() {
         // How to use it all from the keyboard: every hotkey (the same list as Alt+A on the glasses).
         val keys = page.section("Hotkeys", "set_hotkeys", "keyboard",
             hint = "With the keyboard paired, Alt+A shows these on the glasses over whatever is there.")
-        keys.addView(text("Quick start: put the glasses on, put the phone away, Alt+arrows to pick a screen. On the " +
+        keys.addView(text("Quick start: put the glasses on, put the phone away, Alt+Shift+arrows to pick a screen. On the " +
             "phone's screen the trackpad is a mouse (tap: click, two fingers: right click and scroll) and the keys " +
             "type into the app. Alt+S changes what you see, Alt+0 is heads-up mode (look up to see it), Alt+L the display off and on.", 13f, Ui.MUTED)
             .apply { setPadding(0, 0, 0, dp(6)) })

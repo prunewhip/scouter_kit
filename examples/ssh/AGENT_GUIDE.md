@@ -38,7 +38,7 @@ detailed manual; this is the map.
 | Dashboard | Time, date, batteries, notifications, now playing, weather, calendar, timer, NFL game score, Tunes; styles and a layout editor | `Dashboard.kt`, `Widgets.kt`, `Media.kt` |
 | Phone screen | The phone's screen on the glasses with a cursor; the trackpad is a finger at it (tap, long press, drag, two-finger slide both ways with fling) | `PhoneScreen.kt`, `Hotkeys.kt` (VoxKeys), `Finger.kt`, `native/screen.cpp` |
 | Laptop screen | A server's screen over SSH (`vox-screen`); the keyboard and trackpad work it (Python + XTEST sent over SSH, X11 only) | `RemoteScreen.kt`, `RemoteInput.kt`, `go/examples/screen` |
-| Switching | Alt+arrows / Alt+1..9 between sources, with transitions (CRT, data stream, cut) kept fast | `native/fx.cpp`, `Fx.kt`, `ScouterService.choose` |
+| Switching | Alt+Shift+arrows / Alt+1..9 between sources (Alt+arrows swipe the phone: `VoxKeys.swipe`; locked, Alt+Up then the PIN: `Hotkeys.pinEntry`), with transitions (CRT, data stream, cut) kept fast | `native/fx.cpp`, `Fx.kt`, `ScouterService.choose` |
 | Hotkeys | Hold Alt for the list; Alt+Z, A, S, B, Y, X, C, P, U, M, K, T, W, Q... | `Hotkeys.kt`, `Panels.kt` |
 | Voice | Offline voice commands (Parakeet via sherpa-onnx); voice mode (Alt+V) types what is said into the terminal, with a strip at the bottom | `Voice.kt`, `ScouterService.voiceModeSet` |
 | Car mode | In a car (Bluetooth), the Next/Previous/Play keys talk to Claude on your server, the answer is spoken (Kokoro voice or Android TTS), nothing is shown on the glasses | `Car.kt` |
@@ -131,7 +131,7 @@ assembler in C++ (`p.Bge`, `p.Call`...). Mind the arm's compute: anything per fr
 
 ## Feature notes
 
-**Hotkeys** (hold Alt by itself to see them on the glasses): Alt+arrows / 1..9 screens, Alt+0 (or Z) heads-up / always on, Alt+L display off/on,
+**Hotkeys** (hold Alt by itself to see them on the glasses): Alt+arrows swipe the phone, Alt+Shift+arrows / 1..9 screens, Alt+0 (or Z) heads-up / always on, Alt+L display off/on,
 Alt+= / - brightness, Alt+B low battery, Alt+S quick settings, Alt+A help, Alt+P / , / . music,
 Alt+Space voice command, Alt+V voice mode (talk to the terminal), Alt+Y TV remote, Alt+X keyboard off/on, Alt+K keys to phone/glasses, Alt+M pointer, Alt+T / [ / ]
 / W tabs, Alt+C share the phone screen (it taps Android's Start button for you, and retries while the dialog

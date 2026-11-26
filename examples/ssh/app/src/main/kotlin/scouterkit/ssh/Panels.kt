@@ -29,7 +29,7 @@ object Panels {
     // The hotkeys by group: the keys, what they do. The help on the glasses and the app's Hotkeys page.
     val GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "Screens" to listOf(
-            "Alt+arrows" to "move between screens",
+            "Alt+Shift+arrows" to "move between screens",
             "Alt+1..8" to "jump to a screen",
             "Alt+9, Alt+F8" to "Termux on the phone / back",
             "Alt+Q" to "close the screen shown",
@@ -67,6 +67,9 @@ object Panels {
             "Up / Down" to "scroll (Shift: the program's arrows)",
         ),
         "Phone screen" to listOf(
+            "Alt+arrows" to "swipe the phone that way",
+            "Alt+Up, PIN, Enter" to "unlock the phone",
+            "Right Cmd" to "Home",
             "Alt+C" to "share it (taps Start)",
             "trackpad" to "tap, drag, 2-finger slide",
             "Alt+Bksp" to "Back",

@@ -148,7 +148,7 @@ this phone's Ubuntu and Termux, mosh's ports and *Forget its host key*).
   small Python program there that types and points through X11's XTEST (Python 3 and libXtst, already on an
   Ubuntu desktop; X11 only, not Wayland). Keys go with their modifiers as chords (nothing stays held if the glasses
   switch away); the pointer moves at once on the glasses and follows the laptop's own mouse; click, right click,
-  drag, both wheels. Vox's Alt shortcuts stay Vox's (Alt+Up: that server's terminal); Ctrl shortcuts are the
+  drag, both wheels. Vox's Alt shortcuts stay Vox's (Alt+Shift+Up: that server's terminal); Ctrl shortcuts are the
   desktop's own (1.02: Ctrl+Left no longer leaves for the terminal); Alt+K keeps the keys on the phone.
 - **Transitions** (*Transitions*, Terminal tab, *On the glasses*, on by default; `native/fx.hpp`, `Fx.kt`): a switch plays on the
   glasses in about half a second. The old picture goes the moment it is asked for (about 0.15 s), a label says
